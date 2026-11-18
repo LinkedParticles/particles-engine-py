@@ -49,6 +49,7 @@ function hashInputs() {
   };
   for (const root of [
     "src",
+    "../curation-core/src",
     "public",
     "package.json",
     "../../artifacts/graph/cytoscape.min.js",

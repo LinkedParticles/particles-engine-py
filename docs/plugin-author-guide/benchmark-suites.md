@@ -241,7 +241,11 @@ and reports each metric's mean, range and standard deviation. `--fail-on`
 is evaluated against the **mean**, not the worst run. A repeat run costs
 N× the LLM calls: the projected cost always prints first, `--estimate`
 stops there, and a projection above `benchmark.confirm_call_threshold`
-needs `--yes` or an interactive confirmation. Nothing about a suite file
+needs `--yes` or an interactive confirmation. The projection counts input
+and output tokens for the configured extraction model and prices them from
+`llm.price_per_mtok`; when a saved run of the same suite on the same
+extraction model carries its measured usage, that pass's tokens and cost
+print beside it. Nothing about a suite file
 changes for repeat runs; the same suite serves both.
 
 Each run's report is saved as JSON under `benchmark.runs_dir` (unless

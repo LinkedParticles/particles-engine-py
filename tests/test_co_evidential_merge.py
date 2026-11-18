@@ -23,6 +23,18 @@ def test_singleton_returns_input_unchanged() -> None:
     assert merge_co_evidential_confidence([(0.87, "src-a")]) == 0.87
 
 
+def test_singleton_is_returned_bit_for_bit() -> None:
+    """A one-entry group skips the noisy-OR loop, so its value comes back exactly.
+
+    ``1 - (1 - x)`` is not ``x`` in floating point for many inputs, so a merge
+    that sent a singleton through the loop would drift in the last bit. 0.87,
+    above, is not one of those inputs.
+    """
+    for value in (0.001, 0.003, 0.1):
+        assert 1.0 - (1.0 - value) != value, "the input exercises the drift"
+        assert merge_co_evidential_confidence([(value, "src-a")]) == value
+
+
 def test_two_independent_sources_increase_confidence() -> None:
     """Two distinct-source corroborations exceed either alone (noisy-OR property)."""
     merged = merge_co_evidential_confidence([(0.7, "src-a"), (0.7, "src-b")])
@@ -97,6 +109,25 @@ def test_merge_is_insertion_order_independent() -> None:
     to land on a process-dependent member.
     """
     entries = [(0.8, "src-a"), (0.4, "src-a"), (0.6, "src-b"), (0.3, "src-b"), (0.5, "src-c")]
+    merged_values = {
+        merge_co_evidential_confidence(list(perm)) for perm in itertools.permutations(entries)
+    }
+    assert len(merged_values) == 1
+
+
+def test_members_above_one_are_clamped_before_they_merge() -> None:
+    """Each member counts as at most certain, so two of them merge to exactly 1.0."""
+    assert merge_co_evidential_confidence([(1.5, "src-a"), (1.5, "src-b")]) == 1.0
+
+
+def test_tied_confidences_merge_identically_in_any_order() -> None:
+    """Equal confidences are ordered by source key, so the result is bit-for-bit stable.
+
+    Without that tiebreak a stable sort keeps the input order among ties, the
+    1/k-discounted factors multiply in a different order, and the product
+    differs in the last bit.
+    """
+    entries = [(0.3, "src-a"), (0.3, "src-c"), (0.3, "src-c")]
     merged_values = {
         merge_co_evidential_confidence(list(perm)) for perm in itertools.permutations(entries)
     }

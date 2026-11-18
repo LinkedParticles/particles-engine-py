@@ -384,15 +384,22 @@ class TestPrecondition:
         assert main.status == "ACTIVE"
         assert (trunk.status, trunk.status_reason) == ("PROVENANCE_STALE", "CONFLICT_PENDING")
 
-    async def test_an_unrescoped_store_reconciles_exactly_as_before(
+    async def test_an_unrescoped_store_still_never_retires_across_projects(
         self, db_session: AsyncSession, scripted_probe: None
     ) -> None:
+        """with the gate off, the lineage rule keeps the projects apart.
+
+        Before it, an unrescoped store let beta's memory file retire alpha's
+        claim by date, which is the configuration security review D13 exploited.
+        The gate itself still stays off: no divergence relation is recorded.
+        """
         extractor = _LineChunkExtractor()
         await harvest(db_session, "alpha", [branch("main")], extractor)
         await harvest(db_session, "beta", [branch("master")], extractor)
 
         main = await row_for(db_session, branch("main"))
-        assert (main.status, main.status_reason) == ("PROVENANCE_STALE", "SUPERSEDED_BY_UPDATE")
+        assert main.status == "ACTIVE"
+        assert main.status_reason is None
         assert await relations(db_session) == []
 
 
@@ -459,8 +466,11 @@ class TestOtherRoutes:
 
         summary = await reconcile_updates(db_session)
 
+        # The lineage rule refuses the cross-project pair before the gate is
+        # asked, so it is never a candidate; nothing is probed.
         assert summary["demoted"] == 0
-        assert summary["observer_declined"] == 1
+        assert summary["candidate_pairs"] == 0
+        assert summary["probed"] == 0
         assert (await row_for(db_session, branch("main"))).status == "ACTIVE"
 
     async def test_an_assertion_in_another_project_is_left_standing(

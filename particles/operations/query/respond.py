@@ -22,6 +22,7 @@ failure must never masquerade as an answer (the honesty posture —
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable, Mapping
 from datetime import datetime
 
 from particles.core.schema import (
@@ -31,7 +32,7 @@ from particles.core.schema import (
     ParticleType,
 )
 
-from .grounding import GROUNDED_RULES
+from .grounding import GROUNDED_RULES, composed_particles
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +61,17 @@ Instructions:
   statement that the knowledge base holds nothing relevant to this
   question — do not construct an answer from unrelated particles
 - If a coverage note is present, include a caveat that your answer may be incomplete"""
+
+# Joins the system turn only when a particle line carries a date, so an undated
+# prompt is byte-for-byte unchanged. Without it the composer, shown no dates,
+# sided with whichever value more particles repeated over a newer one.
+_DATED_RULE = """\
+- A particle may end with its date, "(dated YYYY-MM-DD)": the day the claim
+  began to hold, or else the day its source was written. When particles give
+  different values for the same thing, the most recently dated one is the
+  current value unless the particles say otherwise; older particles agreeing
+  with each other do not outweigh it. Mention the earlier value as what held
+  before."""
 
 # refusal protocol: the marker line the responder is instructed to
 # lead with when the particles do not bear on the question. The caller strips
@@ -101,6 +113,24 @@ _AUDIENCE_INSTRUCTIONS: dict[AudienceHint, str] = {
 }
 
 
+def answer_dates(
+    particles: Iterable[Particle], published_at: Mapping[str, datetime | None]
+) -> dict[str, datetime]:
+    """The date each particle carries into the answer prompt, by particle id.
+
+    When the claim began to hold (``valid_from``), else when its source was
+    written (``published_at``). A particle with neither gets no date: its
+    extraction time would date a claim to the day it was read, not to when it
+    held.
+    """
+    dates: dict[str, datetime] = {}
+    for p in particles:
+        dated = p.valid_from or published_at.get(p.id)
+        if dated is not None:
+            dates[p.id] = dated
+    return dates
+
+
 def _particle_line(
     p: Particle,
     ec: float,
@@ -108,6 +138,7 @@ def _particle_line(
     *,
     indent: bool = False,
     handle: str | None = None,
+    dated: datetime | None = None,
 ) -> str:
     """One particle bullet: content + modality marker + audience-conditional tags.
 
@@ -126,7 +157,10 @@ def _particle_line(
     if audience == AudienceHint.REGULATORY and p.provenance:
         pref = p.provenance[0]
         prov_tag = f" [source: {pref.corpus_entry_id}/{pref.snapshot_id}]"
-    body = f"{p.content} <{p.assertion_modality.value}>{nature_tag}{conf_tag}{prov_tag}".strip()
+    date_tag = f" (dated {dated.date().isoformat()})" if dated is not None else ""
+    body = (
+        f"{p.content} <{p.assertion_modality.value}>{nature_tag}{conf_tag}{prov_tag}{date_tag}"
+    ).strip()
     if handle is not None:
         body = f"[{handle}] {body}"
     return ("    - " if indent else "- ") + body
@@ -143,8 +177,12 @@ async def _generate_response(
     narrative_constituents: dict[str, list[Particle]] | None = None,
     as_of: datetime | None = None,
     handles: dict[str, str] | None = None,
+    dates: dict[str, datetime] | None = None,
 ) -> str:
     """Compose the NL answer; with ``handles`` it is a grounded one.
+
+    ``dates`` (from :func:`answer_dates`) dates the lines it names, and adds
+    the rule that the most recently dated of two conflicting values is current.
 
     ``handles`` maps each particle the composer is shown to the id it cites
     (:func:`~particles.operations.query.grounding.particle_handles`); the lines
@@ -160,6 +198,7 @@ async def _generate_response(
         return "No relevant particles found for this question in the current knowledge base."
 
     narrative_constituents = narrative_constituents or {}
+    dates = dates or {}
     particle_lines: list[str] = []
     for p, ec in zip(particles, eff_confs, strict=False):
         constituents = (
@@ -178,12 +217,19 @@ async def _generate_response(
                     audience,
                     indent=True,
                     handle=handles.get(c.id) if handles else None,
+                    dated=dates.get(c.id),
                 )
                 for c in constituents
             )
         else:
             particle_lines.append(
-                _particle_line(p, ec, audience, handle=handles.get(p.id) if handles else None)
+                _particle_line(
+                    p,
+                    ec,
+                    audience,
+                    handle=handles.get(p.id) if handles else None,
+                    dated=dates.get(p.id),
+                )
             )
 
     particle_list = "\n".join(particle_lines)
@@ -214,6 +260,8 @@ async def _generate_response(
             f"beliefs that held at that instant; some may have been "
             f"superseded or retracted since."
         )
+    if any(p.id in dates for p in composed_particles(particles, narrative_constituents)):
+        system_body += "\n" + _DATED_RULE
     if handles:
         system_body += "\n" + GROUNDED_RULES
     system = system_body + "\n\n" + data_fence_instruction(nonce)

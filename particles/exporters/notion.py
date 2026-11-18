@@ -15,7 +15,7 @@ provenance.
 Credential pattern (Part A):
 
 * The integration token is a **secret**, read once via
-  :func:`particles.secrets.get_notion_api_key` as the **first statement** of
+  :func:`particles.http.service_credential` as the **first statement** of
   :meth:`NotionExporter.export` — before any store read or network call, so a
   missing token can never produce a half-written workspace. The class declares
   ``REQUIRES_SECRET = "NOTION_API_KEY"`` so the CLI pre-flight (a courtesy that
@@ -60,6 +60,7 @@ from particles.core.schema import Particle, Subject
 from particles.core.scoring.confidence import compute_effective_confidence
 from particles.core.status import Status
 from particles.exporters.summaries import NotionSummary
+from particles.http import service_credential
 from particles.render.markdown import build_subject_naming, exclude_non_asserted
 
 log = logging.getLogger(__name__)
@@ -321,9 +322,11 @@ class NotionExporter:
         # partial write. The CLI pre-flight is a courtesy that fails faster; this
         # is the single source of truth for callers that bypass the CLI. A dry
         # run still needs a (readable) token — Notion has no anonymous mode.
-        from particles.secrets import get_notion_api_key
-
-        token = get_notion_api_key()
+        token = service_credential("notion")
+        if token is None:
+            raise ValueError(
+                "NOTION_API_KEY is withheld in this scope; `export notion` is not run."
+            )
 
         from particles.config import get_config
 

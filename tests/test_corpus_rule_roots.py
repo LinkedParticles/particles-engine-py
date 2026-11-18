@@ -40,8 +40,8 @@ from particles.corpus.rule_roots import (
     record_rule_source_roots,
 )
 from particles.corpus.rule_sources import sync_rule_sources
-from particles.corpus.store import CorpusEntryRow
 from particles.operations.corpus_refresh import refresh_entries
+from tests._corpus_rows import local_entry_row
 from tests._upstream import upstream_only
 
 
@@ -68,7 +68,7 @@ async def _lazy_local_entry(session: Any, path: Path, *, by: str = "rule-sync") 
         mutability=Mutability.MUTABLE,
         deposited_by=by,
     )
-    session.add(CorpusEntryRow.from_model(entry))
+    session.add(local_entry_row(entry))
     await session.flush()
     return entry.entry_id
 
@@ -928,7 +928,11 @@ def test_store_inside_a_clone_named_absolutely_chooses_no_host_file(
 
     store = _store_session_refusal(clone / "particles.db")
     assert store is not None
-    row = SimpleNamespace(uri_r=target.as_uri(), deposited_by="claude-code-hook")
+    from particles.host_identity import local_host_id
+
+    row = SimpleNamespace(
+        uri_r=target.as_uri(), deposited_by="claude-code-hook", origin_host=local_host_id()
+    )
     assert entry_refusal(row, [], cwd_store=True) is RefreshRefusal.CWD_STORE  # type: ignore[arg-type]
 
 

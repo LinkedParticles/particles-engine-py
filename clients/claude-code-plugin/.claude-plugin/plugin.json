@@ -1,0 +1,33 @@
+{
+  "name": "particles-curation",
+  "version": "1.263.7",
+  "description": "Curate a Particles store from a pane beside the chat, and see a contested belief's card when the agent uses it.",
+  "author": { "name": "The Particles authors" },
+  "license": "Apache-2.0",
+  "userConfig": {
+    "engineUrl": {
+      "type": "string",
+      "title": "Engine URL",
+      "description": "The Particles engine to curate. A non-loopback engine must use https.",
+      "default": "http://127.0.0.1:8000"
+    },
+    "engineToken": {
+      "type": "string",
+      "title": "Engine key",
+      "description": "A per-client key minted for this pane (particles engine keys). The operator role lets the pane act on cards; a reader key gives a read-only pane. Leave empty for a keyless engine on this machine.",
+      "sensitive": true
+    },
+    "mcpServer": {
+      "type": "string",
+      "title": "Particles MCP server name",
+      "description": "The name the Particles MCP server is registered under, used to see contested beliefs in the agent's queries.",
+      "default": "particles"
+    },
+    "reviewerId": {
+      "type": "string",
+      "title": "Reviewer id",
+      "description": "Recorded on each conflict you resolve from the pane.",
+      "default": "claude-code"
+    }
+  }
+}

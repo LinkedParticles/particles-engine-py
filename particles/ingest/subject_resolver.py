@@ -28,6 +28,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles import egress
 from particles.config import get_config
+from particles.core.provisional import (
+    NameCandidate,
+    ResolutionKind,
+    by_ref_choice,
+    choose_local,
+    mints_provisional,
+)
 from particles.core.schema import ExternalRef, Subject
 from particles.extraction.registry import infer_domain
 from particles.ingest.authorities import (
@@ -46,13 +53,23 @@ from particles.store.probe_verdict_store import (
     record_deferred,
 )
 from particles.store.subject_cache import CacheEntry
+from particles.store.subject_provisional import (
+    AcceptedVia,
+    accept,
+    any_provisional,
+    mark_of,
+    mark_provisional,
+    share,
+)
 from particles.store.subject_store import (
     add_aliases,
     find_by_external_ref,
     find_by_name,
+    find_name_candidates,
     get_subject,
     insert_subject,
     is_persona_source,
+    merge_subjects_many,
     persona_alias_guard,
     split_subject,
 )
@@ -194,17 +211,148 @@ def _persona_canonical(
     return name if folded is None else folded
 
 
+@dataclass(frozen=True)
+class _LocalAnswer:
+    """What the local-index step found for a name, and what the write would do."""
+
+    subject: Subject
+    share: bool
+    provisional: bool
+
+
 async def _find_local(
-    session: AsyncSession, name: str, source_type: str | None, source_tags: Collection[str] = ()
-) -> Subject | None:
+    session: AsyncSession,
+    name: str,
+    source_type: str | None,
+    source_tags: Collection[str] = (),
+    *,
+    principal: str | None = None,
+    kind: ResolutionKind = ResolutionKind.NON_MINTING,
+) -> _LocalAnswer | None:
     """The local name/alias lookup of a path that binds a particle to the result.
 
     ``name`` is already folded. Outside a persona source a persona form never
     resolves through the persona Subject's recorded aliases
-    (:func:`~particles.store.subject_store.persona_alias_guard`).
+    (:func:`~particles.store.subject_store.persona_alias_guard`). Which of the
+    Subjects holding the name answers is :func:`choose_local`'s, by
+    ``principal`` and ``kind``: a provisional Subject answers
+    only a minting resolution.
     """
     guard = persona_alias_guard(name, source_type, source_tags)
-    return await find_by_name(session, name, skip_aliases_of=guard)
+    candidates = await find_name_candidates(
+        session, name, skip_aliases_of=guard, stop_at_confirmed=True
+    )
+    if not candidates:
+        return None
+    choice = choose_local(
+        [NameCandidate(subject.id, mark) for subject, mark in candidates],
+        principal=principal,
+        kind=kind,
+    )
+    if choice.subject_id is None:
+        return None
+    subject = next(s for s, _ in candidates if s.id == choice.subject_id)
+    return _LocalAnswer(subject=subject, share=choice.share, provisional=choice.provisional)
+
+
+def _answer_key(
+    session: AsyncSession,
+    name: str,
+    *,
+    provisional: bool,
+    principal: str | None,
+    kind: ResolutionKind,
+) -> str:
+    """The cache key an answer is stored under: scoped when it is provisional."""
+    if provisional and principal is not None:
+        return subject_cache.make_scoped_key(session, name, principal, kind.value)
+    return subject_cache.make_key(session, name)
+
+
+async def _reached_by_ref(
+    session: AsyncSession,
+    subject: Subject,
+    *,
+    principal: str | None,
+    kind: ResolutionKind,
+    dry: bool,
+    actor: str,
+    source_type: str | None,
+) -> bool:
+    """Apply what reaching ``subject`` by its external reference does (§4).
+
+    A minting resolution shares another principal's scoped provisional Subject;
+    any other resolution accepts a provisional one (``via: EXTERNAL_REF``). A
+    dry run performs neither. Returns whether ``subject`` is still provisional
+    after this, which decides the answer's cache key.
+    """
+    mark = await mark_of(session, subject.id)
+    if mark is None:
+        return False
+    do_share, do_accept = by_ref_choice(
+        NameCandidate(subject.id, mark), principal=principal, kind=kind
+    )
+    if dry:
+        return not do_accept
+    if do_share:
+        assert principal is not None
+        await share(session, subject.id, principal)
+        return True
+    if do_accept:
+        refs = [f"{r.namespace}:{r.id}" for r in subject.external_ids]
+        await accept(
+            session,
+            subject.id,
+            via=AcceptedVia.EXTERNAL_REF,
+            actor=actor,
+            detail={"refs": refs, "resolution": kind.value, "source_type": source_type},
+        )
+        return False
+    return True
+
+
+async def fold_or_hold(session: AsyncSession, subject: Subject) -> Subject:
+    """Fold bare-local provisional Subjects into a confirmed bare-local mint.
+
+    ``subject`` was just minted confirmed. Each provisional Subject holding one
+    of its names that carries no external reference is merged into it (a
+    ``SUBJECTS_MERGED`` event, actor ``subject-resolver``, reason
+    ``provisional-fold``), when ``subject`` carries none either. Otherwise the
+    pair is held: both stay, and ``subjects list --provisional`` lists it.
+    Returns ``subject`` as it stands after any merge.
+    """
+    if not await any_provisional(session):
+        return subject
+    holders: dict[str, Subject] = {}
+    for held_name in [subject.canonical_name, *subject.aliases]:
+        for candidate, mark in await find_name_candidates(session, held_name):
+            if mark is not None and candidate.id != subject.id:
+                holders[candidate.id] = candidate
+    if not holders:
+        return subject
+    # The confirmed mint now holds the name for every resolution; a cached
+    # provisional answer for it is stale.
+    subject_cache.clear(keep_negative=True)
+    if subject.external_ids:
+        log.info(
+            "Held %d provisional subject(s) named %r beside confirmed %s (external ref)",
+            len(holders),
+            subject.canonical_name,
+            subject.id,
+        )
+        return subject
+    fold = sorted(s.id for s in holders.values() if not s.external_ids)
+    if not fold:
+        return subject
+    merged, _ = await merge_subjects_many(
+        session,
+        fold,
+        subject.id,
+        actor=RESOLVER_ALIAS_ACTOR,
+        extra_payload={"reason": "provisional-fold"},
+    )
+    log.info("Folded %d provisional subject(s) into %s", len(fold), subject.id)
+    return merged
 
 
 async def find_existing_subject(
@@ -213,6 +361,8 @@ async def find_existing_subject(
     *,
     source_type: str | None,
     source_tags: Collection[str] = (),
+    principal: str | None = None,
+    kind: ResolutionKind = ResolutionKind.NON_MINTING,
 ) -> Subject | None:
     """Resolve ``name`` to an *existing* Subject exactly as the write path would, read-only.
 
@@ -222,10 +372,14 @@ async def find_existing_subject(
     and stops where ``resolve_subject`` would start writing: no live authority,
     no mint, no alias recorded. A name resolved by two paths must be folded and
     scoped by both; routing both through here is what keeps that
-    true by construction.
+    true by construction. ``principal`` and ``kind`` are the write's;
+    a transition the write would perform (a share) is not performed here.
     """
     folded = _persona_canonical(name, source_type, source_tags)
-    return await _find_local(session, folded, source_type, source_tags)
+    found = await _find_local(
+        session, folded, source_type, source_tags, principal=principal, kind=kind
+    )
+    return found.subject if found is not None else None
 
 
 async def load_speaker_key(session: AsyncSession) -> SpeakerKey | None:
@@ -292,8 +446,15 @@ async def resolve_subject(
     source_type: str | None = None,
     source_tags: Collection[str] = (),
     answers: LiveAnswers | None = None,
+    principal: str | None = None,
+    kind: ResolutionKind = ResolutionKind.NON_MINTING,
 ) -> Subject:
     """Resolve a subject name to a canonical Subject, creating one if needed.
+
+    ``principal`` and ``kind`` say whose resolution this is: a
+    ``MINTING`` resolution acts for the agent principal ``principal``, sees its
+    provisional Subjects and mints provisionally; every other kind sees
+    confirmed Subjects only. ``asserted_by`` stays the attribution label.
 
     ``source_tags`` are the corpus entry's tags; with ``source_type`` they
     decide whether the speaker fold applies. A folded name never goes to a
@@ -316,19 +477,22 @@ async def resolve_subject(
         source_tags,
         live=persona is None,
         answers=answers,
+        principal=principal,
+        kind=kind,
     )
     assert subject is not None  # only a dry run returns None
     if folded == name:
         return subject
     recorded = await _record_persona_alias(session, subject, name.strip())
-    if recorded is not subject:
+    if recorded is not subject and await mark_of(session, recorded.id) is None:
         # ``add_aliases`` cleared the resolution cache; re-seat this one.
         subject_cache.cache_set(subject_cache.make_key(session, folded), recorded)
     return recorded
 
 
-# Known deviation: decision logic is interleaved with I/O in this function. Extract it with the
-# next substantive change here (D2).
+# Known deviation: the live-authority loop's decisions are interleaved with I/O in
+# ``_resolve``; the local-index choice was lifted into ``core.provisional``, and
+# the rest is (D2).
 _egress_skip_logged: set[str] = set()
 
 
@@ -365,8 +529,13 @@ async def _resolve(
     live: bool = True,
     answers: LiveAnswers | None = None,
     dry: bool = False,
+    principal: str | None = None,
+    kind: ResolutionKind = ResolutionKind.NON_MINTING,
 ) -> Subject | None:
     """The resolution cascade for an already-folded ``name``.
+
+    ``principal`` and ``kind`` decide which provisional Subjects the local and
+    by-reference steps see, and whether a mint is provisional.
 
     ``live=False`` skips the live-authority pass, as a conversational source
     type does for every name.
@@ -379,19 +548,43 @@ async def _resolve(
     live authorities, which are not asked.
     """
     cache_key = subject_cache.make_key(session, name)
+    minting = mints_provisional(kind, principal)
 
-    # Check in-memory cache first (avoids repeat DB + API calls for same name)
+    def key_for(provisional: bool) -> str:
+        return _answer_key(session, name, provisional=provisional, principal=principal, kind=kind)
+
+    # Check in-memory cache first (avoids repeat DB + API calls for same name).
+    # A confirmed answer answers everyone; a provisional one only its own key.
     cached = subject_cache.cache_get(cache_key)
+    if cached is None and minting:
+        cached = subject_cache.cache_get(key_for(True))
     if isinstance(cached, CacheEntry) and cached.subject is not None:
         return cached.subject
 
-    # Step 1: local alias index
-    existing = await _find_local(session, name, source_type, source_tags)
-    if existing:
+    # Step 1: local alias index (decides which holder answers)
+    local = await _find_local(
+        session, name, source_type, source_tags, principal=principal, kind=kind
+    )
+    if local is not None:
+        existing = local.subject
         if not dry:
-            subject_cache.cache_set(cache_key, existing)
+            if local.share:
+                assert principal is not None
+                await share(session, existing.id, principal)
+            subject_cache.cache_set(key_for(local.provisional), existing)
         log.debug("Subject resolved locally: %r → %s", name, existing.id)
         return existing
+
+    async def by_ref(found: Subject) -> bool:
+        return await _reached_by_ref(
+            session,
+            found,
+            principal=principal,
+            kind=kind,
+            dry=dry,
+            actor=asserted_by or RESOLVER_ALIAS_ACTOR,
+            source_type=source_type,
+        )
 
     authorities = get_authorities()  # priority-ordered
 
@@ -403,11 +596,12 @@ async def _resolve(
         ref = auth.recognize(name)
         if ref is None:
             continue
-        by_ref = await find_by_external_ref(session, ref.namespace, ref.id)
-        if by_ref:
+        reached = await find_by_external_ref(session, ref.namespace, ref.id)
+        if reached:
+            still_provisional = await by_ref(reached)
             if not dry:
-                subject_cache.cache_set(cache_key, by_ref)
-            return by_ref
+                subject_cache.cache_set(key_for(still_provisional), reached)
+            return reached
         recognized_ref = ref
         recognizing_auth = auth
         break
@@ -466,10 +660,11 @@ async def _resolve(
                 continue
             all_missed = False
             if res.existing is not None:
+                still_provisional = await by_ref(res.existing)
                 if dry:
                     return res.existing
                 attached = await _attach_alias(session, res.existing, name)
-                subject_cache.cache_set(cache_key, attached)
+                subject_cache.cache_set(key_for(still_provisional), attached)
                 return attached
             if res.abstained:
                 # The authority judged every candidate wrong for this claim.
@@ -514,13 +709,29 @@ async def _resolve(
             dup = await find_by_external_ref(
                 session, res.external_ref.namespace, res.external_ref.id
             )
-            if dup is None and resolved_name.lower() != name.lower():
-                dup = await _find_local(session, resolved_name, source_type, source_tags)
+            dup_provisional = False
+            if dup is not None:
+                dup_provisional = await by_ref(dup)
+            elif resolved_name.lower() != name.lower():
+                local_dup = await _find_local(
+                    session,
+                    resolved_name,
+                    source_type,
+                    source_tags,
+                    principal=principal,
+                    kind=kind,
+                )
+                if local_dup is not None:
+                    dup = local_dup.subject
+                    dup_provisional = local_dup.provisional
+                    if local_dup.share and not dry:
+                        assert principal is not None
+                        await share(session, dup.id, principal)
             if dry:
                 return dup
             if dup is not None:
                 attached = await _attach_alias(session, dup, name)
-                subject_cache.cache_set(cache_key, attached)
+                subject_cache.cache_set(key_for(dup_provisional), attached)
                 log.debug("Subject deduped on insert: %r → %s", name, attached.id)
                 return attached
             subject = Subject(
@@ -532,7 +743,8 @@ async def _resolve(
                 asserted_by=asserted_by,
             )
             await insert_subject(session, subject)
-            subject_cache.cache_set(cache_key, subject)
+            subject = await _after_mint(session, subject, principal=principal, kind=kind)
+            subject_cache.cache_set(key_for(minting), subject)
             log.info(
                 "Created subject from %s: %r (%s) confidence=%.2f",
                 res.external_ref.namespace,
@@ -571,9 +783,25 @@ async def _resolve(
         asserted_by=asserted_by,
     )
     await insert_subject(session, subject)
-    subject_cache.cache_set(cache_key, subject)
+    subject = await _after_mint(session, subject, principal=principal, kind=kind)
+    subject_cache.cache_set(key_for(minting), subject)
     log.info("Created bare local subject: %r", canonical_name)
     return subject
+
+
+async def _after_mint(
+    session: AsyncSession,
+    subject: Subject,
+    *,
+    principal: str | None,
+    kind: ResolutionKind,
+) -> Subject:
+    """Mark a minting resolution's mint provisional, or offer a confirmed one to the fold."""
+    if mints_provisional(kind, principal):
+        assert principal is not None
+        await mark_provisional(session, subject.id, principal)
+        return subject
+    return await fold_or_hold(session, subject)
 
 
 def _recognize_qualified(
@@ -610,6 +838,9 @@ async def resolve_qualified_subject(
     name: str,
     context: RecognizeContext,
     asserted_by: str = "general-extractor",
+    *,
+    principal: str | None = None,
+    kind: ResolutionKind = ResolutionKind.NON_MINTING,
 ) -> Subject | None:
     """Resolve a name the gate qualified to its project-scoped Subject.
 
@@ -619,6 +850,7 @@ async def resolve_qualified_subject(
     recognized ref finds its Subject or mints one carrying the ref and the
     authority's ``subject_class``. Returns ``None`` when no contextual
     authority recognizes the name, which the caller treats as suppression.
+    A match by ref and a mint follow the ordinary cascade's provisional rules.
     """
     recognized = _recognize_qualified(name, context)
     if recognized is None:
@@ -626,6 +858,15 @@ async def resolve_qualified_subject(
     ref, auth = recognized
     existing = await find_by_external_ref(session, ref.namespace, ref.id)
     if existing is not None:
+        await _reached_by_ref(
+            session,
+            existing,
+            principal=principal,
+            kind=kind,
+            dry=False,
+            actor=asserted_by,
+            source_type=None,
+        )
         return existing
     subject = Subject(
         canonical_name=name.strip(),
@@ -635,6 +876,7 @@ async def resolve_qualified_subject(
         asserted_by=asserted_by,
     )
     await insert_subject(session, subject)
+    subject = await _after_mint(session, subject, principal=principal, kind=kind)
     log.info("Created qualified subject: %r (%s:%s)", subject.canonical_name, ref.namespace, ref.id)
     return subject
 
@@ -649,8 +891,12 @@ async def resolve_subjects(
     source_tags: Collection[str] = (),
     qualified: Mapping[str, RecognizeContext] | None = None,
     answers: LiveAnswers | None = None,
+    principal: str | None = None,
+    kind: ResolutionKind = ResolutionKind.NON_MINTING,
 ) -> list[str]:
     """Resolve a list of subject names and return their UUIDs.
+
+    ``principal`` and ``kind`` are :func:`resolve_subject`'s.
 
     A name in ``qualified`` goes through
     :func:`resolve_qualified_subject` instead of the ordinary cascade. The
@@ -668,7 +914,9 @@ async def resolve_subjects(
             continue
         context = (qualified or {}).get(name)
         if context is not None:
-            found = await resolve_qualified_subject(session, name, context, asserted_by)
+            found = await resolve_qualified_subject(
+                session, name, context, asserted_by, principal=principal, kind=kind
+            )
             if found is not None:
                 ids.append(found.id)
             continue
@@ -680,6 +928,8 @@ async def resolve_subjects(
             source_type=source_type,
             source_tags=source_tags,
             answers=answers,
+            principal=principal,
+            kind=kind,
         )
         ids.append(subject.id)
     return ids
@@ -693,8 +943,13 @@ async def prefetch_subjects(
     source_type: str | None = None,
     source_tags: Collection[str] = (),
     answers: LiveAnswers | None = None,
+    principal: str | None = None,
+    kind: ResolutionKind = ResolutionKind.NON_MINTING,
 ) -> SubjectPrefetch:
     """Ask the live authorities for ``names`` without writing (D2).
+
+    ``principal`` and ``kind`` are the write's, so the names it reports as
+    known are the ones the write would resolve.
 
     The gather half of :func:`resolve_subjects` for a write path that applies
     under the store's writer lock: it runs the same cascade read-only, so every
@@ -724,6 +979,8 @@ async def prefetch_subjects(
             live=persona is None,
             answers=answers,
             dry=True,
+            principal=principal,
+            kind=kind,
         )
         if found is not None:
             known.append(found.id)
@@ -769,7 +1026,9 @@ async def gather_split_target(
         egress.check(*egress.WIKIDATA_HOST, "subjects split (wikidata labels)")
         return SplitTargetGather(aliases=await _wikidata_aliases(ext_id))
     if new_name is not None:
-        return SplitTargetGather(subjects=await prefetch_subjects(session, [new_name]))
+        return SplitTargetGather(
+            subjects=await prefetch_subjects(session, [new_name], kind=ResolutionKind.OPERATOR)
+        )
     return SplitTargetGather()
 
 
@@ -815,6 +1074,17 @@ async def split_subject_resolving(
         ns, ext_id = new_external_id.split(":", 1)
         existing = await find_by_external_ref(session, ns, ext_id)
         if existing is not None:
+            # The operator named this referent: a provisional Subject holding
+            # it is confirmed.
+            await _reached_by_ref(
+                session,
+                existing,
+                principal=None,
+                kind=ResolutionKind.OPERATOR,
+                dry=False,
+                actor=asserted_by,
+                source_type=None,
+            )
             new_subject = existing
         elif ns == "wikidata":
             # Labels + aliases fetched by QID in the gather.
@@ -853,6 +1123,7 @@ async def split_subject_resolving(
             new_name.strip(),
             asserted_by=asserted_by,
             answers=gathered.subjects.answers if gathered.subjects is not None else None,
+            kind=ResolutionKind.OPERATOR,
         )
     else:
         raise ValueError("provide new_name or new_external_id")

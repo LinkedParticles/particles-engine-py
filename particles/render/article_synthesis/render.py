@@ -46,6 +46,7 @@ from typing import Any
 
 import yaml
 
+from particles.config import get_config
 from particles.core.schema import Particle
 from particles.render.article_synthesis.cache import (
     _FRONTMATTER_RE,
@@ -636,6 +637,17 @@ def _synthesis_user_turn(
     return "\n\n".join(parts)
 
 
+def standard_synthesis_template() -> str:
+    """The first-attempt article prompt: the operator's ``wiki.prompt_template``, else built in.
+
+    Read at call time, so a config reload takes effect on the next
+    render. Only the standard first attempt is tunable: the flowing, narrative
+    and strict-retry prompts stay built in, since the retries exist to repair
+    citations under the engine's own wording.
+    """
+    return get_config().wiki.prompt_template or _SYNTHESIS_PROMPT_STANDARD
+
+
 def _build_synthesis_prompt(
     *,
     subject: SynthesisTopic,
@@ -690,7 +702,7 @@ def _build_synthesis_prompt(
         # placeholders (heading suppression and authoring briefs are
         # first-attempt concerns); unused ``str.format`` kwargs are ignored, so
         # the one call below serves every template.
-        template = _SYNTHESIS_PROMPT_STRICT if strict else _SYNTHESIS_PROMPT_STANDARD
+        template = _SYNTHESIS_PROMPT_STRICT if strict else standard_synthesis_template()
     instructions = template.format(
         allowed_ids=", ".join(_short_id(p.id) for p in particles),
         framing=_framing_block(framing),

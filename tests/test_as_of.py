@@ -1097,7 +1097,7 @@ class TestMcpAsOf:
             return QueryResponse(answer="ok", particles=[], effective_confidences=[])
 
         with patch("particles.operations.query.query", new=_fake_query):
-            out = await mcp_query("q?", as_of="2000-01-01")
+            out = await mcp_query("q?", as_of="2000-01-01", detail="full")
         assert captured[0].as_of == T2000
         assert out["answer"] == "ok"
         # The response surface carries the as_of echo fields (set by the real

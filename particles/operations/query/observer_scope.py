@@ -23,9 +23,10 @@ from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from particles.core.observer_scope import visible
+from particles.core.observer_scope import standing, visible
 from particles.core.schema import ObserverScopeNote, Particle
 from particles.core.status import Status
+from particles.corpus.store import any_reference_entry
 from particles.store.observer_scope_join import lens_may_engage, load_scopes
 from particles.store.particle_store import list_particles_filtered
 
@@ -58,6 +59,14 @@ class ScopeFilter:
     disclosed apart from ``unattributed``."""
     as_of: datetime | None = None
     """The instant of an as-of read, whose projects are today's attribution."""
+    withheld_ids: frozenset[str] = frozenset()
+    """Beliefs a ``standing_only`` read left out because only reference
+    entries put them in view: they answer questions, and the
+    unqueried surface says how many it did not list."""
+
+    @property
+    def reference_withheld(self) -> int:
+        return len(self.withheld_ids)
 
     @property
     def in_scope(self) -> int:
@@ -111,6 +120,7 @@ async def filter_visible(
     observer_project: str | None,
     *,
     as_of: datetime | None = None,
+    standing_only: bool = False,
 ) -> ScopeFilter:
     """Read ``particles`` through the project observer.
 
@@ -122,15 +132,37 @@ async def filter_visible(
     ``as_of`` is the instant of an as-of read: a project observes a
     claim its sources stated *then*, so "latest extracted snapshot" is taken at
     that instant.
+
+    ``standing_only`` is for the surfaces that push context with no question,
+    the session-start digest and the agent-memory region: a
+    belief only reference entries put in view is left out of
+    ``visible_ids`` and counted in ``reference_withheld``. It applies with no
+    observer, and on a store the observer lens has not engaged on, as the
+    store-wide reading of :func:`~particles.core.observer_scope.standing`.
+    A store with no marked entry pays one lookup and is unchanged.
     """
     ids = frozenset(p.id for p in particles)
-    if observer_project is None:
-        return ScopeFilter(ids, engaged=False, total=len(ids), unattributed=0)
-    if not await lens_may_engage(session):
+    engaged = observer_project is not None and await lens_may_engage(session)
+    if not engaged:
+        if standing_only and particles and await any_reference_entry(session):
+            scopes = await load_scopes(session, particles, as_of=as_of)
+            kept = frozenset(pid for pid, scope in scopes.items() if standing(scope, None))
+            return ScopeFilter(
+                kept,
+                engaged=False,
+                total=len(ids),
+                unattributed=0,
+                withheld_ids=ids - kept,
+            )
         return ScopeFilter(ids, engaged=False, total=len(ids), unattributed=0)
 
     scopes = await load_scopes(session, particles, as_of=as_of)
     in_view = frozenset(pid for pid, scope in scopes.items() if visible(scope, observer_project))
+    withheld: frozenset[str] = frozenset()
+    if standing_only:
+        kept = frozenset(pid for pid in in_view if standing(scopes[pid], observer_project))
+        withheld = in_view - kept
+        in_view = kept
     unattributed = sum(1 for s in scopes.values() if s.unattributed)
     lapsed = sum(1 for s in scopes.values() if s.lapsed and not s.widened)
     return ScopeFilter(
@@ -140,6 +172,7 @@ async def filter_visible(
         unattributed=unattributed,
         lapsed=lapsed,
         as_of=as_of,
+        withheld_ids=withheld,
     )
 
 

@@ -177,6 +177,7 @@ nav:
       - Overview: user-guide/index.md
       - Getting started: user-guide/getting-started.md
       - Concepts: user-guide/concepts.md
+      - When sources disagree: user-guide/conflicts.md
       - Querying: user-guide/querying.md
       - As-of time travel: user-guide/as-of.md
       - Asking about a period: user-guide/windows.md
@@ -185,6 +186,7 @@ nav:
       - Connecting your coding agent: user-guide/coding-agents.md
       - Using from LangChain: user-guide/integrations.md
       - Claude Code memory: user-guide/claude-code.md
+      - Codex memory: user-guide/codex.md
       - Swapping in for the reference memory server: user-guide/memory-server-swap.md
       - Depositing from your phone: user-guide/inbox.md
   - Operator guide:

@@ -721,3 +721,54 @@ class TestSessionTranscriptLookup:
         projects = self._planted(tmp_path)
         uri = f"claude-code://session/{session_id}"
         assert session_transcripts(uri, projects, flat=True) == []
+
+
+class TestProjectTranscriptDirs:
+    """The catch-up sweep's reach: every directory of the session's project."""
+
+    def test_worktree_directories_join_their_repository(self, tmp_path: Path) -> None:
+        from particles.api.cli._claude_code import project_transcript_dirs
+
+        projects = tmp_path / "projects"
+        main = projects / "-repo"
+        for name in ("-repo", "-repo--claude-worktrees-a", "-repo--claude-worktrees-b", "-other"):
+            (projects / name).mkdir(parents=True)
+        (projects / "-other--claude-worktrees-c").mkdir()
+        found = project_transcript_dirs(main, "-repo")
+        assert found[0] == main
+        assert sorted(p.name for p in found[1:]) == [
+            "-repo--claude-worktrees-a",
+            "-repo--claude-worktrees-b",
+        ]
+        from_worktree = project_transcript_dirs(projects / "-repo--claude-worktrees-a", "-repo")
+        assert {p.name for p in from_worktree} == {
+            "-repo",
+            "-repo--claude-worktrees-a",
+            "-repo--claude-worktrees-b",
+        }
+
+    def test_a_linked_worktree_elsewhere_is_matched_by_its_launch_directory(
+        self, tmp_path: Path
+    ) -> None:
+        from particles.api.cli._claude_code import project_transcript_dirs
+
+        repo = make_repo(tmp_path / "src" / "repo")
+        worktree = make_worktree(repo, tmp_path / "elsewhere" / "wt")
+        projects = tmp_path / "projects"
+        key = claude_project_slug(repo)
+        (projects / key).mkdir(parents=True)
+        write_transcript(projects / claude_project_slug(worktree) / "s.jsonl", str(worktree))
+        found = project_transcript_dirs(projects / key, key)
+        assert [p.name for p in found] == [key, claude_project_slug(worktree)]
+
+    def test_no_key_and_symlinks_stay_out(self, tmp_path: Path) -> None:
+        from particles.api.cli._claude_code import project_transcript_dirs
+
+        projects = tmp_path / "projects"
+        main = projects / "-repo"
+        main.mkdir(parents=True)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (projects / "-repo--claude-worktrees-link").symlink_to(outside)
+        assert project_transcript_dirs(main, "-repo") == [main]
+        assert project_transcript_dirs(main, "") == [main]

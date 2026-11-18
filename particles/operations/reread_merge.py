@@ -349,6 +349,20 @@ def wilson_lower_bound(correct: int, total: int, z: float = _WILSON_Z) -> float:
     return (centre - margin) / denom
 
 
+def labels_needed(misses: int, cap: int = 100_000) -> int:
+    """The fewest labels that pass the admission bar with this many misses.
+
+    Labelling from the top of a stratum, the bar is met at the
+    first count ``n >= 100`` whose lower bound on ``(n - misses) / n`` reaches
+    0.95: 100 with no miss, 110 with one, 142 with two. Returns ``cap`` when
+    no count up to it passes.
+    """
+    n = min(max(_ADMISSION_MIN_LABELS, misses), cap)
+    while n < cap and wilson_lower_bound(n - misses, n) < _ADMISSION_FLOOR:
+        n += 1
+    return n
+
+
 @dataclass(frozen=True)
 class LabelScore:
     """One stratum's labels against the admission bar."""
@@ -606,10 +620,10 @@ def _update_key(survivor: Particle, copy: Particle) -> VerdictKey:
 
 
 def _update_record(stamped: tuple[bool, str | None]) -> UpdateRecord:
-    from particles.ingest.pipeline import UPDATE_SECOND_RUNG
+    from particles.ingest.pipeline import UPDATE_CONFIRMING_RUNGS
 
     verdict, rung = stamped
-    second = rung is not None and rung.split("@", 1)[0] == UPDATE_SECOND_RUNG
+    second = rung is not None and rung.split("@", 1)[0] in UPDATE_CONFIRMING_RUNGS
     return UpdateRecord(changes=verdict, second=second)
 
 

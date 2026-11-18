@@ -293,6 +293,68 @@ class TestBuildReport:
         assert report.modelling_decisions == {"DUPLICATES_MERGED": 4, "SUBJECTS_MERGED": 0}
         assert report.alignment_source is None
 
+    def test_header_counts_and_orders(self) -> None:
+        """Best band whatever the link order; repeated classes and bands add up; ties by name."""
+        subjects: list[tuple[str | None, list[ExternalRef]]] = [
+            # The best link is first this time: the subject still counts as asserted.
+            (
+                "schema:Place",
+                [
+                    ExternalRef(namespace="wikidata", id="Q1", confidence=1.0),
+                    ExternalRef(namespace="wikidata", id="Q2", confidence=0.1),
+                ],
+            ),
+            ("schema:Person", [ExternalRef(namespace="wikidata", id="Q3", confidence=0.8)]),
+            ("schema:Person", [ExternalRef(namespace="wikidata", id="Q4", confidence=0.7)]),
+            ("artifact:file", [ExternalRef(namespace="artifact", id="p/a.py")]),
+            ("artifact:record", []),
+        ]
+        claims = [
+            (_claim("has status"), UNCLASSED),
+            (_claim("counts", _lit("42")), UNCLASSED),
+            (_claim("dated", _lit("2026-10-01")), UNCLASSED),
+            (_claim("schema:url", _term("https://x", TermKind.URI), kind=TermKind.URI), UNCLASSED),
+        ]
+
+        report = build_vocabulary_report(
+            claims,
+            subjects,
+            structured_claims_total=4,
+            event_counts={},
+            decision_types=[],
+            suppress_threshold=0.25,
+        )
+
+        # Namespaces by subject count descending, not by name.
+        assert [n.namespace for n in report.aligned_by_namespace] == ["wikidata", "artifact"]
+        wikidata = report.aligned_by_namespace[0]
+        assert wikidata.subjects == 3
+        assert wikidata.bands == {
+            LinkBand.ASSERTED: 1,
+            LinkBand.UNSCORED: 0,
+            LinkBand.SCORED: 2,
+            LinkBand.SUPPRESSED: 0,
+        }
+        # Two subjects of one class count twice; a count tie orders by name.
+        assert [(c.subject_class, c.count) for c in report.classed_by_class] == [
+            ("schema:Person", 2),
+            ("artifact:file", 1),
+            ("artifact:record", 1),
+            ("schema:Place", 1),
+        ]
+        assert [(c.subject_class, c.count) for c in report.classed_by_namespace] == [
+            ("schema", 3),
+            ("artifact", 2),
+        ]
+        assert report.object_kinds == {TermKind.URI: 1, TermKind.LITERAL: 3, TermKind.TOKEN: 0}
+        assert report.object_shapes == {
+            ObjectShape.TEXT: 1,
+            ObjectShape.NUMERIC: 1,
+            ObjectShape.DATED: 1,
+            ObjectShape.URI: 1,
+            ObjectShape.TOKEN: 0,
+        }
+
 
 # ---------------------------------------------------------------------------
 # The Engine path

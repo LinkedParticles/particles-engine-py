@@ -18,9 +18,11 @@ are the two one claim?
   must share ``stance:holder`` and reach the cosine floor, unless the two
   texts are one sentence under the §6.10 key. Matching is one-to-one, the
   key-equal pairs first and then by descending cosine.
-* **The ladder**: the ``duplicate_key`` rung (``SAME`` under the key, admitted
-  from the start) and the judge for the rest, at most ``max_judged``
-  pairs per pass; the remainder are unasked and disclosed.
+* **The ladder** (``core/ladders.restatement_ladder``): the ``duplicate_key``
+  rung (``SAME`` under the key, admitted from the start) and the
+  judge for the rest, at most ``max_judged`` pairs per pass; the remainder are
+  unasked and disclosed. The key's verdicts go on the run's rung tally, as
+  the judge's fresh answers already do.
 * **The guard** (:func:`decide_carry`, pure): a judged ``SAME`` carries the
   earlier claim only when no update reading said ``CHANGES`` and the
   contradiction probe answered no. Each question is asked of the pair on its
@@ -50,8 +52,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from particles.config import get_config
 from particles.core.conflict_resolution import SlotVerdict
 from particles.core.duplicate_key import normalize_content
+from particles.core.ladders import TextPair, restatement_ladder
 from particles.core.probe_verdict import ProbeKind, VerdictKey, verdict_key
-from particles.core.rung_ladder import DuplicateVerdict
+from particles.core.rung_ladder import DuplicateVerdict, LadderRun, Rung
 from particles.core.schema import JudgeVerdictKind, Particle
 from particles.core.stance import stance_holder
 from particles.db import write_transaction
@@ -62,6 +65,7 @@ from particles.ingest.duplicate_judge import (
     duplicate_judge_stamp,
     run_judge,
 )
+from particles.ingest.ladder_shell import current_availability, report_settled
 from particles.llm.usage import SamplingObservation, observe_sampling
 from particles.store.probe_verdict_store import lookup_verdicts, record_verdicts
 
@@ -244,6 +248,11 @@ SlotReader = Callable[[str, str], Awaitable[UpdateGuard]]
 ContradictionProbe = Callable[[str, str], Awaitable[bool | None]]
 
 
+#: One pair's way up the restatement ladder, and the judge rung it waits at.
+_Run = LadderRun[TextPair, DuplicateVerdict]
+_Rung = Rung[TextPair, DuplicateVerdict]
+
+
 def _judge_key(pair: RestatementPair) -> VerdictKey:
     return verdict_key(ProbeKind.DUPLICATE, pair.existing.content, pair.candidate)
 
@@ -318,17 +327,31 @@ async def match_restatements(
     if not cfg.enabled or not eligible:
         return outcome
     pairs = select_pairs(candidates, eligible, floor=cfg.floor)
-    keyed = [p for p in pairs if p.keyed]
-    rest = [p for p in pairs if not p.keyed]  # already in descending cosine
-    judged = rest[: cfg.max_judged]
-    outcome.unasked = len(rest) - len(judged)
-    outcome.judged = len(judged)
-    for pair in keyed:
-        outcome.carried[pair.index] = pair.existing
+    ladder = restatement_ladder(duplicate_judge_stamp().version)
+    availability = current_availability()
+    # Each pair runs the ladder's rungs that decide on their own; one the key
+    # settles is carried, and the rest wait at the judge, in descending cosine.
+    waiting: list[tuple[RestatementPair, _Run, _Rung]] = []
+    for pair in pairs:
+        run = ladder.start((pair.existing.content, pair.candidate))
+        while (rung := run.next_rung(availability)) is not None and rung.decide is not None:
+            run.record(rung, rung.decide(run.item))
+        if rung is not None:
+            waiting.append((pair, run, rung))
+            continue
+        settled = run.settled()
+        report_settled(ladder.kind, settled)
+        if settled.verdict is DuplicateVerdict.SAME:
+            outcome.carried[pair.index] = pair.existing
+    asked = waiting[: cfg.max_judged]
+    outcome.unasked = len(waiting) - len(asked)
+    outcome.judged = len(asked)
 
-    verdicts = await _judge(session, judged, judge_call)
-    for pair in judged:
-        verdict = verdicts.get(pair.index, DuplicateVerdict.ABSTAIN)
+    answers = await _judge(session, [pair for pair, _, _ in asked], judge_call)
+    for pair, run, rung in asked:
+        # The judge counts its own fresh answers on the tally (``run_judge``).
+        run.record(rung, answers.get(pair.index, DuplicateVerdict.ABSTAIN))
+        verdict = run.settled().verdict
         if verdict is DuplicateVerdict.ABSTAIN:
             # The judge could not tell (or its call failed): the pair keeps the
             # outcome it had before the match and costs no update reading.

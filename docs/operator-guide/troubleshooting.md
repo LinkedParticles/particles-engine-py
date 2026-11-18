@@ -233,7 +233,7 @@ Set `storage.blob_dir` to an absolute path to stop the problem recurring.
 |---|---|
 | Spec / ADR deposit produced junk "meta" particles | Expected; they're tagged `DOCUMENT_META` and hidden by default; see the section above |
 | `Blob not found for hash …` during extraction | `particles config validate`; it warns when the resolved `blob_dir` does not hold the store's content; see the section above |
-| Particle missing from query | `lint` for staleness findings ([lint and review](lint-and-review.md)); `particles quality` for status distribution. If it was retired, [as-of](../user-guide/as-of.md) shows when and what replaced it |
+| Particle missing from query | `lint` for staleness findings ([lint and review](lint-and-review.md)); `particles quality` for status distribution, and its "No embedding" line for beliefs stored while the embedding model could not load, which semantic query never retrieves until the next `particles memory consolidate` run gives them a vector (its embed pass, run with the model available). If it was retired, [as-of](../user-guide/as-of.md) shows when and what replaced it |
 | Extractor regressed | `extractor benchmark-compare` against the previous extractor version; see [tuning → benchmark + compare](tuning.md#benchmark-compare) |
 | Wiki articles cite the wrong subjects | `--invalidate-stale-links` after `subjects fix-labels`; a genuinely misjoined Subject needs [the split workflow](lint-and-review.md#fixing-a-misjoined-subject) |
 | Database performance dropping | Check `particles quality` for stale-particle accumulation; reindex |

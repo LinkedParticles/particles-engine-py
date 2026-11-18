@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from particles.api.cli import app, run
 from particles.api.cli._output import PROGRESS_OPTION, QUIET_OPTION, configure_output
 from particles.api.cli._progress import progress_line
+from particles.api.cli._remote import refuse_remote_sync
 from particles.db import session_scope
 
 
@@ -69,6 +70,7 @@ def reconcile_cmd(
     progress: bool | None = PROGRESS_OPTION,
 ) -> None:
     """Demote superseded claims across corpus entries (supersession sweeps)."""
+    refuse_remote_sync("reconcile")
     configure_output(verbose, quiet=quiet, progress=progress)
     if updates and dependents:
         raise typer.BadParameter("Choose one of --updates and --dependents.")

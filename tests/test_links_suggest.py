@@ -647,3 +647,77 @@ async def test_judge_pairs_full_batch_survives_a_verbose_reply() -> None:
     with patch("particles.operations._llm._llm_call", side_effect=fake_call):
         verdicts = await _judge_pairs([(f"a{i}", f"b{i}") for i in range(25)])
     assert verdicts == [JudgeVerdictKind.PARAPHRASE] * 25
+
+
+# --------------------------------------------------------------------------- #
+# a withholding rung, asked before the judge                       #
+# --------------------------------------------------------------------------- #
+
+_CROSSED = ("PR #284 was opened for the fix.", "PR #288 was opened for the fix.")
+
+
+@pytest.mark.asyncio
+async def test_withhold_leaves_a_crossed_pair_out_and_counts_it(db_session: AsyncSession) -> None:
+    from particles.core.ladders import IDENTIFIER_CROSS
+    from particles.core.rung_ladder import QuestionKind
+    from particles.ingest.ladder_shell import rung_tally
+
+    subj = await _seed_pair(db_session, content_a=_CROSSED[0], content_b=_CROSSED[1])
+    with rung_tally() as tally:
+        report = await suggest_co_evidential(
+            db_session, subject_id=subj.id, withhold=IDENTIFIER_CROSS
+        )
+
+    assert report.total_candidates == 0
+    assert report.clusters == []
+    assert report.withheld == {"identifier_cross@1": 1}
+    counts = tally.payload()[QuestionKind.DUPLICATE.value]
+    assert counts["rungs"]["identifier_cross@1"] == {"different": 1}
+    assert counts["settled"]["identifier_cross@1"] == {"different": 1}
+
+
+@pytest.mark.asyncio
+async def test_withhold_keeps_a_restatement(db_session: AsyncSession) -> None:
+    from particles.core.ladders import IDENTIFIER_CROSS
+
+    subj = await _seed_pair(db_session)
+    report = await suggest_co_evidential(db_session, subject_id=subj.id, withhold=IDENTIFIER_CROSS)
+
+    assert report.total_candidates == 1
+    assert report.withheld == {"identifier_cross@1": 0}
+
+
+@pytest.mark.asyncio
+async def test_the_judge_is_not_asked_about_a_withheld_pair(db_session: AsyncSession) -> None:
+    from particles.core.ladders import IDENTIFIER_CROSS
+
+    subj = await _seed_pair(db_session, content_a=_CROSSED[0], content_b=_CROSSED[1])
+    with patch("particles.operations._llm._llm_call", return_value="{}") as mock_llm:
+        report = await suggest_co_evidential(
+            db_session, subject_id=subj.id, mode=SuggestMode.LLM_JUDGE, withhold=IDENTIFIER_CROSS
+        )
+
+    mock_llm.assert_not_called()
+    assert report.judged_pairs == 0
+
+
+@pytest.mark.asyncio
+async def test_without_a_rung_the_finder_reports_the_crossed_pair(
+    db_session: AsyncSession,
+) -> None:
+    subj = await _seed_pair(db_session, content_a=_CROSSED[0], content_b=_CROSSED[1])
+    report = await suggest_co_evidential(db_session, subject_id=subj.id)
+
+    assert report.total_candidates == 1
+    assert report.withheld == {}
+
+
+@pytest.mark.asyncio
+async def test_withhold_refuses_a_rung_it_cannot_run(db_session: AsyncSession) -> None:
+    from particles.core.rung_ladder import CostClass, DuplicateVerdict, Rung
+
+    model_rung: Rung[tuple[str, str], DuplicateVerdict] = Rung(
+        name="judge", version="x", cost=CostClass.MODEL
+    )
+    with pytest.raises(ValueError, match="pure or local rung"):
+        await suggest_co_evidential(db_session, withhold=model_rung)

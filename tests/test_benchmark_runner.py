@@ -43,6 +43,7 @@ from particles.benchmark.loader import load_suite
 from particles.benchmark.runner import (
     AggregateBenchmarkReport,
     BenchmarkReport,
+    BenchmarkRunEstimate,
     CaseResult,
     ClaimOutcome,
     estimate_benchmark_run,
@@ -950,6 +951,80 @@ class TestBenchmarkRunEstimate:
         assert "extraction call(s)" in rendered
 
 
+def _sized_suite(chars: int) -> BenchmarkSuite:
+    """One inline case of ``chars`` characters, enough text for output to matter."""
+    return BenchmarkSuite(
+        suite_id="stub-suite",
+        name="stub",
+        version="0.0.1",
+        domain="test",
+        source_types=["TEST_TYPE"],
+        cases=[
+            BenchmarkCase(
+                case_id="case-1",
+                expected=[_required("x")],
+                source_snapshot=Snapshot(content_hash="a" * 64),
+                inline_content=b"word " * (chars // 5),
+            )
+        ],
+    )
+
+
+class TestBenchmarkRunEstimatePriced:
+    """The estimate models output and prices it per extraction model."""
+
+    def _estimate(self, model: str, *, runs: int = 3) -> BenchmarkRunEstimate:
+        from particles.config import ProviderSelection, get_config
+
+        get_config().llm.extraction = ProviderSelection(provider="anthropic", model=model)
+        return estimate_benchmark_run(
+            [_sized_suite(12_000)], _PerfectStub(["x"]), fixture_dir=Path("."), runs=runs
+        )
+
+    def test_two_models_get_two_figures(self) -> None:
+        """Before both printed the same input-only token count."""
+        newer = self._estimate("claude-sonnet-5-5")
+        older = self._estimate("claude-sonnet-4-6")
+        assert newer.band is not None and older.band is not None
+        assert newer.band.output_tokens_high != older.band.output_tokens_high
+        assert newer.band.high_usd is not None and older.band.high_usd is not None
+        assert newer.band.high_usd != older.band.high_usd
+        assert newer.extraction_provider_model == "anthropic:claude-sonnet-5-5"
+        assert newer.price_per_mtok is not None and newer.price_per_mtok.output == 10.0
+
+    def test_output_is_counted_and_dominates_a_dense_source(self) -> None:
+        estimate = self._estimate("claude-sonnet-5-5")
+        band = estimate.band
+        assert band is not None
+        assert 0 < band.output_tokens_low <= band.output_tokens_high
+        assert band.output_tokens_low > band.input_tokens
+        assert band.low_usd is not None and band.high_usd is not None
+        assert 0 < band.low_usd <= band.high_usd
+
+    def test_cost_scales_with_runs(self) -> None:
+        one = self._estimate("claude-sonnet-5-5", runs=1)
+        three = self._estimate("claude-sonnet-5-5", runs=3)
+        assert one.band is not None and three.band is not None
+        # Token counts are rounded per estimate, so allow a token or two.
+        assert three.band.input_tokens == pytest.approx(3 * one.band.input_tokens, abs=3)
+        assert three.band.output_tokens_low == pytest.approx(3 * one.band.output_tokens_low, abs=3)
+
+    def test_render_names_the_model_tokens_and_dollars(self) -> None:
+        rendered = render_benchmark_estimate(self._estimate("claude-sonnet-5-5"))
+        assert "on anthropic:claude-sonnet-5-5" in rendered
+        assert "output tokens" in rendered
+        assert "at list price (US$2 in / US$10 out per MTok)" in rendered
+        assert "audit.estimate_output_scale_by_model[claude-sonnet-5-5]" in rendered
+
+    def test_an_unpriced_model_says_so_and_prints_no_dollars(self) -> None:
+        estimate = self._estimate("mystery-model")
+        assert estimate.price_per_mtok is None
+        rendered = render_benchmark_estimate(estimate)
+        assert "no dollar figure" in rendered
+        assert "anthropic:mystery-model has no llm.price_per_mtok entry" in rendered
+        assert "US$" not in rendered
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -1267,6 +1342,97 @@ class TestBenchmarkCLIRepeatRuns:
         assert "nothing was run" in (result.stderr or "")
         assert "Benchmark report" not in result.stdout
         assert not runs_dir.exists()
+
+    def _write_run_file(
+        self,
+        runs_dir: Path,
+        stamp: str,
+        provider_model: str,
+        cost: float,
+        *,
+        suite: str,
+        suffix: str = "",
+    ) -> None:
+        import json as _json
+
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        envelope = {
+            "format": 1,
+            "extraction_provider_model": provider_model,
+            "report": {
+                "suite_id": suite,
+                "extractor_id": "numista-coin-extractor",
+                "generated_at": stamp,
+            },
+            "llm_usage": {
+                "rows": [
+                    {
+                        "purpose": "extraction",
+                        "provider": provider_model.partition(":")[0],
+                        "model": provider_model.partition(":")[2],
+                        "calls": 6,
+                        "input_tokens": 20_000,
+                        "output_tokens": 30_000,
+                        "cache_read_tokens": 8_000,
+                        "cost_usd": cost,
+                    }
+                ],
+                "cost_usd": cost,
+            },
+        }
+        name = f"{stamp}-benchmark-numista-coin-extractor-{suite}{suffix}.json"
+        (runs_dir / name).write_text(_json.dumps(envelope))
+
+    def test_estimate_quotes_the_newest_recorded_pass_on_the_same_pairing(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Option (b): measured usage beside the projection."""
+        from particles.config import get_config
+
+        runs_dir = tmp_path / "runs"
+        monkeypatch.setenv("BENCHMARK_RUNS_DIR", str(runs_dir))
+        sel = get_config().llm.for_purpose("extraction")
+        pairing = f"{sel.provider}:{sel.model}"
+        suite = "numismatic-seed-001"
+        self._write_run_file(runs_dir, "20261001T000000Z", pairing, 0.40, suite=suite)
+        self._write_run_file(runs_dir, "20261002T000000Z", pairing, 0.45, suite=suite)
+        # A second pass in the same second is the newer of the two.
+        self._write_run_file(runs_dir, "20261002T000000Z", pairing, 0.50, suite=suite, suffix="-2")
+        # Newer, but another pairing, and another suite sharing the prefix.
+        self._write_run_file(runs_dir, "20261003T000000Z", "other:model", 9.0, suite=suite)
+        self._write_run_file(runs_dir, "20261004T000000Z", pairing, 7.0, suite=f"{suite}-extended")
+        (runs_dir / f"20261005T000000Z-benchmark-numista-coin-extractor-{suite}.json").write_text(
+            "not json"
+        )
+        result = runner.invoke(app, self._base("--runs", "3", "--estimate"), catch_exceptions=False)
+        assert result.exit_code == 0, result.output
+        err = result.stderr or ""
+        assert f"Last recorded pass of {suite} on {pairing} (20261002T000000Z)" in err
+        assert "6 LLM call(s), 20k input + 8k cache read/write, 30k output tokens" in err
+        assert "≈ $0.50 at list price when recorded; × 3 runs ≈ $1.50." in err
+        assert "$9" not in err and "$7" not in err
+
+    def test_no_recorded_pass_prints_no_measured_line(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        runs_dir = tmp_path / "runs"
+        monkeypatch.setenv("BENCHMARK_RUNS_DIR", str(runs_dir))
+        self._write_run_file(
+            runs_dir, "20261003T000000Z", "other:model", 9.0, suite="numismatic-seed-001"
+        )
+        result = runner.invoke(app, self._base("--runs", "2", "--estimate"), catch_exceptions=False)
+        assert result.exit_code == 0, result.output
+        assert "Last recorded pass" not in (result.stderr or "")
+
+    def test_the_llm_judge_is_named_as_not_counted(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("BENCHMARK_RUNS_DIR", str(tmp_path / "runs"))
+        result = runner.invoke(
+            app, self._base("--runs", "2", "--estimate", "--judge", "llm"), catch_exceptions=False
+        )
+        assert result.exit_code == 0, result.output
+        assert "Not counted: the LLM judge's tie-break calls" in (result.stderr or "")
 
     def test_over_threshold_aborts_non_interactively(
         self, runner: CliRunner, monkeypatch: pytest.MonkeyPatch

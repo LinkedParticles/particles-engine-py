@@ -34,6 +34,7 @@ from particles.core.schema import Particle, ProvenanceRefType
 from particles.core.status import Status
 from particles.extraction.append_delta import plan_delta_chunks, raw_offset_for
 from particles.extraction.components import ComponentRecord
+from particles.extraction.day_marks import day_at, mark_days
 from particles.extraction.general import (
     PATH_APPEND_DELTA,
     PATH_CHUNKED,
@@ -74,6 +75,7 @@ def decide_partial_keep(
     earlier_all_complete: bool,
     chunk_chars: int,
     context_chars: int,
+    dated: bool = False,
 ) -> PartialKeep | None:
     """Decide what a partly failed chunked read keeps, or ``None``.
 
@@ -90,7 +92,9 @@ def decide_partial_keep(
     exact raw offset of the first failed chunk's start. A **delta** whose
     earlier snapshots are all ``COMPLETE`` also keeps each later answered
     chunk that is not the final one and whose hash the retry's own plan
-    contains.
+    contains. ``dated`` says the source is a session transcript, whose delta
+    chunks carry the day a mark puts in force in their key; the
+    retry's plan is keyed the same way.
     """
     if not outcomes or any(o.start is None for o in outcomes):
         return None
@@ -131,8 +135,14 @@ def decide_partial_keep(
     leading = [i for i in answered if i < first_failed]
     later: list[int] = []
     if delta and earlier_all_complete:
+        marks = mark_days(text) if dated else []
         retry = {
-            ChunkUnit(chunk_id="retry", chunk_text=p.text, context=p.context).prompt_hash
+            ChunkUnit(
+                chunk_id="retry",
+                chunk_text=p.text,
+                context=p.context,
+                reference_day=day_at(marks, p.shown_start),
+            ).prompt_hash
             for p in plan_delta_chunks(
                 text, stop, chunk_chars=chunk_chars, context_chars=context_chars
             )

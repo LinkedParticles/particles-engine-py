@@ -12,16 +12,20 @@ from dataclasses import asdict
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import typer
 
 from particles.api.cli import app, run
 from particles.api.cli._progress import confirm
+from particles.api.cli._terminal import terminal_safe
 from particles.conformance.types import ConformanceReport, FieldStat, FieldTier
 from particles.db import session_scope
 from particles.extraction.registry import get_extractors, selects
 from particles.llm.usage import LLMUsage, observe_sampling, render_usage_line, track_usage
+
+if TYPE_CHECKING:
+    from particles.benchmark.equivalence import EquivalenceJudge
 
 extractor_app = typer.Typer(help="Manage extractor registry (Extension A).", no_args_is_help=True)
 app.add_typer(extractor_app, name="extractor")
@@ -675,7 +679,9 @@ async def _extractor_benchmark(  # noqa: PLR0913 — CLI option list is the API
     # never gated: N=1 behaviour is byte-for-byte what it was before
     # --runs existed.
     if runs > 1 or estimate_only:
-        _benchmark_cost_gate(suites, extractor, fixtures_dir, runs, estimate_only, yes)
+        _benchmark_cost_gate(
+            suites, extractor, fixtures_dir, runs, estimate_only, yes, llm_judge=judge_enum
+        )
         if estimate_only:
             return
 
@@ -752,6 +758,8 @@ def _benchmark_cost_gate(
     runs: int,
     estimate_only: bool,
     yes: bool,
+    *,
+    llm_judge: EquivalenceJudge | None = None,
 ) -> None:
     """Print the projected cost, then confirm above the config threshold.
 
@@ -759,13 +767,27 @@ def _benchmark_cost_gate(
     estimate always precedes the first LLM call, ``--estimate`` stops there,
     and a projection over ``benchmark.confirm_call_threshold`` needs ``--yes``
     or an interactive yes. The estimate goes to stderr so ``--format json``
-    keeps a clean stdout.
+    keeps a clean stdout. Beside the projection it prints what the newest
+    recorded pass of each suite on the same pairing measured, when one exists.
     """
+    from particles.benchmark.equivalence import EquivalenceJudge
     from particles.benchmark.runner import estimate_benchmark_run, render_benchmark_estimate
     from particles.config import get_config
 
     cost = estimate_benchmark_run(suites, extractor, fixture_dir=fixtures_dir, runs=runs)
     typer.echo(render_benchmark_estimate(cost), err=True)
+    if llm_judge is EquivalenceJudge.LLM:
+        typer.echo(
+            "  Not counted: the LLM judge's tie-break calls (llm.benchmark), one per "
+            "contested claim pair.",
+            err=True,
+        )
+    for suite in suites:
+        line = _recorded_usage_line(
+            suite.suite_id, extractor.EXTRACTOR_ID, cost.extraction_provider_model, runs
+        )
+        if line is not None:
+            typer.echo(line, err=True)
     if estimate_only:
         typer.echo("--estimate: nothing was run.", err=True)
         return
@@ -783,6 +805,94 @@ def _benchmark_cost_gate(
         if not confirm(f"Proceed with ≥{cost.estimated_extraction_calls} extraction calls?"):
             typer.echo("Aborted.", err=True)
             raise typer.Exit(1)
+
+
+#: Newest run files read per suite when looking for a recorded pass to quote.
+_RECORDED_USAGE_SCAN = 50
+
+
+def _recorded_usage(
+    suite_id: str, extractor_id: str, provider_model: str
+) -> tuple[str, LLMUsage] | None:
+    """``(generated_at, usage)`` of the newest recorded pass of this suite and pairing.
+
+    Reads the run files ``_persist_benchmark_run`` writes under
+    ``benchmark.runs_dir``, newest first by their timestamped name, and
+    returns the first one for the same suite, extractor and extraction
+    ``provider:model`` that carries ``llm_usage``.
+    At most ``_RECORDED_USAGE_SCAN`` files are read; an unreadable one is
+    skipped.
+    """
+    import glob
+
+    from particles.config import get_config
+
+    runs_dir = Path(get_config().benchmark.runs_dir).expanduser()
+    base = f"*-benchmark-{glob.escape(extractor_id)}-{glob.escape(suite_id)}"
+    # A run file is ``<base>.json``, or ``<base>-<n>.json`` for a second run
+    # within the same second (``_persist_benchmark_run``).
+    try:
+        found = [*runs_dir.glob(f"{base}.json"), *runs_dir.glob(f"{base}-[0-9]*.json")]
+    except OSError:
+        return None
+
+    def _newest_first(path: Path) -> tuple[str, int]:
+        stamp, _, rest = path.name.partition("-")
+        tail = rest.removesuffix(".json").rpartition("-")[2]
+        return stamp, int(tail) if tail.isdigit() else 1
+
+    paths = sorted(found, key=_newest_first, reverse=True)[:_RECORDED_USAGE_SCAN]
+    for path in paths:
+        try:
+            envelope = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if not isinstance(envelope, dict) or envelope.get("format") != _RUN_FILE_FORMAT:
+            continue
+        report = envelope.get("report")
+        raw_usage = envelope.get("llm_usage")
+        if (
+            not isinstance(report, dict)
+            or raw_usage is None
+            or envelope.get("extraction_provider_model") != provider_model
+            or report.get("extractor_id") != extractor_id
+            or report.get("suite_id") != suite_id
+        ):
+            continue
+        try:
+            usage = LLMUsage.model_validate(raw_usage)
+        except ValueError:
+            continue
+        return str(report.get("generated_at") or path.name.partition("-")[0]), usage
+    return None
+
+
+def _recorded_usage_line(
+    suite_id: str, extractor_id: str, provider_model: str, runs: int
+) -> str | None:
+    """One line quoting the newest recorded pass's measured usage, or None when none exists."""
+    from particles.llm.usage import format_tokens, format_usd
+
+    found = _recorded_usage(suite_id, extractor_id, provider_model)
+    if found is None:
+        return None
+    generated_at, usage = found
+    billed = [row for row in usage.rows if not row.replayed]
+    uncached = sum(row.input_tokens for row in billed)
+    cached = sum(row.cache_read_tokens + row.cache_creation_tokens for row in billed)
+    output = sum(row.output_tokens for row in billed)
+    text = (
+        f"  Last recorded pass of {suite_id} on {provider_model} ({generated_at}): "
+        f"{usage.calls} LLM call(s), {format_tokens(uncached)} input"
+        + (f" + {format_tokens(cached)} cache read/write" if cached else "")
+        + f", {format_tokens(output)} output tokens"
+    )
+    if usage.cost_usd is None:
+        return text + "; unpriced when recorded."
+    text += f", ≈ {format_usd(usage.cost_usd)} at list price when recorded"
+    if runs > 1:
+        text += f"; × {runs} runs ≈ {format_usd(usage.cost_usd * runs)}"
+    return text + "."
 
 
 def _fail_on_metric(metrics: dict[str, float], fail_on: _BenchmarkFailOn, threshold: float) -> bool:
@@ -2609,7 +2719,9 @@ def _print_benchmark_table(report: Any) -> None:
             if claim.outcome == "spurious" and claim.content is not None
         ]
         for claim in spurious_claims[:5]:
-            typer.echo(f"      ! SPURIOUS ({claim.confidence:.2f}): {claim.content[:80]}")
+            typer.echo(
+                f"      ! SPURIOUS ({claim.confidence:.2f}): {terminal_safe(claim.content[:80])}"
+            )
         if len(spurious_claims) > 5:
             typer.echo(f"        … and {len(spurious_claims) - 5} more (see the saved report)")
     if report.quality_notes:

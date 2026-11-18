@@ -33,8 +33,10 @@ from urllib.parse import quote
 import httpx
 
 from particles.api.client.base import (
+    AcceptOutcome,
     AliasOutcome,
     BlobResult,
+    CodexCaptureEvidence,
     DepositOutcome,
     DismissOutcome,
     ExtractOutcome,
@@ -68,11 +70,13 @@ from particles.core.schema import (
     TaxonomyDefinition,
 )
 from particles.http import egress_client
-from particles.secrets import get_engine_token_optional
+from particles.secrets import engine_token_file_path, get_engine_token_optional
+from particles.store.subject_provisional import SubjectView
 from particles.url_safety import is_cleartext_remote, is_network_uri, url_without_userinfo
 
 if TYPE_CHECKING:
     from particles.operations.agent_write import AgentWriteResult
+    from particles.operations.curation import CardKind, CurationCard, CurationQueueResult
     from particles.operations.deposit_suggest import DepositSuggestReport
     from particles.operations.digest import RenderedDigest
     from particles.operations.projection import DocManifest
@@ -140,7 +144,14 @@ def _detail(response: httpx.Response) -> str:
 
 
 class EngineHttpError(RuntimeError):
-    """A non-2xx response from the remote engine, carrying the engine's detail."""
+    """A non-2xx response from the remote engine, carrying the engine's detail.
+
+    ``status_code`` is the response's status when the error came from one, so a
+    caller can tell a refusal of one item (a 4xx) from "not now" (a 429, a 5xx).
+    It is ``None`` for an error raised before or without a response.
+    """
+
+    status_code: int | None = None
 
 
 class PlaintextTokenRefused(EngineHttpError):
@@ -165,9 +176,17 @@ class EngineRefusedError(EngineHttpError):
 def _http_error(response: httpx.Response, path: str) -> EngineHttpError:
     """The error for a non-2xx engine response, typed for a 503 refusal."""
     message = f"{response.status_code} from {path}: {_detail(response)}"
-    if response.status_code == 503:
-        return EngineRefusedError(message)
-    return EngineHttpError(message)
+    if response.status_code == 401 and (token_file := engine_token_file_path()) is not None:
+        # The token file is read once per process: a long-lived
+        # MCP server keeps a revoked key until it restarts, so say so.
+        message += (
+            f". This process read its key from {token_file} when it started; a rewritten "
+            "token file takes effect when the process restarts (for the MCP server, "
+            "reconnect it or start a new session)"
+        )
+    error = EngineRefusedError(message) if response.status_code == 503 else EngineHttpError(message)
+    error.status_code = response.status_code
+    return error
 
 
 class EngineUnreachableError(EngineHttpError):
@@ -183,6 +202,16 @@ class EngineUnreachableError(EngineHttpError):
     ``run()`` helper and the ``links`` verb) covers both "couldn't talk to the
     engine" cases uniformly.
     """
+
+
+def _digest_params(project: str | None, since: datetime | None) -> dict[str, str] | None:
+    """A digest request's query: the observer, and where the retirement window opens."""
+    params: dict[str, str] = {}
+    if project is not None:
+        params["project"] = project
+    if since is not None:
+        params["retired_since"] = since.isoformat()
+    return params or None
 
 
 def _seg(value: str) -> str:
@@ -204,25 +233,55 @@ class HttpBackend:
 
     remote = True
 
+    def __init__(self, token: str | None = None, base_url: str | None = None) -> None:
+        # A caller checking one particular key against one particular engine
+        # (the installer probing each key it pins) passes both;
+        # everyone else reads the configured engine and the process's key.
+        self._token = token
+        self._base_url = base_url
+
     async def health(self) -> str:
         body = await self._get("/health")
         return str(body["version"])
 
+    async def probe_health(self) -> httpx.Response:
+        """``GET /health`` with its status left to the caller (``hook doctor``).
+
+        Raises :class:`EngineUnreachableError` when no response arrives and
+        :class:`PlaintextTokenRefused` before sending, as every request does.
+        """
+        return await self._request("GET", "/health")
+
+    async def probe_digest(self, store: str) -> httpx.Response:
+        """``GET /digest/{store}`` with its status left to the caller (``hook doctor``).
+
+        The digest route always takes the bearer (or the dev-key bounds), so
+        its status says whether this client's token is accepted.
+        """
+        return await self._request("GET", f"/digest/{_seg(store)}")
+
+    async def probe_tuning(self) -> httpx.Response:
+        """``GET /config/tuning`` with its status left to the caller (``hook doctor``).
+
+        An engine older than the route answers 404, which the doctor reports
+        as not compared rather than as a failure.
+        """
+        return await self._request("GET", "/config/tuning")
+
     @asynccontextmanager
     async def _client(self) -> AsyncIterator[httpx.AsyncClient]:
         engine = get_config().engine
-        if not engine.base_url:
+        base_url = self._base_url or engine.base_url
+        if not base_url:
             # The factory only builds HttpBackend when base_url is set; this
             # guards a direct instantiation with a misconfigured environment.
             raise RuntimeError("HttpBackend requires engine.base_url to be configured.")
-        token = get_engine_token_optional()
+        token = self._token if self._token is not None else get_engine_token_optional()
         headers = {"Authorization": f"Bearer {token}"} if token else {}
-        _check_plaintext_token(
-            engine.base_url, has_token=bool(token), allow=engine.allow_plaintext_token
-        )
+        _check_plaintext_token(base_url, has_token=bool(token), allow=engine.allow_plaintext_token)
         async with egress_client(
             purpose="remote engine",
-            base_url=engine.base_url,
+            base_url=base_url,
             timeout=engine.timeout_seconds,
             headers=headers,
         ) as client:
@@ -248,9 +307,12 @@ class HttpBackend:
                 return await client.request(method, path, **kwargs)
         except httpx.TransportError as exc:
             base_url = get_config().engine.base_url
+            # A dropped connection can carry no text (a ReadError from a closed
+            # tunnel), and others end in a period of their own.
+            cause = str(exc).strip().rstrip(".") or type(exc).__name__
             raise EngineUnreachableError(
                 f"Could not reach the Particles engine at {url_without_userinfo(base_url or '')}: "
-                f"{exc}. "
+                f"{cause}. "
                 f"Check that the engine is running and reachable — e.g. your SSH "
                 f"tunnel is open and the engine is serving — or unset "
                 f"engine.base_url to use the local store."
@@ -299,6 +361,7 @@ class HttpBackend:
         tags: list[str],
         follow_post_links: bool | None,
         follow_comment_links: bool | None,
+        standing: bool = False,
     ) -> DepositOutcome:
         body = await self._post(
             "/corpus/deposit/url",
@@ -309,6 +372,7 @@ class HttpBackend:
                 "tags": tags,
                 "follow_post_links": follow_post_links,
                 "follow_comment_links": follow_comment_links,
+                "standing": standing,
             },
         )
         return DepositOutcome(
@@ -328,6 +392,8 @@ class HttpBackend:
         mutability: str | None = None,
         fetch_policy: str | None = None,
         content: bytes | None = None,
+        standing: bool = False,
+        statement: bool = False,
     ) -> DepositOutcome:
         """Upload one file to ``POST /corpus/deposit/file``.
 
@@ -349,6 +415,12 @@ class HttpBackend:
                 "path later. Run the deposit against a local store."
             )
         data: dict[str, Any] = {"deposited_by": deposited_by, "tags": tags}
+        if standing:
+            data["standing"] = "true"
+        if statement:
+            # The remote ``import vault`` arm: the operator's
+            # own writing, which the engine neither marks nor unmarks.
+            data["statement"] = "true"
         if source_type is not None:
             data["source_type"] = source_type
         if content_date is not None:
@@ -376,6 +448,7 @@ class HttpBackend:
         deposited_by: str,
         source_type: str | None,
         tags: list[str],
+        standing: bool = False,
     ) -> list[DepositOutcome]:
         # The /corpus/deposit/file endpoint returns one entry; there is no
         # multi-entry split endpoint yet. Refuse rather than silently depositing
@@ -482,6 +555,38 @@ class HttpBackend:
         body = await self._get("/quality")
         return QualityReport.model_validate(body)
 
+    async def curation_queue(
+        self,
+        *,
+        limit: int | None,
+        kind: CardKind | None,
+        semantic: bool,
+        no_snapshot: bool,
+    ) -> CurationQueueResult:
+        from particles.operations.curation import CurationQueueResult
+
+        # ``semantic`` is always sent: the route defaults an absent value to the
+        # engine's ``curation.semantic``, and the CLI flag means "off" when unset.
+        params: dict[str, Any] = {"semantic": semantic, "no_snapshot": no_snapshot}
+        if limit is not None:
+            params["limit"] = limit
+        if kind is not None:
+            params["kind"] = kind.value
+        body = dict(await self._get("/curation", params=params))
+        degraded = bool(body.pop("semantic_skipped", False))
+        return CurationQueueResult.model_validate(
+            {**body, "semantic": semantic, "semantic_degraded": degraded}
+        )
+
+    async def curation_card(self, key: str) -> CurationCard | None:
+        from particles.operations.curation import CurationCard
+
+        body = await self._get_optional(f"/curation/cards/{_seg(key)}")
+        return CurationCard.model_validate(body) if body is not None else None
+
+    async def curation_rebuild(self, *, semantic: bool) -> None:
+        await self._post("/curation/rebuild", {}, params={"semantic": semantic})
+
     async def reindex(
         self,
         *,
@@ -546,7 +651,7 @@ class HttpBackend:
         if order != "name":
             params["order"] = order
         body = await self._get("/subjects", params=params)
-        return [Subject.model_validate(s) for s in body]
+        return [SubjectView.model_validate(s) for s in body]
 
     async def subjects_search(
         self, query: str, *, limit: int | None = None, offset: int = 0
@@ -555,13 +660,13 @@ class HttpBackend:
         if limit is not None:
             params["limit"] = limit
         body = await self._get("/subjects/search", params=params)
-        return [Subject.model_validate(s) for s in body]
+        return [SubjectView.model_validate(s) for s in body]
 
     async def subject_show(self, subject_id: str, *, by_name: bool = False) -> Subject | None:
         # The engine route resolves IDs and prefixes only, so ``by_name`` has no
         # remote analogue and a name misses as not found.
         body = await self._get_optional(f"/subjects/{_seg(subject_id)}")
-        return Subject.model_validate(body) if body is not None else None
+        return SubjectView.model_validate(body) if body is not None else None
 
     async def corpus_show(self, entry_id: str) -> CorpusEntry | None:
         body = await self._get_optional(f"/corpus/{_seg(entry_id)}")
@@ -663,7 +768,7 @@ class HttpBackend:
             f"/subjects/{_seg(subject_id)}/particle-ids", params={"limit": particle_id_limit}
         )
         return SubjectDetail(
-            subject=Subject.model_validate(subject_body),
+            subject=SubjectView.model_validate(subject_body),
             particle_ids=list(ids_body["particle_ids"]),
             particle_count=int(ids_body["particle_count"]),
         )
@@ -686,16 +791,36 @@ class HttpBackend:
         body = await self._get("/corpus", params=params)
         return [CorpusEntry.model_validate(e) for e in body]
 
-    async def digest(self, store: str, project: str | None = None) -> str:
+    async def digest(
+        self, store: str, project: str | None = None, retired_since: datetime | None = None
+    ) -> str:
         # The engine evaluates the observer against ITS entry tags.
-        params = {"project": project} if project is not None else None
-        body = await self._get(f"/digest/{_seg(store)}", params=params)
+        body = await self._get(
+            f"/digest/{_seg(store)}", params=_digest_params(project, retired_since)
+        )
         return str(body["markdown"])
 
-    async def digest_located(self, store: str, project: str | None = None) -> RenderedDigest:
+    async def retirement_notice(
+        self, store: str, project: str | None = None, since: datetime | None = None
+    ) -> str:
+        body = await self._get(
+            f"/digest/{_seg(store)}/retirements", params=_digest_params(project, since)
+        )
+        return str(body["markdown"])
+
+    async def digest_located(
+        self,
+        store: str,
+        project: str | None = None,
+        retired_since: datetime | None = None,
+        *,
+        strict_scope: bool = False,
+    ) -> RenderedDigest:
         from particles.operations.digest import RenderedDigest
 
-        params = {"project": project} if project is not None else None
+        params = _digest_params(project, retired_since) or {}
+        if strict_scope:
+            params["strict_scope"] = "true"
         body = await self._get(f"/digest/{_seg(store)}", params=params)
         # An engine that predates the line ids sends no ``lines``; the model defaults them.
         return RenderedDigest.model_validate(body)
@@ -712,20 +837,27 @@ class HttpBackend:
     ) -> MemoryRegion:
         # The engine renders from the client's manifest and answers the fold
         # verdicts; the memory directory never leaves the client.
-        # ``base_dir`` is a client path the engine cannot read, so a manifest
-        # with a file section is refused here, before any request.
+        # ``base_dir`` is a client path the engine cannot read, so this client
+        # reads each file section under the local render's containment rules
+        # and sends its text, before any request. Sending client
+        # content rides the harness's one opt-in for it.
         from particles.operations.projection.memory_region import (
             ClientFileSectionError,
             MemoryRegion,
             body_hash,
             has_client_file_section,
+            read_block_texts,
         )
 
-        del base_dir
+        blocks: dict[str, str] = {}
         if has_client_file_section(manifest):
-            raise ClientFileSectionError(
-                "the memory manifest includes a file section, which a remote engine cannot read"
-            )
+            if not get_config().claude_code.harvest.allow_remote:
+                raise ClientFileSectionError(
+                    "the memory manifest includes a file section, whose text is sent to a "
+                    "remote engine only when claude_code.harvest.allow_remote is set "
+                    ""
+                )
+            blocks = read_block_texts(manifest, base_dir)
         body = await self._post(
             f"/memory/projection/{_seg(store)}",
             {
@@ -733,6 +865,7 @@ class HttpBackend:
                 "observer_project": observer_project,
                 "exclude_source_tags": exclude_source_tags,
                 "fold_targets": fold_targets,
+                "blocks": blocks,
             },
         )
         region = MemoryRegion(
@@ -824,6 +957,17 @@ class HttpBackend:
             },
         )
         return int(body["cascade_resolved"])
+
+    async def subject_accept(self, subject_id: str) -> AcceptOutcome:
+        resp = await self._request("POST", f"/subjects/{_seg(subject_id)}/accept")
+        if resp.status_code == 404:
+            raise ValueError(f"Subject {subject_id!r} not found.")
+        if resp.status_code >= 400:
+            raise _http_error(resp, f"/subjects/{subject_id}/accept")
+        body = resp.json()
+        return AcceptOutcome(
+            subject=SubjectView.model_validate(body["subject"]), accepted=bool(body["accepted"])
+        )
 
     async def subject_alias(self, subject_id: str, aliases: list[str]) -> AliasOutcome:
         body = await self._post(f"/subjects/{_seg(subject_id)}/aliases", {"aliases": aliases})
@@ -1123,6 +1267,7 @@ class HttpBackend:
         deposited_by: str | None = None,
         source_type: str | None = None,
         project_key: str | None = None,
+        standing: bool = False,
     ) -> tuple[str, str]:
         if deposited_by is None:
             # Agent path: the engine's own agent deposit route stamps the
@@ -1146,6 +1291,7 @@ class HttpBackend:
                 "deposited_by": deposited_by,
                 "tags": tags or [],
                 "author_id": deposited_by,
+                "standing": standing,
             },
             params={"store": store},
         )
@@ -1163,7 +1309,25 @@ class HttpBackend:
         content_published_at: datetime | None,
         store: str,
         fetch_policy: str | None = None,
+        codex_capture: CodexCaptureEvidence | None = None,
     ) -> TextDepositOutcome:
+        if codex_capture is not None:
+            body = await self._post(
+                "/corpus/deposit/text",
+                {
+                    "uri_r": uri_r,
+                    "source_type": source_type,
+                    "mutability": mutability,
+                    "fetch_policy": fetch_policy,
+                    "codex_capture": {**codex_capture, "text": text},
+                },
+                params={"store": store},
+            )
+            return TextDepositOutcome(
+                entry_id=body["entry_id"],
+                snapshot_id=body["snapshot_id"],
+                unchanged=bool(body.get("unchanged", False)),
+            )
         # The harvest deposit rides the same generic corpus deposit
         # endpoint; ``uri_r`` switches the engine handler onto the versioned
         # path (one entry per logical source, unchanged re-deposit skipped).
@@ -1195,3 +1359,35 @@ class HttpBackend:
             snapshot_id=body["snapshot_id"],
             unchanged=bool(body.get("unchanged", False)),
         )
+
+    async def codex_capture_proof(
+        self,
+        store: str,
+        session_id: str,
+        *,
+        home_path: str,
+        home_id: str,
+        boundary: tuple[int, int] | None = None,
+    ) -> dict[str, Any] | None:
+        """Read a committed Codex capture head or exact fork-boundary proof."""
+        from urllib.parse import quote
+
+        path = f"/corpus/codex-capture/{_seg(session_id)}"
+        params: dict[str, Any] = {"store": store}
+        if boundary is not None:
+            params.update(byte_offset=boundary[0], ordinal=boundary[1])
+        response = await self._request(
+            "GET",
+            path,
+            params=params,
+            headers={
+                "X-Particles-Codex-Home": quote(home_path),
+                "X-Particles-Codex-Home-Id": home_id,
+            },
+        )
+        if response.status_code == 404:
+            return None
+        if response.status_code >= 400:
+            raise _http_error(response, path)
+        result: dict[str, Any] = response.json()
+        return result

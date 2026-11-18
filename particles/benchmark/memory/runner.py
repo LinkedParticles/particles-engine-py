@@ -1333,8 +1333,13 @@ async def _scored_call(
     retries: int,
     backoff_seconds: float,
     system: str | None = None,
+    before_attempt: Callable[[], None] | None = None,
 ) -> _CallOutcome:
     """One answer/judge call: retry transient failures, classify what remains.
+
+    ``before_attempt``, when given, runs before the call and before each retry,
+    outside the failure handling, so whatever it raises reaches the caller: the
+    judged verbs' spend stop checks there.
 
     The two failure causes are treated differently on purpose.
 
@@ -1356,6 +1361,8 @@ async def _scored_call(
     """
     attempt = 0
     while True:
+        if before_attempt is not None:
+            before_attempt()
         try:
             text = await complete(
                 purpose,
@@ -3074,7 +3081,9 @@ async def _run_question(
     # rather than bookkeeping. ``confirmed=True`` because the interactive
     # apply-confirmation threshold has no meaning on a throwaway store.
     if dedup_judge:
-        judge_report = await suggest_co_evidential(session, mode=SuggestMode.APPLY, confirmed=True)
+        judge_report = await suggest_co_evidential(
+            session, mode=SuggestMode.APPLY, confirmed=True, actor="benchmark:memory"
+        )
         await session.commit()
         notes.append(
             f"Question {question.question_id}: dedup judge applied "

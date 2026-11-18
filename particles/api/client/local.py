@@ -22,8 +22,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from particles.api.client.base import (
+    AcceptOutcome,
     AliasOutcome,
     BlobResult,
+    CodexCaptureEvidence,
     DepositOutcome,
     DismissOutcome,
     ExtractOutcome,
@@ -59,7 +61,10 @@ from particles.db import session_scope, write_lock, write_transaction
 from particles.extraction.general import PageStat
 
 if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
     from particles.operations.agent_write import AgentWriteResult
+    from particles.operations.curation import CardKind, CurationCard, CurationQueueResult
     from particles.operations.deposit_suggest import DepositSuggestReport
     from particles.operations.digest import RenderedDigest
     from particles.operations.projection import DocManifest
@@ -67,6 +72,20 @@ if TYPE_CHECKING:
     from particles.operations.source_passage import SourcePassage
     from particles.store.event_store import OperatorEvent
     from particles.store.session_exposure_store import SessionExposure
+
+
+def _document_tags(tags: list[str] | None, *, standing: bool) -> list[str]:
+    """A document deposit's tags with the reference marker decided."""
+    from particles.core.observer_scope import with_reference_marker
+
+    return with_reference_marker(tags, get_config().observer_scope.harness_tags, standing=standing)
+
+
+async def _unmark_on_standing(session: AsyncSession, entry_id: str) -> None:
+    """A ``--standing`` re-deposit onto a marked entry makes it global."""
+    from particles.operations.observer_scope import unmark_reference
+
+    await unmark_reference(session, entry_id, actor="deposit", by="standing")
 
 
 class LocalBackend:
@@ -88,11 +107,13 @@ class LocalBackend:
         tags: list[str],
         follow_post_links: bool | None,
         follow_comment_links: bool | None,
+        standing: bool = False,
     ) -> DepositOutcome:
         from particles.operations.deposit import deposit_url, writes_committed_under_lock
 
         follow: list[tuple[str, str, str]] = []
         unchanged: list[bool] = []
+        tags = _document_tags(tags, standing=standing)
         # The fetches run outside the store's writer lock and each write unit
         # commits under it, as the HTTP URL route does, so a slow origin never
         # holds up every other writer.
@@ -112,7 +133,8 @@ class LocalBackend:
             # Each write unit committed itself; this commits, under the lock,
             # any write a unit did not cover.
             async with write_transaction(session):
-                pass
+                if standing:
+                    await _unmark_on_standing(session, entry_id)
         return DepositOutcome(
             entry_id=entry_id,
             snapshot_id=snapshot_id,
@@ -130,6 +152,7 @@ class LocalBackend:
         content_date: datetime | None,
         mutability: str | None = None,
         fetch_policy: str | None = None,
+        standing: bool = False,
     ) -> DepositOutcome:
         from particles.core.schema import FetchPolicy, Mutability
         from particles.operations.deposit import deposit_file
@@ -141,12 +164,14 @@ class LocalBackend:
                 path,
                 deposited_by=deposited_by,
                 source_type=source_type,
-                tags=tags,
+                tags=_document_tags(tags, standing=standing),
                 content_date=content_date,
                 mutability=Mutability(mutability) if mutability else None,
                 fetch_policy=FetchPolicy(fetch_policy) if fetch_policy else None,
                 out_unchanged=unchanged,
             )
+            if standing:
+                await _unmark_on_standing(session, entry_id)
             await session.commit()
         return DepositOutcome(entry_id=entry_id, snapshot_id=snapshot_id, unchanged=any(unchanged))
 
@@ -157,6 +182,7 @@ class LocalBackend:
         deposited_by: str,
         source_type: str | None,
         tags: list[str],
+        standing: bool = False,
     ) -> list[DepositOutcome]:
         from particles.operations.deposit import split_file_by_date
 
@@ -166,8 +192,11 @@ class LocalBackend:
                 path,
                 deposited_by=deposited_by,
                 source_type=source_type,
-                tags=tags,
+                tags=_document_tags(tags, standing=standing),
             )
+            if standing:
+                for entry_id, _snapshot_id in rows:
+                    await _unmark_on_standing(session, entry_id)
             await session.commit()
         return [DepositOutcome(entry_id=e, snapshot_id=s) for e, s in rows]
 
@@ -294,6 +323,37 @@ class LocalBackend:
         async with session_scope() as session:
             return await get_quality_report(session)
 
+    async def curation_queue(
+        self,
+        *,
+        limit: int | None,
+        kind: CardKind | None,
+        semantic: bool,
+        no_snapshot: bool,
+    ) -> CurationQueueResult:
+        from particles.operations.curation import QueueSource, build_curation_queue
+
+        async with session_scope() as session:
+            return await build_curation_queue(
+                session,
+                limit=limit,
+                kind=kind,
+                semantic=semantic,
+                source=QueueSource.LIVE if no_snapshot else QueueSource.SNAPSHOT,
+            )
+
+    async def curation_card(self, key: str) -> CurationCard | None:
+        from particles.operations.curation import get_curation_card
+
+        async with session_scope() as session:
+            return await get_curation_card(session, key)
+
+    async def curation_rebuild(self, *, semantic: bool) -> None:
+        from particles.operations.curation import rebuild_curation_snapshot
+
+        async with session_scope() as session:
+            await rebuild_curation_snapshot(session, semantic=semantic)
+
     async def reindex(
         self,
         *,
@@ -360,26 +420,38 @@ class LocalBackend:
         offset: int = 0,
         order: Literal["name", "degree"] = "name",
     ) -> list[Subject]:
+        from particles.store.subject_provisional import with_marks
         from particles.store.subject_store import list_all_subjects
 
         async with session_scope() as session:
-            return await list_all_subjects(session, limit=limit, offset=offset, order=order)
+            return list(
+                await with_marks(
+                    session,
+                    await list_all_subjects(session, limit=limit, offset=offset, order=order),
+                )
+            )
 
     async def subjects_search(
         self, query: str, *, limit: int | None = None, offset: int = 0
     ) -> list[Subject]:
+        from particles.store.subject_provisional import with_marks
         from particles.store.subject_store import search_subjects
 
         async with session_scope() as session:
-            return await search_subjects(session, query, limit=limit, offset=offset)
+            return list(
+                await with_marks(
+                    session, await search_subjects(session, query, limit=limit, offset=offset)
+                )
+            )
 
     async def subject_show(self, subject_id: str, *, by_name: bool = False) -> Subject | None:
+        from particles.store.subject_provisional import with_mark
         from particles.store.subject_store import get_subject, lookup_subject
 
         async with session_scope() as session:
             if by_name:
-                return await lookup_subject(session, subject_id)
-            return await get_subject(session, subject_id)
+                return await with_mark(session, await lookup_subject(session, subject_id))
+            return await with_mark(session, await get_subject(session, subject_id))
 
     async def corpus_show(self, entry_id: str) -> CorpusEntry | None:
         from particles.corpus.store import get_entry
@@ -552,6 +624,7 @@ class LocalBackend:
             return (await in_view(session, found, observer_project))[:limit]
 
     async def subject_detail(self, subject_id: str, *, particle_id_limit: int) -> SubjectDetail:
+        from particles.store.subject_provisional import with_mark
         from particles.store.subject_store import (
             count_particles_for_subject,
             get_particles_for_subject,
@@ -566,6 +639,7 @@ class LocalBackend:
                 session, subject.id, limit=particle_id_limit
             )
             particle_count = await count_particles_for_subject(session, subject.id)
+            subject = await with_mark(session, subject) or subject
         return SubjectDetail(
             subject=subject, particle_ids=particle_ids, particle_count=particle_count
         )
@@ -586,15 +660,33 @@ class LocalBackend:
         async with session_scope() as session:
             return await list_entries(session, limit=limit, source_type=source_type)
 
-    async def digest(self, store: str, project: str | None = None) -> str:
+    async def digest(
+        self, store: str, project: str | None = None, retired_since: datetime | None = None
+    ) -> str:
         from particles.operations.digest import build_digest
 
-        return await build_digest(store, project)
+        return await build_digest(store, project, retired_since)
 
-    async def digest_located(self, store: str, project: str | None = None) -> RenderedDigest:
+    async def retirement_notice(
+        self, store: str, project: str | None = None, since: datetime | None = None
+    ) -> str:
+        from particles.operations.retirement_notice import build_retirement_notice
+
+        return await build_retirement_notice(store, project, since)
+
+    async def digest_located(
+        self,
+        store: str,
+        project: str | None = None,
+        retired_since: datetime | None = None,
+        *,
+        strict_scope: bool = False,
+    ) -> RenderedDigest:
         from particles.operations.digest import build_digest_located
 
-        return await build_digest_located(store, project)
+        if strict_scope:
+            return await build_digest_located(store, project, retired_since, strict_scope=True)
+        return await build_digest_located(store, project, retired_since)
 
     async def memory_region(
         self,
@@ -694,8 +786,24 @@ class LocalBackend:
             if await get_subject(session, subject_id) is None:
                 raise ValueError(f"Subject {subject_id!r} not found")
             subject, added = await add_aliases(session, subject_id, aliases)
+            # An operator's alias confirms a provisional Subject and folds the
+            # provisional ones its new names reach.
+            from particles.operations.subject_provisional import operator_touched
+
+            await operator_touched(session, subject.id, actor="subjects-alias", act="alias")
+            subject = await get_subject(session, subject.id) or subject
             await session.commit()
             return AliasOutcome(subject=subject, added=added)
+
+    async def subject_accept(self, subject_id: str) -> AcceptOutcome:
+        from particles.operations.subject_provisional import accept_subject
+
+        async with session_scope(write=True) as session:  # writer lock
+            subject, accepted = await accept_subject(
+                session, subject_id, actor=get_config().curation.operator_identity
+            )
+            await session.commit()
+            return AcceptOutcome(subject=subject, accepted=accepted)
 
     async def subject_merge(
         self, source_ids: list[str], target_id: str, *, dry_run: bool = False
@@ -709,6 +817,10 @@ class LocalBackend:
                 subject = plan.target
             else:
                 subject, plan = await merge_subjects_many(session, source_ids, target_id)
+                # The merge target is the operator's chosen node.
+                from particles.operations.subject_provisional import operator_touched
+
+                await operator_touched(session, subject.id, actor="subjects-merge", act="merge")
                 await session.commit()
             return MergeOutcome(
                 subject=subject,
@@ -861,6 +973,7 @@ class LocalBackend:
                 threshold=threshold,
                 mode=mode,
                 confirmed=confirmed,
+                actor="cli:links-suggest",
             )
 
     async def corpus_links_suggest(
@@ -1059,6 +1172,7 @@ class LocalBackend:
         deposited_by: str | None = None,
         source_type: str | None = None,
         project_key: str | None = None,
+        standing: bool = False,
     ) -> tuple[str, str]:
         from particles.core.schema import SourceType
         from particles.operations.agent_write import deposit_conversation_text
@@ -1088,9 +1202,11 @@ class LocalBackend:
                     text,
                     deposited_by,
                     source_type or SourceType.CONVERSATION,
-                    tags,
+                    _document_tags(tags, standing=standing),
                     author_id=deposited_by,
                 )
+                if standing:
+                    await _unmark_on_standing(session, entry_id)
             await session.commit()
             return entry_id, snapshot_id
 
@@ -1106,7 +1222,10 @@ class LocalBackend:
         content_published_at: datetime | None,
         store: str,
         fetch_policy: str | None = None,
+        codex_capture: CodexCaptureEvidence | None = None,
     ) -> TextDepositOutcome:
+        if codex_capture is not None:
+            raise ValueError("Versioned Codex envelopes require the engine capture route.")
         from particles.core.schema import FetchPolicy, Mutability
         from particles.operations.deposit import deposit_text_versioned
 

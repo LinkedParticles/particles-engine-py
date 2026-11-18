@@ -1,0 +1,1174 @@
+{
+  "comment": "Synthetic curation cards, one or more per CardKind. No real store data.",
+  "cards": [
+    {
+      "key": "stale:00000000-0000-4000-8000-000000000001",
+      "kind": "stale",
+      "title": "Expired belief",
+      "question": "The belief's stated validity window (valid_until) has passed. Is it still true?",
+      "leverage": 0.42,
+      "diagnostic": "valid_until 2026-01-01 has passed.",
+      "particle_ids": [
+        "00000000-0000-4000-8000-000000000001"
+      ],
+      "subject_ids": [],
+      "particles": [
+        {
+          "particle_id": "00000000-0000-4000-8000-000000000001",
+          "content": "The release train ships every Tuesday.",
+          "subject_labels": [
+            "Example subject"
+          ],
+          "effective_confidence": 0.72,
+          "status": "ACTIVE",
+          "status_reason": null,
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "source_uri": "https://example.org/notes/page",
+          "observer_scope": null
+        }
+      ],
+      "suggested_gestures": [
+        "affirm",
+        "supersede",
+        "retract",
+        "snooze"
+      ],
+      "fixture": "00-stale"
+    },
+    {
+      "key": "retraction_cascade:00000000-0000-4000-8000-000000000002",
+      "kind": "retraction_cascade",
+      "title": "Rests on a retracted belief",
+      "question": "A belief this one depends on was retracted or superseded. Does it still stand?",
+      "leverage": 0.42,
+      "diagnostic": "Depends on a retracted belief.",
+      "particle_ids": [
+        "00000000-0000-4000-8000-000000000002"
+      ],
+      "subject_ids": [],
+      "particles": [
+        {
+          "particle_id": "00000000-0000-4000-8000-000000000002",
+          "content": "The cache is warmed by the nightly job.",
+          "subject_labels": [
+            "Example subject"
+          ],
+          "effective_confidence": 0.72,
+          "status": "ACTIVE",
+          "status_reason": null,
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "source_uri": "https://example.org/notes/page",
+          "observer_scope": null
+        }
+      ],
+      "suggested_gestures": [
+        "supersede",
+        "retract",
+        "snooze"
+      ],
+      "fixture": "01-retraction_cascade"
+    },
+    {
+      "key": "broken_provenance:00000000-0000-4000-8000-000000000003",
+      "kind": "broken_provenance",
+      "title": "Broken provenance",
+      "question": "The source snapshot this belief cites no longer exists. Can it still be trusted?",
+      "leverage": 0.42,
+      "diagnostic": "The cited snapshot is missing.",
+      "particle_ids": [
+        "00000000-0000-4000-8000-000000000003"
+      ],
+      "subject_ids": [],
+      "particles": [
+        {
+          "particle_id": "00000000-0000-4000-8000-000000000003",
+          "content": "The parser accepts YAML 1.2.",
+          "subject_labels": [
+            "Example subject"
+          ],
+          "effective_confidence": 0.72,
+          "status": "ACTIVE",
+          "status_reason": null,
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "source_uri": "file:///tmp/missing.md",
+          "observer_scope": null
+        }
+      ],
+      "suggested_gestures": [
+        "supersede",
+        "retract",
+        "snooze"
+      ],
+      "fixture": "02-broken_provenance"
+    },
+    {
+      "key": "confidence_decay:00000000-0000-4000-8000-000000000004",
+      "kind": "confidence_decay",
+      "title": "Uncertain confidence",
+      "question": "The confidence estimate for this belief has a high variance. Is it sound as stated, or should it be replaced with a firmer claim?",
+      "leverage": 0.42,
+      "diagnostic": "Confidence variance is high.",
+      "particle_ids": [
+        "00000000-0000-4000-8000-000000000004"
+      ],
+      "subject_ids": [],
+      "particles": [
+        {
+          "particle_id": "00000000-0000-4000-8000-000000000004",
+          "content": "The service handles 2,000 requests a second.",
+          "subject_labels": [
+            "Example subject"
+          ],
+          "effective_confidence": 0.41,
+          "status": "ACTIVE",
+          "status_reason": null,
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "source_uri": "https://example.org/notes/page",
+          "observer_scope": null
+        }
+      ],
+      "suggested_gestures": [
+        "affirm",
+        "supersede",
+        "snooze"
+      ],
+      "fixture": "03-confidence_decay"
+    },
+    {
+      "key": "recency_decay:00000000-0000-4000-8000-000000000005",
+      "kind": "recency_decay",
+      "title": "Aging belief",
+      "question": "The belief is old enough that its confidence is discounted. Is it still current?",
+      "leverage": 0.42,
+      "diagnostic": "Asserted 400 days ago; discounted.",
+      "particle_ids": [
+        "00000000-0000-4000-8000-000000000005"
+      ],
+      "subject_ids": [],
+      "particles": [
+        {
+          "particle_id": "00000000-0000-4000-8000-000000000005",
+          "content": "The team uses Python 3.11.",
+          "subject_labels": [
+            "Example subject"
+          ],
+          "effective_confidence": 0.55,
+          "status": "ACTIVE",
+          "status_reason": null,
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "source_uri": "https://example.org/notes/page",
+          "observer_scope": null
+        }
+      ],
+      "suggested_gestures": [
+        "affirm",
+        "supersede",
+        "snooze"
+      ],
+      "fixture": "04-recency_decay"
+    },
+    {
+      "key": "contradiction:00000000-0000-4000-8000-000000000006",
+      "kind": "contradiction",
+      "title": "Contradiction",
+      "question": "The belief contradicts another active belief. Which one is right?",
+      "leverage": 0.42,
+      "diagnostic": "Contradicts another active belief.",
+      "particle_ids": [
+        "00000000-0000-4000-8000-000000000006",
+        "00000000-0000-4000-8000-000000000007"
+      ],
+      "subject_ids": [],
+      "particles": [
+        {
+          "particle_id": "00000000-0000-4000-8000-000000000006",
+          "content": "The deploy window is Friday.",
+          "subject_labels": [
+            "Example subject"
+          ],
+          "effective_confidence": 0.72,
+          "status": "ACTIVE",
+          "status_reason": null,
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "source_uri": "https://example.org/notes/page",
+          "observer_scope": null
+        },
+        {
+          "particle_id": "00000000-0000-4000-8000-000000000007",
+          "content": "Deploys never happen on Fridays.",
+          "subject_labels": [
+            "Example subject"
+          ],
+          "effective_confidence": 0.72,
+          "status": "ACTIVE",
+          "status_reason": null,
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "source_uri": "https://example.org/notes/page",
+          "observer_scope": null
+        }
+      ],
+      "suggested_gestures": [
+        "supersede",
+        "retract",
+        "snooze"
+      ],
+      "fixture": "05-contradiction"
+    },
+    {
+      "key": "contested:00000000-0000-4000-8000-000000000008",
+      "kind": "contested",
+      "title": "Contested belief",
+      "question": "Sources or trust policies disagree about this belief. Does it stand?",
+      "leverage": 0.42,
+      "diagnostic": "A stance signal disagrees.",
+      "particle_ids": [
+        "00000000-0000-4000-8000-000000000008"
+      ],
+      "subject_ids": [],
+      "particles": [
+        {
+          "particle_id": "00000000-0000-4000-8000-000000000008",
+          "content": "The API is stable.",
+          "subject_labels": [
+            "Example subject"
+          ],
+          "effective_confidence": 0.72,
+          "status": "ACTIVE",
+          "status_reason": null,
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "source_uri": "https://example.org/notes/page",
+          "observer_scope": null
+        }
+      ],
+      "suggested_gestures": [
+        "affirm",
+        "snooze"
+      ],
+      "contested_bases": [
+        "stance"
+      ],
+      "fixture": "06-contested"
+    },
+    {
+      "key": "contested:00000000-0000-4000-8000-000000000010",
+      "kind": "contested",
+      "title": "Contested belief",
+      "question": "Sources or trust policies disagree about this belief. Does it stand?",
+      "leverage": 0.42,
+      "diagnostic": "Contested by an open conflict (older engine).",
+      "particle_ids": [
+        "00000000-0000-4000-8000-000000000010"
+      ],
+      "subject_ids": [],
+      "particles": [
+        {
+          "particle_id": "00000000-0000-4000-8000-000000000010",
+          "content": "The store lives at ~/.example/store.db.",
+          "subject_labels": [
+            "Example subject"
+          ],
+          "effective_confidence": 0.72,
+          "status": "PROVENANCE_STALE",
+          "status_reason": "CONFLICT_PENDING",
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "source_uri": "https://example.org/notes/page",
+          "observer_scope": null
+        }
+      ],
+      "suggested_gestures": [
+        "comment",
+        "affirm",
+        "snooze"
+      ],
+      "inconsistency_id": "00000000-0000-4000-8000-000000000009",
+      "conflict": {
+        "inconsistency_id": "00000000-0000-4000-8000-000000000009",
+        "a": {
+          "particle_id": "00000000-0000-4000-8000-000000000010",
+          "content": "The store lives at ~/.example/store.db.",
+          "subject_labels": [
+            "Example subject"
+          ],
+          "effective_confidence": 0.72,
+          "status": "PROVENANCE_STALE",
+          "status_reason": "CONFLICT_PENDING",
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "source_uri": "https://example.org/notes/page",
+          "observer_scope": null
+        },
+        "b": {
+          "particle_id": "00000000-0000-4000-8000-000000000011",
+          "content": "The store lives at ./store.db.",
+          "subject_labels": [
+            "Example subject"
+          ],
+          "effective_confidence": 0.72,
+          "status": "SUPERSEDED",
+          "status_reason": "SUPERSEDED_BY_UPDATE",
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "source_uri": "https://example.org/notes/page",
+          "observer_scope": null
+        },
+        "further_a": [],
+        "further_b": []
+      },
+      "fixture": "07-contested"
+    },
+    {
+      "key": "no_subject:00000000-0000-4000-8000-000000000012",
+      "kind": "no_subject",
+      "title": "Belief with no subject",
+      "question": "The belief is attached to no subject, so subject-scoped reads never see it. Which subject is it about?",
+      "leverage": 0.42,
+      "diagnostic": "Attached to no subject.",
+      "particle_ids": [
+        "00000000-0000-4000-8000-000000000012"
+      ],
+      "subject_ids": [],
+      "particles": [
+        {
+          "particle_id": "00000000-0000-4000-8000-000000000012",
+          "content": "Every commit must be signed off.",
+          "subject_labels": [],
+          "effective_confidence": 0.72,
+          "status": "ACTIVE",
+          "status_reason": null,
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "source_uri": "https://example.org/notes/page",
+          "observer_scope": null
+        }
+      ],
+      "suggested_gestures": [
+        "assign-subject",
+        "supersede",
+        "retract",
+        "snooze"
+      ],
+      "fixture": "08-no_subject"
+    },
+    {
+      "key": "gated_subjects:batch",
+      "kind": "gated_subjects",
+      "title": "Subjects the gate withheld",
+      "question": "These beliefs name files, records, identifiers or commands the extraction gate withheld as subjects. Link them to project-scoped subjects in one pass?",
+      "leverage": 0.42,
+      "diagnostic": "12 beliefs name gated subjects.",
+      "particle_ids": [
+        "00000000-0000-4000-8000-000000000013",
+        "00000000-0000-4000-8000-000000000014",
+        "00000000-0000-4000-8000-000000000015"
+      ],
+      "subject_ids": [],
+      "particles": [],
+      "suggested_gestures": [
+        "relink",
+        "snooze"
+      ],
+      "fixture": "09-gated_subjects"
+    },
+    {
+      "key": "subjectless_source:file:///notes/operator-guide.md",
+      "kind": "subjectless_source",
+      "title": "Subjectless beliefs from one source",
+      "question": "These beliefs from one source are attached to no subject, so subject-scoped reads never see them. Can they stand without one?",
+      "leverage": 0.42,
+      "diagnostic": "7 belief(s) with no subject from file:///notes/operator-guide.md",
+      "particle_ids": [
+        "00000000-0000-4000-8000-000000000016",
+        "00000000-0000-4000-8000-000000000017",
+        "00000000-0000-4000-8000-000000000018",
+        "00000000-0000-4000-8000-000000000019",
+        "00000000-0000-4000-8000-000000000020",
+        "00000000-0000-4000-8000-000000000021",
+        "00000000-0000-4000-8000-000000000022"
+      ],
+      "subject_ids": [],
+      "particles": [
+        {
+          "particle_id": "00000000-0000-4000-8000-000000000016",
+          "content": "Subjectless claim number 0 from one page.",
+          "subject_labels": [],
+          "effective_confidence": 0.72,
+          "status": "ACTIVE",
+          "status_reason": null,
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "source_uri": "file:///notes/operator-guide.md",
+          "observer_scope": {
+            "kind": "projects",
+            "projects": [
+              "example-project"
+            ],
+            "widened": false
+          }
+        },
+        {
+          "particle_id": "00000000-0000-4000-8000-000000000017",
+          "content": "Subjectless claim number 1 from one page.",
+          "subject_labels": [],
+          "effective_confidence": 0.72,
+          "status": "ACTIVE",
+          "status_reason": null,
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "source_uri": "file:///notes/operator-guide.md",
+          "observer_scope": {
+            "kind": "projects",
+            "projects": [
+              "example-project"
+            ],
+            "widened": false
+          }
+        },
+        {
+          "particle_id": "00000000-0000-4000-8000-000000000018",
+          "content": "Subjectless claim number 2 from one page.",
+          "subject_labels": [],
+          "effective_confidence": 0.72,
+          "status": "ACTIVE",
+          "status_reason": null,
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "source_uri": "file:///notes/operator-guide.md",
+          "observer_scope": {
+            "kind": "projects",
+            "projects": [
+              "example-project"
+            ],
+            "widened": false
+          }
+        },
+        {
+          "particle_id": "00000000-0000-4000-8000-000000000019",
+          "content": "Subjectless claim number 3 from one page.",
+          "subject_labels": [],
+          "effective_confidence": 0.72,
+          "status": "ACTIVE",
+          "status_reason": null,
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "source_uri": "file:///notes/operator-guide.md",
+          "observer_scope": {
+            "kind": "projects",
+            "projects": [
+              "example-project"
+            ],
+            "widened": false
+          }
+        },
+        {
+          "particle_id": "00000000-0000-4000-8000-000000000020",
+          "content": "Subjectless claim number 4 from one page.",
+          "subject_labels": [],
+          "effective_confidence": 0.72,
+          "status": "ACTIVE",
+          "status_reason": null,
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "source_uri": "file:///notes/operator-guide.md",
+          "observer_scope": {
+            "kind": "projects",
+            "projects": [
+              "example-project"
+            ],
+            "widened": false
+          }
+        }
+      ],
+      "suggested_gestures": [
+        "dismiss",
+        "snooze"
+      ],
+      "corpus_entry_id": "00000000-0000-4000-8000-000000000023",
+      "fixture": "10-subjectless_source"
+    },
+    {
+      "key": "duplicate_pair:00000000-0000-4000-8000-000000000024",
+      "kind": "duplicate_pair",
+      "title": "Possible duplicate",
+      "question": "Are these two beliefs the same claim?",
+      "leverage": 0.42,
+      "diagnostic": "Cosine 0.94 within one subject.",
+      "particle_ids": [
+        "00000000-0000-4000-8000-000000000024",
+        "00000000-0000-4000-8000-000000000025"
+      ],
+      "subject_ids": [],
+      "particles": [
+        {
+          "particle_id": "00000000-0000-4000-8000-000000000024",
+          "content": "Commits are signed with GPG.",
+          "subject_labels": [
+            "Example subject"
+          ],
+          "effective_confidence": 0.72,
+          "status": "ACTIVE",
+          "status_reason": null,
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "source_uri": "https://example.org/notes/page",
+          "observer_scope": null
+        },
+        {
+          "particle_id": "00000000-0000-4000-8000-000000000025",
+          "content": "Every commit carries a GPG signature.",
+          "subject_labels": [
+            "Example subject"
+          ],
+          "effective_confidence": 0.72,
+          "status": "ACTIVE",
+          "status_reason": null,
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "source_uri": "https://example.org/notes/page",
+          "observer_scope": null
+        }
+      ],
+      "suggested_gestures": [
+        "merge",
+        "dismiss",
+        "snooze"
+      ],
+      "verdict": {
+        "verdict": "PARAPHRASE",
+        "rationale": "Both say commits are GPG-signed."
+      },
+      "scope_note": "These two are in view for different projects; merging pools their sources.",
+      "fixture": "11-duplicate_pair"
+    },
+    {
+      "key": "uncited_url:https://example.org/spec",
+      "kind": "uncited_url",
+      "title": "Frequently cited, never deposited",
+      "question": "Several sources cite this URL, but it is not in the corpus. Deposit it?",
+      "leverage": 0.42,
+      "diagnostic": "Cited by 4 sources.",
+      "particle_ids": [],
+      "subject_ids": [],
+      "particles": [],
+      "suggested_gestures": [
+        "deposit",
+        "dismiss"
+      ],
+      "corpus_url": "https://example.org/spec",
+      "fixture": "12-uncited_url"
+    },
+    {
+      "key": "uncited_url:ftp://example.org/x",
+      "kind": "uncited_url",
+      "title": "Frequently cited, never deposited",
+      "question": "Several sources cite this URL, but it is not in the corpus. Deposit it?",
+      "leverage": 0.42,
+      "diagnostic": "Cited by 2 sources.",
+      "particle_ids": [],
+      "subject_ids": [],
+      "particles": [],
+      "suggested_gestures": [
+        "deposit",
+        "dismiss"
+      ],
+      "corpus_url": "ftp://example.org/x",
+      "fixture": "13-uncited_url"
+    },
+    {
+      "key": "failed_snapshots:batch",
+      "kind": "failed_snapshots",
+      "title": "Failed extractions",
+      "question": "Some corpus snapshots produced no beliefs because extraction failed.",
+      "leverage": 0.42,
+      "diagnostic": "3 snapshots failed extraction.",
+      "particle_ids": [],
+      "subject_ids": [],
+      "particles": [],
+      "suggested_gestures": [
+        "reindex",
+        "snooze"
+      ],
+      "fixture": "14-failed_snapshots"
+    },
+    {
+      "key": "rank_lift:latest",
+      "kind": "rank_lift",
+      "title": "Usefulness ranking out of band",
+      "question": "The nightly monitor found the usefulness rank-lift no longer puts the beliefs used outside the head into it, or leaves no room for new ones. Re-check it with the sweep shown?",
+      "leverage": 0.42,
+      "diagnostic": "λ is out of band.",
+      "particle_ids": [],
+      "subject_ids": [],
+      "particles": [],
+      "suggested_gestures": [
+        "snooze"
+      ],
+      "fixture": "15-rank_lift"
+    },
+    {
+      "key": "refused_snapshots:batch",
+      "kind": "refused_snapshots",
+      "title": "Declined by the extraction model",
+      "question": "The extraction model refused these sources, so they are not in memory. Send them again, or leave them held?",
+      "leverage": 0.42,
+      "diagnostic": "2 sources were refused.",
+      "particle_ids": [],
+      "subject_ids": [],
+      "particles": [],
+      "suggested_gestures": [
+        "retry-refused",
+        "snooze"
+      ],
+      "fixture": "16-refused_snapshots"
+    },
+    {
+      "key": "proposed_abstraction:candidate",
+      "kind": "proposed_abstraction",
+      "title": "Proposed generalization",
+      "question": "The consolidation cycle proposes a general belief over the specifics below. Is it faithful to them?",
+      "leverage": 0.42,
+      "diagnostic": "Generalizes 3 beliefs.",
+      "particle_ids": [
+        "00000000-0000-4000-8000-000000000031",
+        "00000000-0000-4000-8000-000000000032"
+      ],
+      "subject_ids": [],
+      "particles": [
+        {
+          "particle_id": "00000000-0000-4000-8000-000000000031",
+          "content": "Tests mock every LLM call.",
+          "subject_labels": [
+            "Example subject"
+          ],
+          "effective_confidence": 0.72,
+          "status": "ACTIVE",
+          "status_reason": null,
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "source_uri": "https://example.org/notes/page",
+          "observer_scope": null
+        },
+        {
+          "particle_id": "00000000-0000-4000-8000-000000000032",
+          "content": "Unit tests run without an API key.",
+          "subject_labels": [
+            "Example subject"
+          ],
+          "effective_confidence": 0.72,
+          "status": "ACTIVE",
+          "status_reason": null,
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "source_uri": "https://example.org/notes/page",
+          "observer_scope": null
+        }
+      ],
+      "suggested_gestures": [
+        "accept",
+        "reject",
+        "snooze"
+      ],
+      "candidate_event_id": "00000000-0000-4000-8000-000000000033",
+      "fixture": "17-proposed_abstraction"
+    },
+    {
+      "key": "stale_basis:00000000-0000-4000-8000-000000000034",
+      "kind": "stale_basis",
+      "title": "Relied on a changed circumstance",
+      "question": "A belief this one relied on was replaced by an update, and it could not be restated safely. Is it still true as stated?",
+      "leverage": 0.42,
+      "diagnostic": "Relied on a replaced state.",
+      "particle_ids": [
+        "00000000-0000-4000-8000-000000000034"
+      ],
+      "subject_ids": [],
+      "particles": [
+        {
+          "particle_id": "00000000-0000-4000-8000-000000000034",
+          "content": "The config lives in the checkout.",
+          "subject_labels": [
+            "Example subject"
+          ],
+          "effective_confidence": 0.72,
+          "status": "ACTIVE",
+          "status_reason": null,
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "source_uri": "https://example.org/notes/page",
+          "observer_scope": null
+        }
+      ],
+      "suggested_gestures": [
+        "affirm",
+        "supersede",
+        "retract",
+        "snooze"
+      ],
+      "fixture": "18-stale_basis"
+    },
+    {
+      "key": "inconsistency:00000000-0000-4000-8000-000000000035",
+      "kind": "inconsistency",
+      "title": "Open conflict",
+      "question": "These claims were recorded as conflicting. Which is right, or are both?",
+      "leverage": 0.42,
+      "diagnostic": "Open conflict between two claims.",
+      "particle_ids": [
+        "00000000-0000-4000-8000-000000000036",
+        "00000000-0000-4000-8000-000000000037"
+      ],
+      "subject_ids": [],
+      "particles": [
+        {
+          "particle_id": "00000000-0000-4000-8000-000000000036",
+          "content": "The default port is 8000.",
+          "subject_labels": [
+            "Example subject"
+          ],
+          "effective_confidence": 0.72,
+          "status": "ACTIVE",
+          "status_reason": null,
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "source_uri": "https://example.org/notes/page",
+          "observer_scope": null
+        },
+        {
+          "particle_id": "00000000-0000-4000-8000-000000000037",
+          "content": "The default port is 8080.",
+          "subject_labels": [
+            "Example subject"
+          ],
+          "effective_confidence": 0.72,
+          "status": "ACTIVE",
+          "status_reason": null,
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "source_uri": "https://example.org/notes/page",
+          "observer_scope": null
+        }
+      ],
+      "suggested_gestures": [
+        "resolve",
+        "snooze"
+      ],
+      "inconsistency_id": "00000000-0000-4000-8000-000000000035",
+      "conflict": {
+        "inconsistency_id": "00000000-0000-4000-8000-000000000035",
+        "a": {
+          "particle_id": "00000000-0000-4000-8000-000000000036",
+          "content": "The default port is 8000.",
+          "subject_labels": [
+            "Example subject"
+          ],
+          "effective_confidence": 0.72,
+          "status": "ACTIVE",
+          "status_reason": null,
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "source_uri": "https://example.org/notes/page",
+          "observer_scope": null
+        },
+        "b": {
+          "particle_id": "00000000-0000-4000-8000-000000000037",
+          "content": "The default port is 8080.",
+          "subject_labels": [
+            "Example subject"
+          ],
+          "effective_confidence": 0.72,
+          "status": "ACTIVE",
+          "status_reason": null,
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "source_uri": "https://example.org/notes/page",
+          "observer_scope": null
+        },
+        "further_a": [],
+        "further_b": []
+      },
+      "resolve_actions": [
+        "PREFER_A",
+        "PREFER_B",
+        "BOTH_VALID",
+        "DISCARD"
+      ],
+      "conflict_note": "",
+      "fixture": "19-inconsistency"
+    },
+    {
+      "key": "inconsistency:00000000-0000-4000-8000-000000000038",
+      "kind": "inconsistency",
+      "title": "Open conflict",
+      "question": "These claims were recorded as conflicting. Which is right, or are both?",
+      "leverage": 0.42,
+      "diagnostic": "Open conflict; side A no longer active.",
+      "particle_ids": [
+        "00000000-0000-4000-8000-000000000039",
+        "00000000-0000-4000-8000-000000000040"
+      ],
+      "subject_ids": [],
+      "particles": [
+        {
+          "particle_id": "00000000-0000-4000-8000-000000000039",
+          "content": "The limit is 10.",
+          "subject_labels": [
+            "Example subject"
+          ],
+          "effective_confidence": 0.72,
+          "status": "SUPERSEDED",
+          "status_reason": "LOWER_TRUST_SOURCE",
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "source_uri": "https://example.org/notes/page",
+          "observer_scope": null
+        },
+        {
+          "particle_id": "00000000-0000-4000-8000-000000000040",
+          "content": "The limit is 20.",
+          "subject_labels": [
+            "Example subject"
+          ],
+          "effective_confidence": 0.72,
+          "status": "ACTIVE",
+          "status_reason": null,
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "source_uri": "https://example.org/notes/page",
+          "observer_scope": null
+        }
+      ],
+      "suggested_gestures": [
+        "resolve",
+        "snooze"
+      ],
+      "inconsistency_id": "00000000-0000-4000-8000-000000000038",
+      "conflict": {
+        "inconsistency_id": "00000000-0000-4000-8000-000000000038",
+        "a": {
+          "particle_id": "00000000-0000-4000-8000-000000000039",
+          "content": "The limit is 10.",
+          "subject_labels": [
+            "Example subject"
+          ],
+          "effective_confidence": 0.72,
+          "status": "SUPERSEDED",
+          "status_reason": "LOWER_TRUST_SOURCE",
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "source_uri": "https://example.org/notes/page",
+          "observer_scope": null
+        },
+        "b": {
+          "particle_id": "00000000-0000-4000-8000-000000000040",
+          "content": "The limit is 20.",
+          "subject_labels": [
+            "Example subject"
+          ],
+          "effective_confidence": 0.72,
+          "status": "ACTIVE",
+          "status_reason": null,
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "source_uri": "https://example.org/notes/page",
+          "observer_scope": null
+        },
+        "further_a": [],
+        "further_b": [
+          {
+            "particle_id": "00000000-0000-4000-8000-000000000041",
+            "content": "The limit is ten.",
+            "subject_labels": [
+              "Example subject"
+            ],
+            "effective_confidence": 0.72,
+            "status": "ACTIVE",
+            "status_reason": null,
+            "asserted_at": "2026-07-25T10:00:00Z",
+            "source_uri": "https://example.org/notes/page",
+            "observer_scope": null
+          }
+        ]
+      },
+      "resolve_actions": [
+        "PREFER_B",
+        "BOTH_VALID",
+        "DISCARD"
+      ],
+      "fixture": "20-inconsistency"
+    },
+    {
+      "key": "demotion:00000000-0000-4000-8000-000000000042",
+      "kind": "demotion",
+      "title": "Retired as replaced",
+      "question": "This claim was retired in favour of a replacement. Was the replacement right, or do both claims hold?",
+      "leverage": 0.42,
+      "diagnostic": "Retired by a later claim.",
+      "particle_ids": [
+        "00000000-0000-4000-8000-000000000042",
+        "00000000-0000-4000-8000-000000000043"
+      ],
+      "subject_ids": [],
+      "particles": [
+        {
+          "particle_id": "00000000-0000-4000-8000-000000000042",
+          "content": "The rate limit is 60 per minute.",
+          "subject_labels": [
+            "Example subject"
+          ],
+          "effective_confidence": 0.72,
+          "status": "SUPERSEDED",
+          "status_reason": "SUPERSEDED_BY_UPDATE",
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "source_uri": "https://example.org/notes/page",
+          "observer_scope": null
+        },
+        {
+          "particle_id": "00000000-0000-4000-8000-000000000043",
+          "content": "The rate limit is 120 per minute.",
+          "subject_labels": [
+            "Example subject"
+          ],
+          "effective_confidence": 0.72,
+          "status": "ACTIVE",
+          "status_reason": null,
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "source_uri": "https://example.org/notes/page",
+          "observer_scope": null
+        }
+      ],
+      "suggested_gestures": [
+        "affirm",
+        "dismiss",
+        "snooze"
+      ],
+      "fixture": "21-demotion"
+    },
+    {
+      "key": "stale:errors",
+      "kind": "stale",
+      "title": "Expired belief",
+      "question": "The belief's stated validity window (valid_until) has passed. Is it still true?",
+      "leverage": 0.42,
+      "diagnostic": "Read-only check card.",
+      "particle_ids": [
+        "00000000-0000-4000-8000-000000000044"
+      ],
+      "subject_ids": [],
+      "particles": [
+        {
+          "particle_id": "00000000-0000-4000-8000-000000000044",
+          "content": "A belief whose card is used for error paths.",
+          "subject_labels": [
+            "Example subject"
+          ],
+          "effective_confidence": 0.72,
+          "status": "ACTIVE",
+          "status_reason": null,
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "source_uri": "https://example.org/notes/page",
+          "observer_scope": null
+        }
+      ],
+      "suggested_gestures": [
+        "affirm",
+        "supersede",
+        "retract",
+        "snooze"
+      ],
+      "fixture": "22-stale"
+    },
+    {
+      "key": "inconsistency:00000000-0000-4000-8000-000000000045",
+      "kind": "inconsistency",
+      "title": "Restated after retraction",
+      "question": "This claim was retracted on 2026-07-25, with the reason “The daemon moved to port 7001”. A restatement from file:///home/example/notes/MEMORY.md is held for review. Keep the retraction, or restore the claim?",
+      "leverage": 0.42,
+      "diagnostic": "Restated after retraction: “The daemon listens on port 7000.” [RETRACTED / EXPLICIT_RETRACTION] was retracted, and a later source states it again [PROVENANCE_STALE / CONFLICT_PENDING], held for review",
+      "particle_ids": [
+        "00000000-0000-4000-8000-000000000046",
+        "00000000-0000-4000-8000-000000000047"
+      ],
+      "subject_ids": [],
+      "particles": [
+        {
+          "particle_id": "00000000-0000-4000-8000-000000000046",
+          "content": "The daemon listens on port 7000.",
+          "subject_labels": [
+            "Example subject"
+          ],
+          "effective_confidence": 0.72,
+          "status": "RETRACTED",
+          "status_reason": "EXPLICIT_RETRACTION",
+          "source_uri": "https://example.org/notes/page",
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "observer_scope": null
+        },
+        {
+          "particle_id": "00000000-0000-4000-8000-000000000047",
+          "content": "The daemon listens on port 7000.",
+          "subject_labels": [
+            "Example subject"
+          ],
+          "effective_confidence": 0.72,
+          "status": "PROVENANCE_STALE",
+          "status_reason": "CONFLICT_PENDING",
+          "source_uri": "file:///home/example/notes/MEMORY.md",
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "observer_scope": null
+        }
+      ],
+      "suggested_gestures": [
+        "resolve",
+        "snooze"
+      ],
+      "inconsistency_id": "00000000-0000-4000-8000-000000000045",
+      "conflict": {
+        "inconsistency_id": "00000000-0000-4000-8000-000000000045",
+        "a": {
+          "particle_id": "00000000-0000-4000-8000-000000000046",
+          "content": "The daemon listens on port 7000.",
+          "subject_labels": [
+            "Example subject"
+          ],
+          "effective_confidence": 0.72,
+          "status": "RETRACTED",
+          "status_reason": "EXPLICIT_RETRACTION",
+          "source_uri": "https://example.org/notes/page",
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "observer_scope": null
+        },
+        "b": {
+          "particle_id": "00000000-0000-4000-8000-000000000047",
+          "content": "The daemon listens on port 7000.",
+          "subject_labels": [
+            "Example subject"
+          ],
+          "effective_confidence": 0.72,
+          "status": "PROVENANCE_STALE",
+          "status_reason": "CONFLICT_PENDING",
+          "source_uri": "file:///home/example/notes/MEMORY.md",
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "observer_scope": null
+        },
+        "further_a": [],
+        "further_b": []
+      },
+      "retired_value": {
+        "retirement": "retracted",
+        "retired_at": "2026-07-25T12:00:00Z",
+        "reason": "The daemon moved to port 7001.",
+        "restated_by": "file:///home/example/notes/MEMORY.md"
+      },
+      "resolve_actions": [
+        "PREFER_A",
+        "PREFER_B",
+        "BOTH_VALID",
+        "DISCARD"
+      ],
+      "fixture": "23-inconsistency"
+    },
+    {
+      "key": "duplicate_group:00000000-0000-4000-8000-000000000060",
+      "kind": "duplicate_group",
+      "title": "Possible duplicates",
+      "question": "These beliefs may state one claim. Which of them are the same claim?",
+      "leverage": 0.4,
+      "diagnostic": "4 possible duplicates in 'Example subject' (4 similar pairs, similarity 0.92–0.97)",
+      "particle_ids": [
+        "00000000-0000-4000-8000-000000000060",
+        "00000000-0000-4000-8000-000000000061",
+        "00000000-0000-4000-8000-000000000062",
+        "00000000-0000-4000-8000-000000000063"
+      ],
+      "subject_ids": [],
+      "particles": [
+        {
+          "particle_id": "00000000-0000-4000-8000-000000000060",
+          "content": "The repository is at /src/example.",
+          "subject_labels": [
+            "Example subject"
+          ],
+          "effective_confidence": 0.72,
+          "status": "ACTIVE",
+          "status_reason": null,
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "source_uri": "https://example.org/notes/page",
+          "observer_scope": null
+        },
+        {
+          "particle_id": "00000000-0000-4000-8000-000000000061",
+          "content": "The repo is located at /src/example.",
+          "subject_labels": [
+            "Example subject"
+          ],
+          "effective_confidence": 0.72,
+          "status": "ACTIVE",
+          "status_reason": null,
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "source_uri": "https://example.org/notes/page",
+          "observer_scope": null
+        },
+        {
+          "particle_id": "00000000-0000-4000-8000-000000000062",
+          "content": "The project source lives in /src/example.",
+          "subject_labels": [
+            "Example subject"
+          ],
+          "effective_confidence": 0.72,
+          "status": "ACTIVE",
+          "status_reason": null,
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "source_uri": "https://example.org/notes/page",
+          "observer_scope": null
+        },
+        {
+          "particle_id": "00000000-0000-4000-8000-000000000063",
+          "content": "The project docs are served under /example/.",
+          "subject_labels": [
+            "Example subject"
+          ],
+          "effective_confidence": 0.72,
+          "status": "ACTIVE",
+          "status_reason": null,
+          "asserted_at": "2026-07-25T10:00:00Z",
+          "source_uri": "https://example.org/notes/page",
+          "observer_scope": null
+        }
+      ],
+      "suggested_gestures": [
+        "merge",
+        "split",
+        "dismiss",
+        "snooze"
+      ],
+      "verdict": null,
+      "scope_note": null,
+      "pairs": [
+        {
+          "a": "00000000-0000-4000-8000-000000000060",
+          "b": "00000000-0000-4000-8000-000000000061",
+          "similarity": 0.97,
+          "subject_id": "s-1",
+          "verdict": null
+        },
+        {
+          "a": "00000000-0000-4000-8000-000000000060",
+          "b": "00000000-0000-4000-8000-000000000062",
+          "similarity": 0.95,
+          "subject_id": "s-1",
+          "verdict": null
+        },
+        {
+          "a": "00000000-0000-4000-8000-000000000062",
+          "b": "00000000-0000-4000-8000-000000000063",
+          "similarity": 0.92,
+          "subject_id": "s-1",
+          "verdict": null
+        },
+        {
+          "a": "00000000-0000-4000-8000-000000000061",
+          "b": "00000000-0000-4000-8000-000000000063",
+          "similarity": 0.93,
+          "subject_id": "s-1",
+          "verdict": null
+        }
+      ],
+      "linked_sets": [
+        [
+          "00000000-0000-4000-8000-000000000061",
+          "00000000-0000-4000-8000-000000000062"
+        ]
+      ],
+      "prior_rulings": [
+        [
+          [
+            "00000000-0000-4000-8000-000000000060"
+          ],
+          [
+            "00000000-0000-4000-8000-000000000063"
+          ]
+        ]
+      ],
+      "survivor_id": "00000000-0000-4000-8000-000000000060",
+      "fixture": "24-duplicate_group"
+    }
+  ]
+}

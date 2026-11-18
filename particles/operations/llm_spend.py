@@ -32,6 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.core.schema import StoreLLMSpend
 from particles.db import DEFAULT_STORE, session_scope
+from particles.ingest.retirement_cap import CappedCount, count_capped
 from particles.llm.usage import LLMUsage, UsageAccumulator, track_usage
 from particles.store.event_store import (
     OperatorEvent,
@@ -57,6 +58,7 @@ def build_extract_run_payload(
     completed_at: datetime,
     snapshots: int,
     llm_usage: LLMUsage,
+    capped_updates: int = 0,
 ) -> dict[str, Any]:
     """The versioned ``EXTRACT_RUN`` payload (``format: 1``).
 
@@ -65,6 +67,8 @@ def build_extract_run_payload(
     ``http``, ``reindex``, ``structure``, ``modality``, ``reread-judge``);
     ``snapshots`` counts the snapshots the run attempted (``structure``,
     ``modality`` and ``reread-judge`` read no snapshot and count none).
+    ``capped_updates`` counts the pairs the per-entry update bound sent to
+    rung 3.
     """
     return {
         "format": EXTRACT_RUN_PAYLOAD_FORMAT,
@@ -74,6 +78,7 @@ def build_extract_run_payload(
         "completed_at": completed_at.isoformat(),
         "snapshots": snapshots,
         "llm_usage": llm_usage.model_dump(mode="json"),
+        "capped_updates": capped_updates,
     }
 
 
@@ -87,6 +92,7 @@ async def record_extract_run(
     completed_at: datetime,
     snapshots: int,
     llm_usage: LLMUsage,
+    capped_updates: int = 0,
 ) -> OperatorEvent | None:
     """Append one ``EXTRACT_RUN`` event; the caller commits.
 
@@ -107,6 +113,7 @@ async def record_extract_run(
             completed_at=completed_at,
             snapshots=snapshots,
             llm_usage=llm_usage,
+            capped_updates=capped_updates,
         ),
     )
 
@@ -138,6 +145,8 @@ class MeteredExtractRun:
         self._started_at = datetime.now(UTC)
         self._scope: AbstractContextManager[UsageAccumulator] | None = None
         self._accumulator: UsageAccumulator | None = None
+        self._capped_scope: AbstractContextManager[CappedCount] = count_capped()
+        self._capped = CappedCount()
 
     def usage_so_far(self) -> LLMUsage:
         """The run's measured usage up to now, for a budget checked mid-run."""
@@ -149,6 +158,8 @@ class MeteredExtractRun:
         self._started_at = datetime.now(UTC)
         self._scope = track_usage()
         self._accumulator = self._scope.__enter__()
+        self._capped_scope = count_capped()
+        self._capped = self._capped_scope.__enter__()
         return self
 
     async def __aexit__(
@@ -159,6 +170,7 @@ class MeteredExtractRun:
     ) -> None:
         assert self._scope is not None and self._accumulator is not None
         self._scope.__exit__(None, None, None)
+        self._capped_scope.__exit__(None, None, None)
         self.llm_usage = self._accumulator.snapshot()
         try:
             async with session_scope(self.store, write=True) as session:
@@ -171,6 +183,7 @@ class MeteredExtractRun:
                     completed_at=datetime.now(UTC),
                     snapshots=self.snapshots,
                     llm_usage=self.llm_usage,
+                    capped_updates=self._capped.n,
                 )
                 await session.commit()
             self.event_id = event.event_id if event is not None else None

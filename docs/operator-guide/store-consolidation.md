@@ -261,25 +261,58 @@ co-evidential clusters by hand if you need them.
 ## Backup and rollback
 
 A store is a SQLite database file plus a content-addressed blob directory.
-Both must be copied together.
+Both must be copied together, and `particles db backup` copies both in one
+command while the store stays in use:
 
-1. **Quiesce the store.** Stop any running engine / CLI / MCP server; SQLite
-   is single-writer, and you want a consistent copy.
-2. **Copy the database and its WAL sidecars, and the blob directory.** Paths
-   come from `config.yaml` (`storage.database_url` and `storage.blob_dir`;
-   defaults `./particles.db` and `./corpus_blobs`):
+```bash
+particles db backup ~/.particles/backups/mini-2026-06-16
+```
 
-    ```bash
-    mkdir -p mini-backup-2026-06-16
-    cp particles.db particles.db-wal particles.db-shm mini-backup-2026-06-16/ 2>/dev/null
-    cp -R corpus_blobs mini-backup-2026-06-16/
-    ```
+The directory must be new or empty. It receives `particles.db` (a compacted,
+self-contained copy with no `-wal` / `-shm` sidecars, readable by its owner
+only) and `corpus_blobs/`.
+Nothing needs to stop first:
 
-   (The `-wal` / `-shm` files exist only while the DB is open; copying them
-   when present is harmless and safe.)
-3. **Rollback** = restore those files over the live ones (store still
-   quiesced). Because both procedures only ever *add* to the canonical store,
-   restoring the pre-merge backup fully undoes a merge.
+- **The database** is copied with SQLite's `VACUUM INTO`, which reads the
+  store inside one read transaction. The copy holds exactly the commits made
+  before it began. A writer that runs meanwhile neither waits on it nor
+  appears in it, so the copy is a state the store was really in. The backup
+  writes nothing to the store and takes no writer lock.
+- **The blobs** are copied after the database. A deposit writes its blob
+  before the row that names it commits, so every blob the copied database
+  names is already on disk. Each one is read and written with its SHA-256
+  checked against its name, and a symlink in the blob directory is refused.
+- **The copy is verified.** `PRAGMA quick_check` runs on the copied database,
+  then the [`corpus fsck`](../cli.md) audit runs over the copy's
+  own database and blob directory. The command exits non-zero when a blob the
+  copy names is missing from the copy although the live store has a file for
+  it. A blob missing from the live store too was lost before the backup and
+  cannot be copied: the command lists it, still reports the backup verified,
+  and `particles corpus fsck` on the live store names the entries to
+  re-deposit or retract.
+
+The command refuses a PostgreSQL or in-memory store, a store file that does
+not exist, the live store's own directory, and a target inside the live blob
+directory. In remote mode it refuses too (run it on the engine host, or inside
+the container: [Running the engine in a container](container-deployment.md#backing-up-and-moving-the-store)).
+
+**Archive paths.** Each snapshot row keeps the absolute `archive_path` it was
+written with, which names the old host's directory. Nothing reads it for a
+location: every reader finds a blob by its content hash under the configured
+`storage.blob_dir`. With the default relative `blob_dir`, pointing
+`DATABASE_URL` at the copy's `particles.db` is enough, since `./corpus_blobs`
+resolves beside the database; an absolute `blob_dir` must name the copy's
+`corpus_blobs` instead.
+
+**Rollback** is restoring the copy over the live store, with the store
+quiesced (stop every engine, CLI and MCP server), and removing the live
+store's `-wal` / `-shm` files, which belong to the database being replaced.
+Because both merge procedures only ever *add* to the canonical store,
+restoring the pre-merge backup fully undoes a merge.
+
+A backup is a point-in-time copy, not a sync: anything written after it began
+is not in it. For a final move of the canonical store, stop the last writer
+first and back up after.
 
 This is the same durability model as a [schema migration](schema-migration.md):
 the corpus + blobs are the durable record, and particles are rebuildable from

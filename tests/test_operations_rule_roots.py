@@ -24,9 +24,9 @@ from particles.corpus.rule_roots import (
     list_rule_source_roots,
     record_rule_source_roots,
 )
-from particles.corpus.store import CorpusEntryRow
 from particles.operations.rule_roots import forget_rule_source_roots
 from particles.store.event_store import OperatorEventType, list_events
+from tests._corpus_rows import local_entry_row
 
 
 @pytest.fixture(autouse=True)
@@ -46,7 +46,7 @@ async def _lazy_entry(session: Any, path: Path, *, by: str = "rule-sync") -> str
         mutability=Mutability.MUTABLE,
         deposited_by=by,
     )
-    session.add(CorpusEntryRow.from_model(entry))
+    session.add(local_entry_row(entry))
     await session.flush()
     return entry.entry_id
 

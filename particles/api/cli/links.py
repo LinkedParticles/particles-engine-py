@@ -679,6 +679,21 @@ async def _links_unmerge(
     terminal_echo(_render_unmerge_markdown(report, limit))
 
 
+def _dropped_links(report: UnmergeReport) -> str:
+    """Name the links a revert drops by the tag each merge wrote them under.
+
+    A key-equal merge's edges carry ``EXACT_DUPLICATE`` and a re-read merge's
+    carry ``REREAD_DUPLICATE``, and one run may revert both.
+    """
+    by_tag: Counter[str] = Counter()
+    for group in report.groups:
+        if group.relations_deleted:
+            by_tag[group.relation_tag.value] += group.relations_deleted
+    if not by_tag:
+        return "0 merge link(s) dropped"
+    return " + ".join(f"{n} {tag}" for tag, n in sorted(by_tag.items())) + " link(s) dropped"
+
+
 def _render_unmerge_markdown(report: UnmergeReport, limit: int) -> str:
     """Human-readable summary of an UnmergeReport for the CLI."""
     mode = "plan — nothing written" if report.dry_run else "applied"
@@ -688,7 +703,7 @@ def _render_unmerge_markdown(report: UnmergeReport, limit: int) -> str:
         f"  {report.total_events} merge event(s): "
         f"{report.restored_particles} copy/copies restored to ACTIVE, "
         f"{report.skipped_particles} skipped, "
-        f"{report.relations_deleted} EXACT_DUPLICATE link(s) dropped",
+        f"{_dropped_links(report)}",
     ]
     for warning in report.warnings:
         lines.append(f"  ⚠ {warning}")

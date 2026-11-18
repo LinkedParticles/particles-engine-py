@@ -336,6 +336,41 @@ class TestExposure:
         assert all("8 times" not in p for p in prompts)
         assert await _events(s) == {("p-rule", "now", "literal", "mined")}
 
+    @pytest.mark.asyncio
+    async def test_the_scoped_pool_is_the_filtered_active_set(
+        self, file_db_session: AsyncSession
+    ) -> None:
+        """``actives=None`` reads only the shown beliefs: the same pool, in the same order."""
+        import particles.operations.utility_mining as um
+        from particles.store.particle_store import get_particles_by_status
+
+        s = file_db_session
+        await _rule_file(s, "agents", f"{ROOT}/AGENTS.md")
+        for name in ("c", "a", "b"):
+            await _belief(s, f"p-{name}", f"Rule {name}", "agents", "agents-s1")
+        await s.execute(
+            update(ParticleRow).where(ParticleRow.id == "p-a").values(status=Status.RETRACTED.value)
+        )
+        await _conversation(s, "now")
+        await s.commit()
+
+        async def pool(actives: Any) -> list[str]:
+            reader = await um.ExposureReader.load(s)
+            shown, _ = await um.shown_beliefs(
+                s,
+                reader,
+                session_id="now",
+                transcript="[tool: Bash — ls]\n",
+                actives=actives,
+                entry_tags=[f"project:{KEY}"],
+                first_captured_at=START,
+            )
+            return [p.id for p in shown]
+
+        scoped = await pool(None)
+        assert scoped == await pool(await get_particles_by_status(s, Status.ACTIVE))
+        assert scoped == ["p-c", "p-b"]  # the retired belief is not a candidate
+
 
 # ---------------------------------------------------------------------------
 # the snapshot current at the start, not the extraction time

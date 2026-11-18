@@ -6,7 +6,8 @@
 
 The synthetic worlds measure the update checks on templated sentences. An
 operator's ruling on a ``demotion`` curation card is the same judgment made on
-their own store: a "coexist" ruling says the older claim should have stayed,
+their own store: a "coexist" ruling says the older claim should have stayed
+(as does "rejected", a restore that retracted the replacement),
 a "replacement" ruling says the retirement was right. The curation queue keeps
 each ruling in ``<benchmark.runs_dir>/demotion-rulings.jsonl``
 (:mod:`particles.operations.curation.rulings`); this module re-asks the two
@@ -73,7 +74,8 @@ async def score_real_pairs(
         if retires is None:
             outcome = RealPairOutcome.UNDECIDED
             report.undecided += 1
-        elif r.ruling == "coexist":
+        elif r.ruling in ("coexist", "rejected"):
+            # Both say the older claim should have stayed.
             report.false_positive.add(retires)
             outcome = RealPairOutcome.FALSE_POSITIVE if retires else RealPairOutcome.AGREE
         else:

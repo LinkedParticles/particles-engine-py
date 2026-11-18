@@ -355,7 +355,7 @@ utility:
   enabled: true          # apply the utility rank-lift to projection/digest ranking
   default:
     half_life_uses_days: 30   # unreinforced utility fades over ~a month
-    rank_lift: 0.015          # lambda: how far usefulness may reorder the head
+    rank_lift: 0.065          # lambda: how far usefulness may reorder the head
   mining:
     behavioural_matching: true   # the use judge; off records nothing
     max_behavioural_calls: 150   # per-run cap on judge calls, both routes
@@ -453,35 +453,35 @@ If you render several head sizes, pass all of them and use the intersection; on
 a store with real over-extraction the intersection can be empty, in which case
 decide which surface the value is calibrated for and record it.
 
-For reference, on the dogfood store (27.0k beliefs) the three rendered head
-sizes admit `0.011` and up (`top_k: 60`), `0.006` and up (`max_lines: 120`) and
-`0.004` and up (`digest_max_beliefs: 200`). Do not port those numbers; they are
-a property of that store's confidence spread and event volume.
+For reference, on the dogfood store (61k beliefs, 2026-11-08) the monitor's
+criterion (below) admits `0.038` to `0.111` at `top_k: 60`, and `0.038` to at
+least `0.12` at `max_lines: 120` and `digest_max_beliefs: 200`. Earlier
+measurements on the same store, before use was credited only when a belief was
+shown and applied, found much lower floors and no upper edge at all.
+Do not port these numbers; they are a property of that store's confidence
+spread and event volume.
 
-Note those bands have **no upper edge**, which is new. Every earlier
-calibration on this store was squeezed between a floor and a duplicate-cluster
-ceiling; subject-agnostic merge drained the clusters that set the
-ceiling, and the largest in-head duplicate cluster is now 2 at every `λ` up to
-`0.6`. Where the ceiling exists it is a **cliff**, not a slope, so bias away
-from it; where it does not, the floor is what you budget margin against.
+**If you are upgrading from `0.015`:** the default is now `0.065`. On the
+shown-and-applied signal alone, use is sparse (53 of 61,007 ACTIVE beliefs on
+the dogfood store carry any), and the head is a tie of thousands of beliefs at
+the uncalibrated-confidence cap of 0.700. A used belief extracted at
+a lower confidence needs a larger lift to pass that tie: at `0.015` none of the
+13 beliefs applied outside the head in two or more sessions reached any head.
+`0.065` is the log-midpoint of the `0.038` to `0.111` intersection, about 1.7×
+inside each edge. It holds all 13 in every head and leaves 47% of the 60 slots
+to beliefs with no use yet. An explicit `rank_lift` in your own `config.yaml`
+is untouched; run `particles memory sweep-rank-lift --off-head-cohort` against
+your own head sizes to see whether it sits in band.
 
-**If you are upgrading from `0.011`:** the default is now `0.015`. `0.011` was
-the log-midpoint of the then-measured intersection `0.0075–0.0165`; with the
-ceiling gone that rule no longer yields a finite answer, and `0.011` had become
-the *binding floor*; one grid step below it the canonical target
-drops out of the top-60 head entirely. `0.015` restores 1.36× margin above that
-floor while keeping all 60 head slots distinct. An explicit `rank_lift` in your
-own `config.yaml` is untouched; run the sweep against your own head sizes to see
-whether it still sits in-band.
-
-**Check `ω` whenever you raise `λ`.** If you run the owner lens, its
-floor tracks `λ`: a larger utility term holds the head harder against the
-lens's flat-step cohort, so the same `ω` promotes fewer viewer beliefs. On the
-dogfood store, `λ` of `0.011 / 0.015 / 0.020 / 0.025 / 0.030` moved the `ω`
-floor to `0.018 / 0.024 / 0.032 / 0.040 / 0.048`, so a shipped `ω = 0.04` falls
-out of band by `λ = 0.030` and the viewer cohort leaves the `N = 60` head
-altogether. Re-run `particles memory sweep-owner-lift` after any `λ` change;
-past roughly `0.02` the two are a joint calibration, not independent knobs.
+**Check `ω` whenever you change `λ`.** If you run the owner lens,
+re-run `particles memory sweep-owner-lift` after any `λ` change. On the dogfood
+store in 2026-11 its binding edge is the ceiling (viewer beliefs may hold at
+most half the head), not a floor, and an `ω` of `0.04` sits on that ceiling at
+both `0.015` and `0.065`. Within `0.038` to `0.060` the ceiling falls to
+`0.035` to `0.037`, so the two still interact. A `useful` press adds
+`utility.explicit_weight` to a belief's reinforcement, so its lift also scales
+with `λ`: at `0.065` one press at the default weight puts a belief near the top
+of the head.
 
 Expect to re-run the sweep occasionally rather than once. The band drifts, and
 not monotonically: on an actively growing store it moves *down* as reinforced
@@ -592,6 +592,53 @@ non-regression against `rank_lift: 0.0`. A target that was already outside the
 head before the lens existed is reported in its own section rather than
 silently emptying the band; that is a real regression, but not one this lens
 caused.
+
+## Exact identifier-token addend
+
+A sentence encoder places "RFC 9110" next to "RFC 9112": the digits that tell
+two records apart carry almost no weight in the vector. On the reference store,
+questions that named a record by number found none of that record's beliefs in
+the 40 the answer step reads for 15 of 26 such questions. This knob adds a
+lexical part to relevance for those questions only.
+
+```yaml
+query:
+  exact_token_weight: 0.1     # mu; 0.0 (the default) is off
+  exact_token_min_length: 3   # shortest digit-bearing token that counts
+```
+
+A question's **identifier tokens** are its words that contain a digit and are
+at least `exact_token_min_length` characters long: `REQ 0251`, `REQ-0251` and
+`#0251` all yield `0251`, and `1.231.0` is one token. Each particle gains
+`exact_token_weight` times the share of those tokens its own text contains,
+added to its rank score before the top-k cut. A question with no identifier
+token ranks exactly as before. The lift orders results only: the reported
+effective confidence, `min_confidence` and the relevance floor are unchanged.
+
+**It is off by default, and the value is yours to measure.** The reference
+store chose 0.1 on a held-out set of real questions: questions naming a record
+reached a belief about it in 26 of 29 cases (14 of 29 without the lift),
+refusals on those questions fell from 9 to 2, and the other questions' top 10
+stayed nearly intact. That evidence comes from one store. Re-run the sweep on
+yours with `scripts/bench_lexical_leg.py addend` before relying on a value.
+
+**What it costs.** A common number in a question lifts every particle that
+states it: a year such as `2026` appears in about 4% of the reference store's
+beliefs, so a question carrying one re-ranks its whole top 40 toward them. A
+store that has no use for this should leave the weight at 0.
+
+**What it does not reach:** a record named without its number ("the
+HTTP semantics RFC"); an identifier shorter than the minimum (`PR 12`, unless
+you set the minimum to 2, which also lets small counts such as "top 40" lift);
+a number written differently from the question (leading zeros are significant,
+so `0696` does not match `696`, and `v1.231.0` does not match `1.231.0`); and a
+particle with no stored embedding, which is never a candidate at all.
+
+It applies wherever a question ranks beliefs: `particles query`, the MCP
+`query` tool and the recall hook, the graph view's query scope, and a
+projection section whose query carries an identifier token. The session-start
+digest ranks without a question and is unaffected. A federated query applies
+the viewer's weight to every store's candidates.
 
 ## Cross-exporter quality threshold
 

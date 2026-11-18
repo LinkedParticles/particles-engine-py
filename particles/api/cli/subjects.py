@@ -28,6 +28,7 @@ from particles.db import session_scope
 if TYPE_CHECKING:
     from particles.api.client.base import Backend
     from particles.operations.artifact_fold import FoldReport
+    from particles.operations.subject_provisional import BackfillReport, ProvisionalEntry
     from particles.operations.subject_relink import RelinkReport
     from particles.store.subject_store import AliasIndexDrift
 
@@ -48,8 +49,18 @@ _SUBJECTS_LOCAL_ONLY = frozenset(
         "relink-gated",
         "rebuild-aliases",
         "fold-artifacts",
+        "provisional-backfill",
     }
 )
+
+
+def _provisional_note(subject: Subject) -> str:
+    """`` (provisional: P)`` for a provisional Subject, empty for a confirmed one."""
+    mark = getattr(subject, "provisional", None)
+    if mark is None:
+        return ""
+    shared = f", shared by {terminal_field(mark.shared_by)}" if mark.shared_by else ""
+    return f"  (provisional: {terminal_field(mark.principal)}{shared})"
 
 
 @app.command("subjects")
@@ -57,9 +68,9 @@ def subjects_cmd(
     action: str = typer.Argument(
         "list",
         help=(
-            "Action: list, search, show, alias, confirm, unlink, merge, split, "
+            "Action: list, search, show, alias, accept, confirm, unlink, merge, split, "
             "delete, gc, set-class, fix-labels, find-duplicates, relink-gated, "
-            "rebuild-aliases, fold-artifacts"
+            "rebuild-aliases, fold-artifacts, provisional-backfill"
         ),
     ),
     rest: list[str] | None = typer.Argument(None, help="Arguments for the chosen action"),
@@ -76,6 +87,14 @@ def subjects_cmd(
         False,
         "--phantoms-only",
         help="list only: restrict to phantom subjects (zero ACTIVE particles)",
+    ),
+    provisional: bool = typer.Option(
+        False,
+        "--provisional",
+        help=(
+            "list only: the provisional Subjects agent principals minted, oldest first,"
+            " each with any confirmed Subject that holds its name"
+        ),
     ),
     order: str = typer.Option(
         "name",
@@ -161,9 +180,12 @@ def subjects_cmd(
 
     \b
         particles subjects list [--order name|degree] [--phantoms-only]
+        particles subjects list --provisional
         particles subjects search QUERY
         particles subjects show ID|NAME
         particles subjects alias ID NAME [NAME ...]
+        particles subjects accept SUBJECT_ID
+        particles subjects provisional-backfill [--dry-run]
         particles subjects confirm SUBJECT_ID NAMESPACE:ID
         particles subjects unlink SUBJECT_ID NAMESPACE:ID
         particles subjects merge SOURCE_ID [SOURCE_ID ...] TARGET_ID [--dry-run] [--yes]
@@ -190,7 +212,13 @@ def subjects_cmd(
 
         refuse_remote_sync(f"subjects {action}")
 
-    if action == "list":
+    if action == "list" and provisional:
+        from particles.api.cli._remote import refuse_remote_sync
+
+        refuse_remote_sync("subjects list --provisional")
+        _print_provisional(run(_list_provisional()))
+
+    elif action == "list":
         if phantoms_only:
             # Phantom detection has no engine endpoint — local-only.
             from particles.api.cli._remote import refuse_remote_sync
@@ -215,6 +243,7 @@ def subjects_cmd(
                 f"  {s.id[:8]}…  {terminal_field(s.canonical_name)}"
                 + (f"  [{ext}]" if ext else "")
                 + phantom
+                + _provisional_note(s)
             )
 
     elif action == "search":
@@ -237,6 +266,7 @@ def subjects_cmd(
             terminal_echo(
                 f"  {s.id[:8]}…  {terminal_field(s.canonical_name)}{via}"
                 + (f"  [{ext}]" if ext else "")
+                + _provisional_note(s)
             )
         if not subjects:
             terminal_echo(f"No subjects matching '{args[0]}'.")
@@ -262,6 +292,31 @@ def subjects_cmd(
         for ref in subject.external_ids:
             line = f"{ref.namespace}:{ref.id}" + (f"  {ref.uri}" if ref.uri else "")
             terminal_echo(f"External:    {terminal_field(line)}")
+        if (mark := getattr(subject, "provisional", None)) is not None:
+            shared = f", shared by {terminal_field(mark.shared_by)}" if mark.shared_by else ""
+            terminal_echo(f"Provisional: {terminal_field(mark.principal)}{shared}")
+            terminal_echo(
+                "             Only agent principals resolve this name to it;"
+                " `subjects accept` confirms it."
+            )
+
+    elif action == "accept":
+        if len(args) != 1:
+            terminal_echo("Usage: subjects accept SUBJECT_ID", err=True)
+            raise typer.Exit(1)
+        try:
+            accepted = run(backend.subject_accept(args[0]))
+        except ValueError as exc:
+            terminal_echo(str(exc), err=True)
+            raise typer.Exit(1) from None
+        label = f"{accepted.subject.id[:8]}… ({terminal_field(accepted.subject.canonical_name)})"
+        if accepted.accepted:
+            terminal_echo(f"Accepted {label}: every resolution of its name now reaches it.")
+        else:
+            terminal_echo(f"{label} was already confirmed; nothing changed.")
+
+    elif action == "provisional-backfill":
+        _print_backfill(run(_provisional_backfill(dry_run=dry_run)))
 
     elif action == "alias":
         if len(args) < 2:
@@ -547,12 +602,90 @@ def subjects_cmd(
     else:
         terminal_echo(
             f"Unknown action: {action}."
-            " Use list, search, show, alias, merge, split, delete, gc, set-class,"
+            " Use list, search, show, alias, accept, merge, split, delete, gc, set-class,"
             " confirm, unlink, fix-labels, find-duplicates, relink-gated, rebuild-aliases,"
-            " or fold-artifacts.",
+            " fold-artifacts, or provisional-backfill.",
             err=True,
         )
         raise typer.Exit(1)
+
+
+async def _list_provisional() -> list[ProvisionalEntry]:
+    from particles.operations.subject_provisional import list_provisional
+
+    async with session_scope() as session:
+        return await list_provisional(session)
+
+
+def _print_provisional(entries: list[ProvisionalEntry]) -> None:
+    """The operator's queue of provisional Subjects."""
+    if not entries:
+        terminal_echo("No provisional subjects.")
+        return
+    terminal_echo(
+        f"{len(entries)} provisional subject(s), oldest first"
+        " (`subjects accept ID` confirms one, `subjects merge` folds one):"
+    )
+    for entry in entries:
+        s, mark = entry.subject, entry.mark
+        shared = f", shared by {terminal_field(mark.shared_by)}" if mark.shared_by else ""
+        ext = ", ".join(f"{r.namespace}:{r.id}" for r in s.external_ids)
+        terminal_echo(
+            f"  {s.id[:8]}…  {terminal_field(s.canonical_name)}"
+            + (f"  [{terminal_field(ext)}]" if ext else "")
+            + f"  minted by {terminal_field(mark.principal)} {mark.minted_at:%Y-%m-%d}{shared}"
+        )
+        for held in entry.held_with:
+            terminal_echo(
+                f"      held beside confirmed {held.id[:8]}…  {terminal_field(held.canonical_name)}"
+            )
+
+
+def _agent_principals() -> set[str]:
+    """The labels an agent principal writes under, reserved labels removed."""
+    from particles.api import _keys
+    from particles.config import get_config
+
+    cfg = get_config().mcp
+    labels = {cfg.write.asserter_identity, cfg.memory_compat.asserter_identity}
+    try:
+        records = list(_keys.all_keys().values())
+    except _keys.KeyFileUnusable:
+        records = []
+    labels.update(r.principal for r in records if r.role is not _keys.Role.OPERATOR)
+    return labels - _keys.reserved_principals()
+
+
+async def _provisional_backfill(*, dry_run: bool) -> BackfillReport:
+    from particles.operations.subject_provisional import backfill
+
+    principals = _agent_principals()
+    async with session_scope(write=not dry_run) as session:
+        report = await backfill(session, agent_principals=principals, dry_run=dry_run)
+        if not dry_run:
+            await session.commit()
+        return report
+
+
+def _print_backfill(report: BackfillReport) -> None:
+    """What the backfill marks and what it leaves confirmed, twenty of each."""
+    verb = "Would mark" if report.dry_run else "Marked"
+    terminal_echo(f"{verb} {len(report.marked)} subject(s) provisional (scoped to their minter):")
+    for s in report.marked[:20]:
+        terminal_echo(
+            f"  {s.id[:8]}…  {terminal_field(s.canonical_name)}  ({terminal_field(s.asserted_by)})"
+        )
+    terminal_echo(
+        f"{len(report.already_shared)} agent-minted subject(s) are already shared"
+        " (another principal's claims, an external reference or an operator's act)"
+        " and stay confirmed:"
+    )
+    for s in report.already_shared[:20]:
+        terminal_echo(
+            f"  {s.id[:8]}…  {terminal_field(s.canonical_name)}  ({terminal_field(s.asserted_by)})"
+        )
+    if report.dry_run:
+        terminal_echo("  (no changes made)")
 
 
 async def _relink_gated(
@@ -916,6 +1049,10 @@ async def _set_subject_class_command(
 
     async with session_scope() as session:
         updated, previous = await reclassify_subject(session, subject_id, subject_class)
+        # A class change is an operator's act on this node.
+        from particles.operations.subject_provisional import operator_touched
+
+        await operator_touched(session, subject_id, actor="subjects-set-class", act="set-class")
         await session.commit()
         return updated, previous
 

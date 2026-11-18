@@ -65,6 +65,9 @@ BRANCH_WRITERS: dict[tuple[str, str], dict[str, Any]] = {
 _GATES: dict[Callable[..., Any], str] = {
     auth._read_gate: "read",
     auth._auth_gate: "auth",
+    auth._identity_gate: "auth",
+    auth._codex_proof_gate: "auth",
+    auth._text_deposit_gate: "write",
     auth._agent_gate: "write",
     auth._operator_gate: "operator",
 }

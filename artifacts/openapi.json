@@ -444,6 +444,16 @@
             ],
             "title": "Source Type"
           },
+          "standing": {
+            "default": false,
+            "title": "Standing",
+            "type": "boolean"
+          },
+          "statement": {
+            "default": false,
+            "title": "Statement",
+            "type": "boolean"
+          },
           "tags": {
             "anyOf": [
               {
@@ -542,6 +552,122 @@
         "title": "CanonicalForm",
         "type": "string"
       },
+      "CaptureManifest": {
+        "description": "One verified capture attempt and its committed corpus snapshot.",
+        "properties": {
+          "capture_id": {
+            "title": "Capture Id",
+            "type": "string"
+          },
+          "contract": {
+            "title": "Contract",
+            "type": "string"
+          },
+          "entry_id": {
+            "title": "Entry Id",
+            "type": "string"
+          },
+          "home_id": {
+            "title": "Home Id",
+            "type": "string"
+          },
+          "home_path": {
+            "title": "Home Path",
+            "type": "string"
+          },
+          "launch_root": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Launch Root"
+          },
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/MessageProof"
+            },
+            "title": "Messages",
+            "type": "array"
+          },
+          "parent": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "integer"
+                    }
+                  ]
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent"
+          },
+          "project_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Key"
+          },
+          "raw_hash": {
+            "title": "Raw Hash",
+            "type": "string"
+          },
+          "raw_size": {
+            "title": "Raw Size",
+            "type": "integer"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "snapshot_id": {
+            "title": "Snapshot Id",
+            "type": "string"
+          },
+          "text_hash": {
+            "title": "Text Hash",
+            "type": "string"
+          },
+          "text_size": {
+            "title": "Text Size",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "session_id",
+          "home_path",
+          "home_id",
+          "contract",
+          "launch_root",
+          "project_key",
+          "raw_size",
+          "raw_hash",
+          "text_size",
+          "text_hash",
+          "messages",
+          "entry_id",
+          "snapshot_id"
+        ],
+        "title": "CaptureManifest",
+        "type": "object"
+      },
       "CardKind": {
         "description": "One kind per card-producing finder.",
         "enum": [
@@ -556,6 +682,7 @@
           "gated_subjects",
           "subjectless_source",
           "duplicate_pair",
+          "duplicate_group",
           "uncited_url",
           "failed_snapshots",
           "refused_snapshots",
@@ -682,6 +809,296 @@
           "similarity"
         ],
         "title": "CoEvidentialCandidate",
+        "type": "object"
+      },
+      "CodexBoundary": {
+        "additionalProperties": false,
+        "description": "An exact raw prefix attested by the client that read the rollout.",
+        "properties": {
+          "byte_offset": {
+            "maximum": 2147483647.0,
+            "minimum": 0.0,
+            "title": "Byte Offset",
+            "type": "integer"
+          },
+          "ordinal": {
+            "maximum": 2147483647.0,
+            "minimum": 0.0,
+            "title": "Ordinal",
+            "type": "integer"
+          },
+          "sha256": {
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "byte_offset",
+          "ordinal",
+          "sha256"
+        ],
+        "title": "CodexBoundary",
+        "type": "object"
+      },
+      "CodexCaptureMessage": {
+        "additionalProperties": false,
+        "description": "A bounded message identity and Unicode length of its escaped body.",
+        "properties": {
+          "body_length": {
+            "maximum": 2147483647.0,
+            "minimum": 0.0,
+            "title": "Body Length",
+            "type": "integer"
+          },
+          "id": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "title": "Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "body_length"
+        ],
+        "title": "CodexCaptureMessage",
+        "type": "object"
+      },
+      "CodexDepositRequest": {
+        "additionalProperties": false,
+        "description": "A URI-owned Codex conversation with versioned capture evidence.",
+        "properties": {
+          "codex_capture": {
+            "$ref": "#/components/schemas/CodexSubmission"
+          },
+          "fetch_policy": {
+            "const": "NEVER",
+            "default": "NEVER",
+            "title": "Fetch Policy",
+            "type": "string"
+          },
+          "mutability": {
+            "const": "APPEND_ONLY",
+            "default": "APPEND_ONLY",
+            "title": "Mutability",
+            "type": "string"
+          },
+          "source_type": {
+            "const": "CONVERSATION",
+            "default": "CONVERSATION",
+            "title": "Source Type",
+            "type": "string"
+          },
+          "uri_r": {
+            "title": "Uri R",
+            "type": "string"
+          }
+        },
+        "required": [
+          "uri_r",
+          "codex_capture"
+        ],
+        "title": "CodexDepositRequest",
+        "type": "object"
+      },
+      "CodexParent": {
+        "additionalProperties": false,
+        "description": "The already-recorded parent boundary inherited by a new fork.",
+        "properties": {
+          "byte_offset": {
+            "maximum": 2147483647.0,
+            "minimum": 0.0,
+            "title": "Byte Offset",
+            "type": "integer"
+          },
+          "ordinal": {
+            "maximum": 2147483647.0,
+            "minimum": 0.0,
+            "title": "Ordinal",
+            "type": "integer"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "sha256": {
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "byte_offset",
+          "ordinal",
+          "sha256",
+          "session_id"
+        ],
+        "title": "CodexParent",
+        "type": "object"
+      },
+      "CodexProofResponse": {
+        "description": "A committed capture head or an exact recorded prefix for a single session.",
+        "properties": {
+          "manifest": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CaptureManifest"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "prefix": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CodexBoundary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "title": "CodexProofResponse",
+        "type": "object"
+      },
+      "CodexSubmission": {
+        "additionalProperties": false,
+        "description": "Versioned wire payload with distilled text and client-attested evidence.",
+        "properties": {
+          "contract": {
+            "const": "codex-conversation/1",
+            "title": "Contract",
+            "type": "string"
+          },
+          "expected_capture_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Capture Id"
+          },
+          "home_id": {
+            "title": "Home Id",
+            "type": "string"
+          },
+          "home_path": {
+            "title": "Home Path",
+            "type": "string"
+          },
+          "launch_root": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Launch Root"
+          },
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/CodexCaptureMessage"
+            },
+            "title": "Messages",
+            "type": "array"
+          },
+          "parent": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CodexParent"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "prefix": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CodexBoundary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "prior_raw_hash": {
+            "anyOf": [
+              {
+                "pattern": "^[a-f0-9]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prior Raw Hash"
+          },
+          "project_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Key"
+          },
+          "raw_hash": {
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Raw Hash",
+            "type": "string"
+          },
+          "raw_size": {
+            "maximum": 2147483647.0,
+            "minimum": 0.0,
+            "title": "Raw Size",
+            "type": "integer"
+          },
+          "session_id": {
+            "title": "Session Id",
+            "type": "string"
+          },
+          "started_at": {
+            "format": "date-time",
+            "title": "Started At",
+            "type": "string"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          },
+          "version": {
+            "const": 1,
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "version",
+          "session_id",
+          "text",
+          "home_path",
+          "home_id",
+          "launch_root",
+          "project_key",
+          "contract",
+          "started_at",
+          "raw_size",
+          "raw_hash",
+          "messages",
+          "expected_capture_id"
+        ],
+        "title": "CodexSubmission",
         "type": "object"
       },
       "Confidence": {
@@ -1199,6 +1616,17 @@
               }
             ]
           },
+          "conflict_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conflict Note"
+          },
           "contested_bases": {
             "anyOf": [
               {
@@ -1264,6 +1692,37 @@
             "title": "Leverage",
             "type": "number"
           },
+          "linked_sets": {
+            "anyOf": [
+              {
+                "items": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Linked Sets"
+          },
+          "pairs": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/DuplicateEdge"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pairs"
+          },
           "particle_ids": {
             "items": {
               "type": "string"
@@ -1278,8 +1737,28 @@
             "title": "Particles",
             "type": "array"
           },
+          "prior_rulings": {
+            "anyOf": [
+              {
+                "items": {
+                  "items": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "type": "array"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prior Rulings"
+          },
           "question": {
-            "description": "The question this kind puts to the curator (from ``KIND_TITLES``).",
+            "description": "The question this kind puts to the curator (from ``KIND_TITLES``).\n\nA retired-value record's card asks whether the retirement stands\n(``retired_value_question``).",
             "readOnly": true,
             "title": "Question",
             "type": "string"
@@ -1309,6 +1788,16 @@
             ],
             "title": "Resolve Actions"
           },
+          "retired_value": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RetiredValueBrief"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "scope_note": {
             "anyOf": [
               {
@@ -1334,8 +1823,19 @@
             "title": "Suggested Gestures",
             "type": "array"
           },
+          "survivor_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Survivor Id"
+          },
           "title": {
-            "description": "The kind's human title, e.g. \"Contested belief\" (from ``KIND_TITLES``).",
+            "description": "The kind's human title, e.g. \"Contested belief\" (from ``KIND_TITLES``).\n\nA retired-value record's card names the retirement it asks about\ninstead.",
             "readOnly": true,
             "title": "Title",
             "type": "string"
@@ -1407,6 +1907,25 @@
           "event_id"
         ],
         "title": "CurationEventResponse",
+        "type": "object"
+      },
+      "CurationGestureResponse": {
+        "description": "Outcome of a curation gesture: the card it ruled on and what it did.",
+        "properties": {
+          "card_key": {
+            "title": "Card Key",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "card_key",
+          "message"
+        ],
+        "title": "CurationGestureResponse",
         "type": "object"
       },
       "CurationPrecision": {
@@ -1613,6 +2132,18 @@
             "title": "Count",
             "type": "integer"
           },
+          "episode_shadow": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Episode Shadow"
+          },
           "kind_as_of": {
             "additionalProperties": {
               "format": "date-time",
@@ -1663,6 +2194,20 @@
             "default": false,
             "title": "Stale",
             "type": "boolean"
+          },
+          "withheld": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "title": "Withheld",
+            "type": "object"
           }
         },
         "required": [
@@ -2025,6 +2570,12 @@
             "title": "Source Type",
             "type": "string"
           },
+          "standing": {
+            "default": false,
+            "description": "Keep a deposit that names no project global instead of marking it scope:reference. Operator keys only; ignored for an agent key.",
+            "title": "Standing",
+            "type": "boolean"
+          },
           "tags": {
             "default": [],
             "items": {
@@ -2111,6 +2662,12 @@
               }
             ],
             "title": "Source Type"
+          },
+          "standing": {
+            "default": false,
+            "description": "Keep a deposit that names no project global, so every project's session-start digest may list it, instead of marking it scope:reference. Operator keys only; ignored for an agent key.",
+            "title": "Standing",
+            "type": "boolean"
           },
           "tags": {
             "default": [],
@@ -2274,6 +2831,17 @@
           "markdown": {
             "title": "Markdown",
             "type": "string"
+          },
+          "observer_engaged": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observer Engaged"
           }
         },
         "required": [
@@ -2358,6 +2926,94 @@
           "sections"
         ],
         "title": "DocManifest",
+        "type": "object"
+      },
+      "DuplicateEdge": {
+        "description": "One candidate pair inside a ``duplicate_group`` card.\n\nThe finder's pair, with the Subject it was found under and, in\n``LLM_JUDGE`` mode, the judge's advisory verdict. A client draws the\ngroup's structure from these: a member reached only through a chain is\none no edge joins to the survivor.",
+        "properties": {
+          "a": {
+            "title": "A",
+            "type": "string"
+          },
+          "b": {
+            "title": "B",
+            "type": "string"
+          },
+          "similarity": {
+            "title": "Similarity",
+            "type": "number"
+          },
+          "subject_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject Id"
+          },
+          "verdict": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DuplicateVerdict"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "a",
+          "b",
+          "similarity"
+        ],
+        "title": "DuplicateEdge",
+        "type": "object"
+      },
+      "DuplicateGroupGestureRequest": {
+        "description": "A gesture on a ``duplicate_group`` curation card.\n\n``members`` names the claims ruled on, as ids or unique id prefixes of the\ngroup's current members, or ``[\"all\"]`` on a group of ten or fewer.\n``keep`` names the hub a ``merge`` links the others to.",
+        "properties": {
+          "card_key": {
+            "title": "Card Key",
+            "type": "string"
+          },
+          "gesture": {
+            "enum": [
+              "merge",
+              "split",
+              "dismiss"
+            ],
+            "title": "Gesture",
+            "type": "string"
+          },
+          "keep": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Keep"
+          },
+          "members": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Members",
+            "type": "array"
+          }
+        },
+        "required": [
+          "card_key",
+          "gesture"
+        ],
+        "title": "DuplicateGroupGestureRequest",
         "type": "object"
       },
       "DuplicateVerdict": {
@@ -2698,6 +3354,16 @@
             "title": "Max Effective Confidence",
             "type": "number"
           },
+          "provisional": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProvisionalMark"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "subject_class": {
             "anyOf": [
               {
@@ -2924,6 +3590,43 @@
         "title": "HealthResponse",
         "type": "object"
       },
+      "HitSource": {
+        "description": "One query hit's source, readable.\n\nThe hit's first SOURCE provenance ref, resolved to its corpus entry's\nsource type and URI and its snapshot's publication date: the readable form\nof what the particle's provenance carries only as ids. A read-time view,\nnever stored.",
+        "properties": {
+          "published": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Published"
+          },
+          "source_type": {
+            "title": "Source Type",
+            "type": "string"
+          },
+          "uri": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Uri"
+          }
+        },
+        "required": [
+          "source_type"
+        ],
+        "title": "HitSource",
+        "type": "object"
+      },
       "JudgeVerdictKind": {
         "description": "An LLM's verdict on whether a candidate pair asserts the same claim.",
         "enum": [
@@ -3038,6 +3741,17 @@
       },
       "LintFinding": {
         "properties": {
+          "conflict_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conflict Note"
+          },
           "conflict_sides": {
             "anyOf": [
               {
@@ -3255,6 +3969,14 @@
       "MemoryProjectionRequest": {
         "description": "The client's projection policy for one ``MEMORY.md`` render.",
         "properties": {
+          "blocks": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "description": "The text of each file section, keyed by the section's `block` string as the manifest spells it. A key is looked up, never opened. At most 65536 UTF-8 bytes in all.",
+            "title": "Blocks",
+            "type": "object"
+          },
           "exclude_source_tags": {
             "description": "Drop candidates held only by sources with one of these tags.",
             "items": {
@@ -3273,7 +3995,7 @@
           },
           "manifest": {
             "$ref": "#/components/schemas/DocManifest",
-            "description": "The client's parsed memory manifest. A section that includes a file is refused."
+            "description": "The client's parsed memory manifest. Each section that includes a file needs its text in `blocks`."
           },
           "observer_project": {
             "anyOf": [
@@ -3393,6 +4115,26 @@
           "counted"
         ],
         "title": "MemoryUsefulResponse",
+        "type": "object"
+      },
+      "MessageProof": {
+        "description": "Accepted redacted body identity; never raw text or a secret.",
+        "properties": {
+          "body_hash": {
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Body Hash",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "body_hash"
+        ],
+        "title": "MessageProof",
         "type": "object"
       },
       "Mutability": {
@@ -3668,6 +4410,8 @@
           "CORPUS_ENTRY_DELETED",
           "CORPUS_ENTRY_RECLASSIFIED",
           "CORPUS_ENTRY_URI_RELEASED",
+          "CORPUS_ORIGIN_STAMPED",
+          "CORPUS_ORIGIN_REASSIGNED",
           "RULE_SOURCE_ROOT_FORGOTTEN",
           "CONFLICT_CANDIDATE_DROPPED",
           "SUBJECTS_SPLIT",
@@ -3678,6 +4422,9 @@
           "SUBJECT_LINK_CONFIRMED",
           "SUBJECT_LINK_REMOVED",
           "SUBJECTS_RELINKED",
+          "SUBJECT_SHARED",
+          "SUBJECT_ACCEPTED",
+          "SUBJECT_PROVISIONAL_BACKFILLED",
           "TRUST_CHANGED",
           "REVIEW_RESOLVED",
           "RELATION_ADDED",
@@ -3697,6 +4444,7 @@
           "UPDATE_SUPERSESSION",
           "TRUST_SUPERSESSION",
           "DOCUMENT_SUPERSESSION",
+          "RETIREMENT_RESTORED",
           "HELD_CLAIM_EXAMINED",
           "ABSTRACTION_CANDIDATE",
           "ABSTRACTION_RESOLVED",
@@ -3712,6 +4460,8 @@
           "OBSERVER_SCOPE_MARKED_UNATTRIBUTED",
           "OBSERVER_SCOPE_UNMARKED",
           "OBSERVER_SCOPE_KEY_WITHDRAWN",
+          "OBSERVER_SCOPE_REFERENCE_MARKED",
+          "OBSERVER_SCOPE_REFERENCE_UNMARKED",
           "VOCABULARY_CHANGED",
           "VOCABULARY_PROPOSED",
           "VOCABULARY_RULED",
@@ -3719,6 +4469,7 @@
           "MODALITY_GRANT_QUEUED",
           "PARTICLE_DATED",
           "SESSION_DATES_REPAIRED",
+          "EMBEDDING_BACKFILLED",
           "AGENT_EXTRACTION_ASKED",
           "AGENT_EXTRACTION_CONTINUED",
           "AGENT_EXTRACTION_SUBMITTED"
@@ -4604,11 +5355,59 @@
         "title": "ProvenanceRefType",
         "type": "string"
       },
+      "ProvisionalMark": {
+        "description": "A provisional Subject's mark: who minted it, and whether it is shared.\n\n``shared_by`` is ``None`` while the Subject is **scoped** (it answers only\n``principal``) and names the second agent principal once it is **shared**\n(it answers every agent principal's minting resolution).",
+        "properties": {
+          "minted_at": {
+            "format": "date-time",
+            "title": "Minted At",
+            "type": "string"
+          },
+          "principal": {
+            "title": "Principal",
+            "type": "string"
+          },
+          "shared_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Shared At"
+          },
+          "shared_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Shared By"
+          }
+        },
+        "required": [
+          "principal",
+          "minted_at"
+        ],
+        "title": "ProvisionalMark",
+        "type": "object"
+      },
       "QualityReport": {
         "description": "Extraction quality dashboard snapshot (Appendix B \u00a78).\n\nAll metrics are computed from live DB queries with no LLM involvement.\nFor full structural/semantic diagnostics use the Lint operation instead.",
         "properties": {
           "active_particles": {
             "title": "Active Particles",
+            "type": "integer"
+          },
+          "active_without_embedding": {
+            "default": 0,
+            "title": "Active Without Embedding",
             "type": "integer"
           },
           "calibration": {
@@ -4790,6 +5589,11 @@
           "include_non_asserted": {
             "default": false,
             "title": "Include Non Asserted",
+            "type": "boolean"
+          },
+          "include_refused_candidates": {
+            "default": false,
+            "title": "Include Refused Candidates",
             "type": "boolean"
           },
           "list_predicates": {
@@ -5176,6 +5980,20 @@
               }
             ]
           },
+          "sources": {
+            "items": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/HitSource"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "title": "Sources",
+            "type": "array"
+          },
           "structural_aggregate": {
             "anyOf": [
               {
@@ -5247,6 +6065,11 @@
             },
             "title": "Window Hits",
             "type": "array"
+          },
+          "withheld_candidates": {
+            "default": 0,
+            "title": "Withheld Candidates",
+            "type": "integer"
           }
         },
         "required": [
@@ -5791,6 +6614,78 @@
         ],
         "title": "ResolutionAction",
         "type": "string"
+      },
+      "RetiredValueBrief": {
+        "description": "What a retired-value record asks the curator to rule on.\n\nThe record holds claim B, a later restatement of claim A, behind A's\nretirement, so its card asks whether the retirement stands rather than\nwhich side is right. Carried by an ``INCONSISTENCY`` card whose record is\na retired-value hold, attached live to the served slice and never stored.\nDisplay only: the resolve actions are ``resolve_actions`` as for any\nrecord.",
+        "properties": {
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "restated_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Restated By"
+          },
+          "retired_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retired At"
+          },
+          "retirement": {
+            "anyOf": [
+              {
+                "enum": [
+                  "retracted",
+                  "superseded",
+                  "reviewed"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retirement"
+          }
+        },
+        "title": "RetiredValueBrief",
+        "type": "object"
+      },
+      "RetirementNoticeResponse": {
+        "description": "The digest's automatic-retirement section on its own.",
+        "properties": {
+          "markdown": {
+            "description": "One header line and one line per source that retired claims as replaced, each with its restore command. Empty when nothing was retired in the window.",
+            "title": "Markdown",
+            "type": "string"
+          }
+        },
+        "required": [
+          "markdown"
+        ],
+        "title": "RetirementNoticeResponse",
+        "type": "object"
       },
       "ReviewParticle": {
         "description": "Audit record written after a Review resolution action (\u00a79.6).",
@@ -6641,6 +7536,24 @@
         "title": "Subject",
         "type": "object"
       },
+      "SubjectAcceptResponse": {
+        "description": "Outcome of an accept: the Subject, and whether it was provisional.",
+        "properties": {
+          "accepted": {
+            "title": "Accepted",
+            "type": "boolean"
+          },
+          "subject": {
+            "$ref": "#/components/schemas/SubjectView"
+          }
+        },
+        "required": [
+          "subject",
+          "accepted"
+        ],
+        "title": "SubjectAcceptResponse",
+        "type": "object"
+      },
       "SubjectAliasRequest": {
         "properties": {
           "aliases": {
@@ -6863,6 +7776,32 @@
         "title": "SubjectParticleIdsResponse",
         "type": "object"
       },
+      "SubjectSuggestionItem": {
+        "description": "One subject suggested for a belief, and why.",
+        "properties": {
+          "named": {
+            "description": "Its name or an alias appears in the claim.",
+            "title": "Named",
+            "type": "boolean"
+          },
+          "neighbours": {
+            "description": "How many of the nearest linked beliefs carry it; 0 when only named.",
+            "title": "Neighbours",
+            "type": "integer"
+          },
+          "subject": {
+            "$ref": "#/components/schemas/Subject"
+          }
+        },
+        "required": [
+          "subject",
+          "named",
+          "neighbours"
+        ],
+        "title": "SubjectSuggestionItem",
+        "type": "object"
+      },
+      "SubjectView": {},
       "SuggestMode": {
         "description": "Operating mode for the ``links suggest`` operation.\n\n``REPORT`` lists candidate pairs above the similarity threshold with no\nLLM call and no mutation. ``LLM_JUDGE`` additionally sends each Subject's\ncandidate cluster to an LLM for a per-pair PARAPHRASE / DISTINCT / UNSURE\nverdict, still without mutating. ``APPLY`` implies ``LLM_JUDGE`` and\nauto-links the PARAPHRASE pairs via a CO_EVIDENTIAL relation.",
         "enum": [
@@ -6912,6 +7851,13 @@
             },
             "title": "Warnings",
             "type": "array"
+          },
+          "withheld": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Withheld",
+            "type": "object"
           }
         },
         "required": [
@@ -7175,6 +8121,44 @@
           "cascade_resolved"
         ],
         "title": "TrustStatementResponse",
+        "type": "object"
+      },
+      "TuningReport": {
+        "description": "What ``GET /config/tuning`` serves: the engine's matched settings, as digests.",
+        "properties": {
+          "digests": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Digests",
+            "type": "object"
+          },
+          "env_overrides": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Env Overrides",
+            "type": "array"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          },
+          "warnings": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "version",
+          "digests"
+        ],
+        "title": "TuningReport",
         "type": "object"
       },
       "UncertaintyNature": {
@@ -7507,6 +8491,56 @@
             ],
             "title": "Archive Roots"
           },
+          "belief_write_stores": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Belief Write Stores"
+          },
+          "codex_capture_protocol": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Codex Capture Protocol"
+          },
+          "global_rule_roots": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Global Rule Roots"
+          },
+          "host_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Host Id"
+          },
           "key_id": {
             "anyOf": [
               {
@@ -7564,6 +8598,20 @@
               }
             ],
             "title": "Role"
+          },
+          "rule_roots": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rule Roots"
           }
         },
         "required": [
@@ -7717,7 +8765,7 @@
   "paths": {
     "/auth/whoami": {
       "get": {
-        "description": "Say which principal, role and project the presented key stands for.\n\nA client checks its key with it before any write, and the remote-aware\ndoctor uses it as its authenticated probe. On a keyed engine the bearer is\nrequired (401 otherwise); a keyless engine answers ``anonymous`` to a\nloopback caller. ``key_id`` is ``env`` for ``PARTICLES_API_KEY``, which is\nthe operator's key. A harvester key also returns the client directories it\nrecords, which its own memory and archive files must lie under.",
+        "description": "Say which principal, role and project the presented key stands for.\n\nA client checks its key with it before any write, and the remote-aware\ndoctor uses it as its authenticated probe. On a keyed engine the bearer is\nrequired (401 otherwise); a keyless engine answers ``anonymous`` to a\nloopback caller. ``key_id`` is ``env`` for ``PARTICLES_API_KEY``, which is\nthe operator's key. A harvester key also returns the client directories it\nrecords, which its own memory and archive files must lie under, and the\nclient host id its file deposits are stamped with. ``belief_write_stores``\nnames the stores that accept the key's belief writes, so a client checks\nthe write switch without making a write; it is empty for a reader key and\nfor an anonymous caller, since a keyless engine refuses every write.",
         "operationId": "whoami_auth_whoami_get",
         "responses": {
           "200": {
@@ -7737,6 +8785,30 @@
           }
         ],
         "summary": "Whoami"
+      }
+    },
+    "/config/tuning": {
+      "get": {
+        "description": "The engine's matched settings as digests, and its extraction-budget warnings.\n\nA thin client's ``hook doctor`` compares these with its own config, so a\nsetting tuned on one side only is reported. Each digest is the\nSHA-256 of one setting's canonical JSON; no value, path or URL is served.\n``env_overrides`` names the settings this engine takes from its\nenvironment, and ``warnings`` holds the checks evaluated on the\nengine's config, which is the one consolidation runs with. Any\nauthenticated key may read it.",
+        "operationId": "config_tuning_config_tuning_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TuningReport"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Config Tuning"
       }
     },
     "/corpus": {
@@ -7875,6 +8947,116 @@
         "summary": "Corpus Blob"
       }
     },
+    "/corpus/codex-capture/{session_id}": {
+      "get": {
+        "description": "Return continuity metadata for a capture key's session and home.",
+        "operationId": "codex_capture_proof_corpus_codex_capture__session_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "title": "Session Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "byte_offset",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 2147483647,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Byte Offset"
+            }
+          },
+          {
+            "in": "query",
+            "name": "ordinal",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maximum": 2147483647,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Ordinal"
+            }
+          },
+          {
+            "in": "query",
+            "name": "store",
+            "required": false,
+            "schema": {
+              "default": "default",
+              "minLength": 1,
+              "title": "Store",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Particles-Codex-Home-Id",
+            "required": true,
+            "schema": {
+              "title": "X-Particles-Codex-Home-Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "X-Particles-Codex-Home",
+            "required": true,
+            "schema": {
+              "title": "X-Particles-Codex-Home",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CodexProofResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Codex Capture Proof"
+      }
+    },
     "/corpus/deposit/file": {
       "post": {
         "description": "Deposit a file upload into the corpus. The file is hashed +\nstored under the blob directory; metadata + initial snapshot are\ncreated from the upload's content-type.\n\n``deposited_by`` / ``source_type`` / ``tags`` / ``content_date`` are\noptional multipart form fields so the thin client's local-file ``deposit``\n(which uploads the bytes over HTTP) keeps its flags; ``content_date``\nis the archival authorship date, held to the deposit time. An\nagent key's upload is recorded as its principal, takes the type the engine\ninfers from the bytes (a body type must equal it, and an inferred policy\ntype, a taxonomy, trust lens or vocabulary document, is refused), names no\nharvester's tag unless its principal is a harvester, and touches only the\nagent's own entries. An operator key names what it likes.\nRate-limited per principal like the agents' deposit (``api.rate_limit_per_minute``).\n\nAn upload larger than ``local_files.max_bytes`` is refused with 413. An\nupload whose bytes match a file the engine enrolled from its own disk gets\nan entry of its own rather than appending to that entry or changing its\n``source_type``.",
@@ -7940,7 +9122,15 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/DepositTextRequest"
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/CodexDepositRequest"
+                  },
+                  {
+                    "$ref": "#/components/schemas/DepositTextRequest"
+                  }
+                ],
+                "title": "Req"
               }
             }
           },
@@ -8472,6 +9662,60 @@
         "summary": "Get Curation Card Endpoint"
       }
     },
+    "/curation/duplicate-group": {
+      "post": {
+        "description": "Merge, split or dismiss members of a duplicate group.\n\n``merge`` links the named members to one hub as co-evidential, and every\nbelief stays active. ``split`` rules the named members not the same claim\nas the rest. ``dismiss`` rules that no two members are the same claim. A\nmember named that is not in the group as the queue serves it, or a merge\nacross a recorded conflict or an earlier ruling, is refused with 400. 403\nwhen curation writes are disabled. Refused (503) under the dev-key skip,\neven from loopback: it needs a real bearer.",
+        "operationId": "curation_duplicate_group_endpoint_curation_duplicate_group_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DuplicateGroupGestureRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CurationGestureResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Curation Duplicate Group Endpoint"
+      }
+    },
     "/curation/rebuild": {
       "post": {
         "description": "Rebuild the persisted curation collection store-wide.\n\n**Synchronous and slow by design**: it runs every finder over the whole\nstore (minutes on a large one). It is not how the queue becomes fast; the\nnightly consolidation cycle is. This is the operator's escape hatch when they\nneed the queue to reflect right now, and the web UI already has an honest\nloading state for it. An async 202 + poll variant waits on a resident\nprocess to host job state (tracked).\n\nRequires the write bearer: it mutates the cache. Rate-limited like\n``/query``, since a semantic rebuild drives paid probes store-wide.",
@@ -8604,7 +9848,7 @@
     },
     "/digest/{store}": {
       "get": {
-        "description": "Render the session-start memory digest for a store.\n\nRead-only, zero LLM/embeddings, rendered fresh. 404 if the store handle is\nnot configured on this engine. ``project`` reads the store through that\nproject observer, evaluated against this engine's own sources.\n``build_digest`` manages its own per-store session, so this handler takes no\n``SessionDep``.\n\nBearer-gated regardless of ``api.require_auth_for_reads`` (F2): the digest\nis the provenance-ranked roll-up of the full belief store, including\ncontested beliefs, which is confidential operator context. The dev-key loopback\nskip keeps it open for local development.",
+        "description": "Render the session-start memory digest for a store.\n\nRead-only, zero LLM/embeddings, rendered fresh. 404 if the store handle is\nnot configured on this engine. ``project`` reads the store through that\nproject observer, evaluated against this engine's own sources.\n``build_digest`` manages its own per-store session, so this handler takes no\n``SessionDep``.\n\nBearer-gated regardless of ``api.require_auth_for_reads`` (F2): the digest\nis the provenance-ranked roll-up of the full belief store, including\ncontested beliefs, which is confidential operator context. The dev-key loopback\nskip keeps it open for local development.\n\n``strict_scope`` returns 409 if the requested project cannot be applied.\n\n``retired_since`` opens the window of the automatic-retirement section under\nthe header: the caller's previous digest. Without it the section\nlooks back ``mcp.recall.digest_retirement_window_days``.",
         "operationId": "get_digest_endpoint_digest__store__get",
         "parameters": [
           {
@@ -8631,6 +9875,33 @@
                 }
               ],
               "title": "Project"
+            }
+          },
+          {
+            "in": "query",
+            "name": "retired_since",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Retired Since"
+            }
+          },
+          {
+            "in": "query",
+            "name": "strict_scope",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Strict Scope",
+              "type": "boolean"
             }
           }
         ],
@@ -8672,6 +9943,95 @@
           }
         ],
         "summary": "Get Digest Endpoint"
+      }
+    },
+    "/digest/{store}/retirements": {
+      "get": {
+        "description": "Render the automatic-retirement section of the digest alone.\n\nA session start that injects no digest (the projected memory region is\ncurrent) still names the claims an automatic rung retired since the\nprevious session. Read-only, gated as the digest is, since it carries\nclaim text. ``project`` reads through that observer; ``retired_since`` opens\nthe window, else ``mcp.recall.digest_retirement_window_days``.",
+        "operationId": "get_retirement_notice_endpoint_digest__store__retirements_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "store",
+            "required": true,
+            "schema": {
+              "title": "Store",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "project",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Project"
+            }
+          },
+          {
+            "in": "query",
+            "name": "retired_since",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "date-time",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Retired Since"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RetirementNoticeResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Retirement Notice Endpoint"
       }
     },
     "/events": {
@@ -9407,7 +10767,7 @@
     },
     "/memory/projection/{store}": {
       "post": {
-        "description": "Render the ``MEMORY.md`` region body for a thin client.\n\nThe client sends its own manifest, so its projection policy governs, and\nsplices the returned body into its memory directory itself; this route\nwrites nothing. Deterministic, with no model call. ``fold_targets`` are\nanswered against the body just rendered. 404 if the store handle is not\nconfigured on this engine; 422 for a manifest with a file section, which\nnames a client path this engine cannot read.\n\nBearer-gated regardless of ``api.require_auth_for_reads``, like\n``GET /digest/{store}``: the region is the same confidential roll-up.",
+        "description": "Render the ``MEMORY.md`` region body for a thin client.\n\nThe client sends its own manifest, so its projection policy governs, and\nsplices the returned body into its memory directory itself; this route\nwrites nothing. Deterministic, with no model call. ``fold_targets`` are\nanswered against the body just rendered. A file section's text arrives in\n``blocks``, read by the client; this route looks it up by the section's own\nstring, opens no path and keeps none of it. 404 if the store\nhandle is not configured on this engine; 422 when ``blocks`` does not match\nthe manifest's file sections or exceeds the size limit.\n\nBearer-gated regardless of ``api.require_auth_for_reads``, like\n``GET /digest/{store}``: the region is the same confidential roll-up.",
         "operationId": "memory_projection_endpoint_memory_projection__store__post",
         "parameters": [
           {
@@ -9459,7 +10819,7 @@
                 }
               }
             },
-            "description": "Manifest names a client file this engine cannot read"
+            "description": "A file section of the manifest has no text in `blocks`, `blocks` names a section the manifest does not have, or the texts exceed the size limit"
           }
         },
         "security": [
@@ -9472,7 +10832,7 @@
     },
     "/memory/useful": {
       "post": {
-        "description": "Mark a belief useful (``BELIEF_MARKED_USEFUL`` operator event).\n\nThe explicit second utility channel, for the belief class the transcript\nminer cannot observe: prohibitions and design stances, complied\nwith by *not* acting. Promotion-only and projection-only. Only a press made\nwith an operator key earns the utility credit, at most one per belief per\nday. An agent key's press is recorded with its principal and earns none,\nso it neither adds to the credit nor uses up the operator's.\n403 when belief writes are disabled (``mcp.write.enabled_stores``\ndefault-deny).",
+        "description": "Mark a belief useful (``BELIEF_MARKED_USEFUL`` operator event).\n\nThe explicit second utility channel, for the belief class the transcript\nminer cannot observe: prohibitions and design stances, complied\nwith by *not* acting. Promotion-only and projection-only. Only a press made\nwith an operator key earns the utility credit, at most one per belief per\nday. An agent key's press is recorded with its principal and earns none,\nso it neither adds to the credit nor uses up the operator's.\n403 when belief writes are disabled (``mcp.write.enabled_stores``\ndefault-deny); 429 past ``api.write_rate_limit_per_minute``.",
         "operationId": "memory_useful_endpoint_memory_useful_post",
         "requestBody": {
           "content": {
@@ -9786,7 +11146,7 @@
     },
     "/particles/deposit": {
       "post": {
-        "description": "Deposit text as the agent (HTTP mirror of MCP ``deposit_text``). The entry\nis a CONVERSATION deposit attributed to the agent identity and deduplicated\nonly onto the agent's own entries in the same scope, so identical bytes\nanother principal or project deposited are never reused or rescoped. 400 on\na guard violation; 403 when belief writes are disabled for the store; 404 on\nan unknown ``store``; 429 past ``api.rate_limit_per_minute``, since each\ndeposit queues a snapshot for model extraction.",
+        "description": "Deposit text as the agent (HTTP mirror of MCP ``deposit_text``). The entry\nis a CONVERSATION deposit attributed to the agent identity and deduplicated\nonly onto the agent's own entries in the same scope, so identical bytes\nanother principal or project deposited are never reused or rescoped. 400 on\na guard violation; 403 when belief writes are disabled for the store; 404 on\nan unknown ``store``; 429 past ``api.rate_limit_per_minute``, since each\ndeposit queues a snapshot for model extraction, or when an agent key's\nprincipal already holds ``api.max_pending_extractions_per_principal``\nsnapshots waiting to be read.",
         "operationId": "agent_deposit_endpoint_particles_deposit_post",
         "parameters": [
           {
@@ -9853,7 +11213,7 @@
     },
     "/particles/link": {
       "post": {
-        "description": "Link two beliefs as an agent (HTTP mirror of MCP ``link_add``). Both\nendpoints are own-beliefs-only, never HUMAN_REVIEW, and in view for\n``project_key``. 400 on a guard violation; 403 when belief writes are\ndisabled for the store; 404 on an unknown ``store``.",
+        "description": "Link two beliefs as an agent (HTTP mirror of MCP ``link_add``). Both\nendpoints are own-beliefs-only, never HUMAN_REVIEW, and in view for\n``project_key``. 400 on a guard violation; 403 when belief writes are\ndisabled for the store; 404 on an unknown ``store``; 429 past\n``api.write_rate_limit_per_minute``.",
         "operationId": "agent_link_endpoint_particles_link_post",
         "parameters": [
           {
@@ -9920,7 +11280,7 @@
     },
     "/particles/retract": {
       "post": {
-        "description": "Retract a belief (HTTP mirror of MCP ``particle_retract``). Own-beliefs-only;\noperator (HUMAN_REVIEW) particles are not agent-mutable. 400 on a guard\nviolation or empty reason; 403 when belief writes are disabled for\nthe store; 404 on an unknown ``store``.",
+        "description": "Retract a belief (HTTP mirror of MCP ``particle_retract``). Own-beliefs-only;\noperator (HUMAN_REVIEW) particles are not agent-mutable. 400 on a guard\nviolation or empty reason; 403 when belief writes are disabled for\nthe store; 404 on an unknown ``store``; 429 past\n``api.write_rate_limit_per_minute``.",
         "operationId": "particle_retract_endpoint_particles_retract_post",
         "parameters": [
           {
@@ -10137,7 +11497,7 @@
     },
     "/particles/tag": {
       "post": {
-        "description": "Tag a belief as an agent (HTTP mirror of MCP ``particle_tag``). 400 on a\nguard violation; 403 when belief writes are disabled for the store; 404 on\nan unknown ``store``.",
+        "description": "Tag a belief as an agent (HTTP mirror of MCP ``particle_tag``). 400 on a\nguard violation; 403 when belief writes are disabled for the store; 404 on\nan unknown ``store``; 429 past ``api.write_rate_limit_per_minute``.",
         "operationId": "agent_tag_endpoint_particles_tag_post",
         "parameters": [
           {
@@ -10204,7 +11564,7 @@
     },
     "/particles/unlink": {
       "post": {
-        "description": "Withdraw an agent-written link (HTTP mirror of MCP ``link_remove``). 400 on\na guard violation, including a link an agent did not write; 403 when belief\nwrites are disabled for the store; 404 on an unknown ``store``.",
+        "description": "Withdraw an agent-written link (HTTP mirror of MCP ``link_remove``). 400 on\na guard violation, including a link an agent did not write; 403 when belief\nwrites are disabled for the store; 404 on an unknown ``store``; 429 past\n``api.write_rate_limit_per_minute``.",
         "operationId": "agent_unlink_endpoint_particles_unlink_post",
         "parameters": [
           {
@@ -10271,7 +11631,7 @@
     },
     "/particles/untag": {
       "post": {
-        "description": "Untag a belief as an agent (HTTP mirror of MCP ``particle_untag``). 400 on\na guard violation; 403 when belief writes are disabled for the store; 404\non an unknown ``store``.",
+        "description": "Untag a belief as an agent (HTTP mirror of MCP ``particle_untag``). 400 on\na guard violation; 403 when belief writes are disabled for the store; 404\non an unknown ``store``; 429 past ``api.write_rate_limit_per_minute``.",
         "operationId": "agent_untag_endpoint_particles_untag_post",
         "parameters": [
           {
@@ -10678,6 +12038,98 @@
           }
         ],
         "summary": "Get Particle Source"
+      }
+    },
+    "/particles/{particle_id}/subject-suggestions": {
+      "get": {
+        "description": "The subjects a belief is most likely about, best first.\n\nTwo signals, with no model call: the subjects whose name or alias the\nclaim spells, then the subjects its nearest linked ACTIVE beliefs carry.\nA subject the belief already carries is never suggested. ``limit``\ndefaults to ``curation.subject_suggestions.limit`` and is clamped to 20.\n``observer_project`` reads the neighbours as that project sees them. A\nread: it writes nothing. 404 if the belief is absent.",
+        "operationId": "subject_suggestions_endpoint_particles__particle_id__subject_suggestions_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "particle_id",
+            "required": true,
+            "schema": {
+              "title": "Particle Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Limit"
+            }
+          },
+          {
+            "in": "query",
+            "name": "observer_project",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Observer Project"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SubjectSuggestionItem"
+                  },
+                  "title": "Response Subject Suggestions Endpoint Particles  Particle Id  Subject Suggestions Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Subject Suggestions Endpoint"
       }
     },
     "/particles/{particle_id}/subjects": {
@@ -11246,7 +12698,7 @@
     },
     "/subjects": {
       "get": {
-        "description": "List Subjects (alphabetical). ``limit``/``offset`` paginate (MCP-friendly);\nan omitted ``limit`` returns the first ``storage.max_page_size`` and any\n``limit`` is clamped to that cap (security review F5; formerly unbounded).\n``order=degree`` sorts by descending ACTIVE-particle link count instead\n(most-connected first, e.g. the web UI's Browse seed).",
+        "description": "List Subjects (alphabetical). ``limit``/``offset`` paginate (MCP-friendly);\nan omitted ``limit`` returns the first ``storage.max_page_size`` and any\n``limit`` is clamped to that cap (security review F5; formerly unbounded).\n``order=degree`` sorts by descending ACTIVE-particle link count instead\n(most-connected first, e.g. the web UI's Browse seed). A provisional\nSubject carries ``provisional``.",
         "operationId": "list_subjects_subjects_get",
         "parameters": [
           {
@@ -11298,7 +12750,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "$ref": "#/components/schemas/Subject"
+                    "$ref": "#/components/schemas/SubjectView"
                   },
                   "title": "Response List Subjects Subjects Get",
                   "type": "array"
@@ -11488,7 +12940,7 @@
     },
     "/subjects/search": {
       "get": {
-        "description": "Full-text search Subjects by canonical name or alias. ``limit``/``offset``\npaginate; an omitted ``limit`` returns up to ``storage.max_page_size``\nmatches and any ``limit`` is clamped to it. ``q`` is bounded to 1\u2013200 chars\nand its LIKE wildcards are escaped in the store (security review F5 / F7).",
+        "description": "Full-text search Subjects by canonical name or alias. ``limit``/``offset``\npaginate; an omitted ``limit`` returns up to ``storage.max_page_size``\nmatches and any ``limit`` is clamped to it. ``q`` is bounded to 1\u2013200 chars\nand its LIKE wildcards are escaped in the store (security review F5 / F7).\n``order=relevance`` lists an exact name or alias first, then names that\nbegin with ``q``, then names with a word that begins with it, then the\nrest, shorter names first; the default, ``name``, is alphabetical.",
         "operationId": "search_subjects_endpoint_subjects_search_get",
         "parameters": [
           {
@@ -11529,6 +12981,20 @@
               "title": "Offset",
               "type": "integer"
             }
+          },
+          {
+            "in": "query",
+            "name": "order",
+            "required": false,
+            "schema": {
+              "default": "name",
+              "enum": [
+                "name",
+                "relevance"
+              ],
+              "title": "Order",
+              "type": "string"
+            }
           }
         ],
         "responses": {
@@ -11537,7 +13003,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "$ref": "#/components/schemas/Subject"
+                    "$ref": "#/components/schemas/SubjectView"
                   },
                   "title": "Response Search Subjects Endpoint Subjects Search Get",
                   "type": "array"
@@ -11642,7 +13108,7 @@
     },
     "/subjects/{subject_id}": {
       "get": {
-        "description": "Fetch a Subject by ID. 404 if not present.",
+        "description": "Fetch a Subject by ID. 404 if not present. A provisional Subject carries\n``provisional``; a read by id is never filtered.",
         "operationId": "get_subject_endpoint_subjects__subject_id__get",
         "parameters": [
           {
@@ -11660,7 +13126,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Subject"
+                  "$ref": "#/components/schemas/SubjectView"
                 }
               }
             },
@@ -11693,6 +13159,71 @@
           }
         ],
         "summary": "Get Subject Endpoint"
+      }
+    },
+    "/subjects/{subject_id}/accept": {
+      "post": {
+        "description": "Accept a provisional Subject (HTTP mirror of `subjects accept`).\n\nA Subject an agent principal minted answers only agent principals until an\noperator accepts it by id; afterwards every extraction, import and operator\nwrite that names it resolves to it. ``accepted`` is false when the Subject\nwas already confirmed, which changes nothing. 404 if absent.",
+        "operationId": "accept_subject_endpoint_subjects__subject_id__accept_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "subject_id",
+            "required": true,
+            "schema": {
+              "title": "Subject Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubjectAcceptResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Invalid input"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Resource not found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Accept Subject Endpoint"
       }
     },
     "/subjects/{subject_id}/aliases": {

@@ -30,7 +30,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict
 
 from particles.core.schema import (
     ContestedBadge,
@@ -59,6 +59,7 @@ if TYPE_CHECKING:
     # carries no Engine import at runtime.
     from particles.llm.usage import LLMUsage
     from particles.operations.agent_write import AgentWriteResult
+    from particles.operations.curation import CardKind, CurationCard, CurationQueueResult
     from particles.operations.deposit_suggest import DepositSuggestReport
     from particles.operations.digest import RenderedDigest
     from particles.operations.projection import DocManifest
@@ -66,6 +67,33 @@ if TYPE_CHECKING:
     from particles.operations.source_passage import SourcePassage
     from particles.store.event_store import OperatorEvent
     from particles.store.session_exposure_store import SessionExposure
+
+
+class CodexTurnEvidence(TypedDict):
+    """Identity and Unicode length of one escaped body in the capture text."""
+
+    id: str
+    body_length: int
+
+
+class CodexCaptureEvidence(TypedDict):
+    """Client attestation accompanying a versioned Codex text deposit."""
+
+    version: Literal[1]
+    session_id: str
+    home_path: str
+    home_id: str
+    launch_root: str | None
+    project_key: str | None
+    contract: str
+    started_at: str
+    raw_size: int
+    raw_hash: str
+    messages: list[CodexTurnEvidence]
+    expected_capture_id: str | None
+    prior_raw_hash: str | None
+    parent: dict[str, str | int] | None
+    prefix: dict[str, str | int] | None
 
 
 class NotYetRemoteError(RuntimeError):
@@ -161,6 +189,14 @@ class ExtractOutcome:
 # so ``LocalBackend`` (store call) and ``HttpBackend`` (HTTP parse) return the
 # same dataclass and the verb body renders it identically across transports.
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class AcceptOutcome:
+    """Result of ``subjects accept``: the Subject, and whether it was provisional."""
+
+    subject: Subject
+    accepted: bool
 
 
 @dataclass(frozen=True)
@@ -309,6 +345,7 @@ class Backend(Protocol):
         tags: list[str],
         follow_post_links: bool | None,
         follow_comment_links: bool | None,
+        standing: bool = False,
     ) -> DepositOutcome: ...
 
     async def deposit_file(
@@ -321,6 +358,7 @@ class Backend(Protocol):
         content_date: datetime | None,
         mutability: str | None = None,
         fetch_policy: str | None = None,
+        standing: bool = False,
     ) -> DepositOutcome: ...
 
     async def deposit_file_split(
@@ -330,6 +368,7 @@ class Backend(Protocol):
         deposited_by: str,
         source_type: str | None,
         tags: list[str],
+        standing: bool = False,
     ) -> list[DepositOutcome]: ...
 
     async def extract(
@@ -379,6 +418,29 @@ class Backend(Protocol):
     ) -> ReviewParticle: ...
 
     async def quality(self) -> QualityReport: ...
+
+    async def curation_queue(
+        self,
+        *,
+        limit: int | None,
+        kind: CardKind | None,
+        semantic: bool,
+        no_snapshot: bool,
+    ) -> CurationQueueResult:
+        """The leverage-ranked curation queue with its staleness stamp.
+
+        ``no_snapshot`` runs the finders for this call instead of serving the
+        stored collection. Over HTTP this is ``GET /curation``.
+        """
+        ...
+
+    async def curation_card(self, key: str) -> CurationCard | None:
+        """One open curation card by key, or ``None`` when no open card has it."""
+        ...
+
+    async def curation_rebuild(self, *, semantic: bool) -> None:
+        """Rebuild the stored curation collection store-wide."""
+        ...
 
     async def reindex(
         self,
@@ -468,9 +530,24 @@ class Backend(Protocol):
         self, *, limit: int, source_type: str | None
     ) -> list[CorpusEntry]: ...
 
-    async def digest(self, store: str, project: str | None = None) -> str: ...
+    async def digest(
+        self, store: str, project: str | None = None, retired_since: datetime | None = None
+    ) -> str: ...
 
-    async def digest_located(self, store: str, project: str | None = None) -> RenderedDigest:
+    async def retirement_notice(
+        self, store: str, project: str | None = None, since: datetime | None = None
+    ) -> str:
+        """The digest's automatic-retirement section alone; empty when none."""
+        ...
+
+    async def digest_located(
+        self,
+        store: str,
+        project: str | None = None,
+        retired_since: datetime | None = None,
+        *,
+        strict_scope: bool = False,
+    ) -> RenderedDigest:
         """The digest with the belief id behind each line, in order.
 
         An engine that predates the line ids returns none, and the caller then
@@ -507,6 +584,10 @@ class Backend(Protocol):
     async def trust_statement_set(self, statement: SourceTrustStatement) -> int: ...
 
     async def subject_alias(self, subject_id: str, aliases: list[str]) -> AliasOutcome: ...
+
+    async def subject_accept(self, subject_id: str) -> AcceptOutcome:
+        """Accept a provisional Subject by id; ``ValueError`` if absent."""
+        ...
 
     async def subject_merge(
         self, source_ids: list[str], target_id: str, *, dry_run: bool = False
@@ -652,8 +733,13 @@ class Backend(Protocol):
         deposited_by: str | None = None,
         source_type: str | None = None,
         project_key: str | None = None,
+        standing: bool = False,
     ) -> tuple[str, str]:
         """Deposit a literal string as one corpus entry; no fetch, no extraction.
+
+        ``standing``, on the operator path and on every other
+        document deposit here, keeps a deposit that names no project global
+        instead of marking it ``scope:reference``.
 
         ``project_key`` is the project a bound agent surface writes as.
         It is the server's to supply, never the caller's: on the agent path
@@ -688,10 +774,13 @@ class Backend(Protocol):
         """Render the ``MEMORY.md`` region body from ``store``.
 
         ``manifest`` is the client's projection policy and travels with the
-        request; ``base_dir`` is its directory, which only the local backend can
+        request; ``base_dir`` is its directory, which only this client can
         read. ``fold_targets`` are the file URIs whose fold verdicts the
-        caller needs. The HTTP backend refuses a manifest with a file
-        section (:class:`~particles.operations.projection.memory_region.ClientFileSectionError`).
+        caller needs. The HTTP backend reads each file section
+        under ``base_dir`` itself and sends its text; it raises
+        :class:`~particles.operations.projection.memory_region.ClientFileSectionError`
+        when ``claude_code.harvest.allow_remote`` is off or the texts exceed
+        the size limit, and what the local read raises for a refused file.
         """
         ...
 
@@ -715,6 +804,7 @@ class Backend(Protocol):
         content_published_at: datetime | None,
         store: str,
         fetch_policy: str | None = None,
+        codex_capture: CodexCaptureEvidence | None = None,
     ) -> TextDepositOutcome:
         """Deposit text under a stable URI-R identity; no-op when unchanged.
 

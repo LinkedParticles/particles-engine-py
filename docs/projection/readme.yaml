@@ -47,6 +47,12 @@
 #
 # BUNDLE — the drift gate's CI-reproducible store:
 #   particles project docs/projection/readme.yaml --export-corpus
+# Run it only against the store the corpus was just built in. Against any other
+# store (the operator's own, the engine's) the pins are absent, so the export
+# refuses and writes nothing. The same run writes the `readme.sources.json`
+# freshness sidecar, which only that build store can write. A build store that is gone leaves the
+# sidecar absent until the next rebuild; the check then prints one advisory
+# line and never fails.
 #
 # GATE (§5 / 0167 / 0202 §6): listed in docs/projection/gated.txt.
 # `scripts/projection_drift.py` (pre-commit + CI) restores the sibling

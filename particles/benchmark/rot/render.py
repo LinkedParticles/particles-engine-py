@@ -78,7 +78,8 @@ def render_report(report: RotBenchmarkReport) -> str:
     s = report.selection
     lines = [
         f"Memory-rot benchmark — arm {s.arm.upper()}",
-        f"  seeds {s.seeds} · {s.days} days · checkpoints {s.checkpoints} · top_k {s.top_k}",
+        f"  seeds {s.seeds} · {s.days} days · checkpoints {s.checkpoints} · top_k {s.top_k}"
+        + ("" if s.profile == "full" else f" · profile {s.profile}"),
         f"  trust policy {'on' if s.trust_policy else 'OFF'} "
         f"(untrusted domain trust {s.untrusted_domain_trust}) · "
         f"generator v{s.generator_version} · scorer v{s.scorer_version}",

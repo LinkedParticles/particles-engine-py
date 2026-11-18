@@ -147,3 +147,28 @@ class TestClientKeyAndBound:
         _rate_limit._allow("new", 1, 100.5)
         assert "idle" not in _rate_limit._buckets
         assert {"busy-a", "busy-b", "new"} <= set(_rate_limit._buckets)
+
+
+def test_write_bucket_keys_never_equal_a_model_call_bucket_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """the write bucket holds its own tokens for the same client."""
+    monkeypatch.setenv("PARTICLES_API_RATE_LIMIT_PER_MINUTE", "1")
+    reset_config()
+    from particles.config import get_config
+
+    get_config().api.write_rate_limit_per_minute = 1
+
+    class _Req:
+        client = type("C", (), {"host": "1.2.3.4"})()
+        headers: dict[str, str] = {}
+        scope: dict[str, Any] = {"type": "http"}
+
+    req: Any = _Req()
+    _rate_limit.enforce_rate_limit(req)
+    _rate_limit.enforce_write_rate_limit(req)
+    keys = set(_rate_limit._buckets)
+    assert keys == {"1.2.3.4", "write|1.2.3.4"}
+    with pytest.raises(_rate_limit.HTTPException) as exc:
+        _rate_limit.enforce_write_rate_limit(req)
+    assert exc.value.status_code == 429

@@ -24,10 +24,15 @@ judgment), and **lacks a complete durable history of its own**. In practice:
 | `subjects confirm` | `SUBJECT_LINK_CONFIRMED` |
 | `subjects unlink` | `SUBJECT_LINK_REMOVED` |
 | `subjects set-class` | `SUBJECT_RECLASSIFIED` |
+| `subjects accept`, and an operator's alias, merge into or class change of a provisional Subject | `SUBJECT_ACCEPTED` (`via: OPERATOR`, naming the act) |
+| `subjects provisional-backfill` | `SUBJECT_PROVISIONAL_BACKFILLED` (one per run, with the counts) |
+| *(system-emitted)* a second agent principal uses a Subject another agent principal minted | `SUBJECT_SHARED` |
+| *(system-emitted)* an independent resolution reaches a provisional Subject's external reference | `SUBJECT_ACCEPTED` (`via: EXTERNAL_REF`) |
 | `subjects relink-gated --apply`, the curation `relink` and `assign-subject` gestures | `SUBJECTS_RELINKED` (one per batch run, `batch: true`, or one per assigned belief) |
 | `trust set`, `trust statement-set`, `trust lens adopt` / `unadopt` | `TRUST_CHANGED` |
 | `review` (§9.6 resolution) | `REVIEW_RESOLVED` |
 | `links add` | `RELATION_ADDED` |
+| `links suggest --apply` | `RELATION_ADDED`, one per link the duplicate judge's `PARAPHRASE` verdict wrote, with `created_by: LLM_JUDGE`, the judge's `decided_by` and the run's `run_id` |
 | `links remove` | `RELATION_REMOVED` |
 | `particle tag` | `PARTICLE_TAGGED` |
 | `particle untag` | `PARTICLE_UNTAGGED` |
@@ -35,7 +40,10 @@ judgment), and **lacks a complete durable history of its own**. In practice:
 | `corpus delete` | `CORPUS_ENTRY_DELETED` (entry id and counts only, never the deleted content) |
 | `particle retract` | `PARTICLE_RETRACTED` (actor `cli:particle-retract`) |
 | `memory useful` | `BELIEF_MARKED_USEFUL` (actor `cli:memory-useful` / `http:/memory/useful`; a press with an agent key carries `operator_credit: false`, names its `http_principal` and credits nothing) |
+| `particle restore` | `RETIREMENT_RESTORED` |
 | *(system-emitted)* §6.6 trust resolution drops a candidate | `CONFLICT_CANDIDATE_DROPPED` |
+| *(system-emitted)* the conflict ladder retires a claim: a newer value from the same source, a more trusted source, or a replacing document | `UPDATE_SUPERSESSION`, `TRUST_SUPERSESSION`, `DOCUMENT_SUPERSESSION` |
+| *(system-emitted)* a conflict record closes without review | `INCONSISTENCY_CLOSED` |
 
 Read-only and pipeline commands (`query`, `lint`, `extract`, `reindex`,
 `export`, `deposit`) do **not** log; they have their own provenance. One

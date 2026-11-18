@@ -148,7 +148,12 @@ async def test_the_dry_run_makes_no_call_and_writes_nothing(
 
     passes = _by_name(plan)
     # The passes in the cycle's own order, each with a position.
-    assert [p.name for p in plan.passes][:3] == ["refresh", "extract", "reconcile"]
+    assert [p.name for p in plan.passes][:4] == ["refresh", "extract", "embed", "reconcile"]
+    # the seed's beliefs carry no vector; the embed pass is local and free.
+    embed = passes["embed"]
+    assert embed.action == "run"
+    assert embed.detail.startswith("would embed 3 of 3 beliefs stored without a vector")
+    assert not embed.llm_priced and embed.calls == 0 and embed.estimate_usd == 0.0
     extract = passes["extract"]
     assert extract.action == "run"
     assert extract.detail.startswith("would extract 2 of 2 pending snapshots")
@@ -215,6 +220,8 @@ async def test_structural_only_plans_no_llm_pass(
     assert passes["extract"].action == "skip"
     assert "2 snapshots pending" in passes["extract"].detail
     assert passes["reconcile"].action == "skip"
+    # Local and model-free, so a structural-only run still fills vectors.
+    assert passes["embed"].action == "run"
     assert passes["census"].calls == 0
     assert plan.total_calls == 0
     assert plan.total_usd == 0.0

@@ -149,6 +149,7 @@ async def _check_all(manifests: list[Path]) -> int:
             drifted.append(result.reason)
         else:
             print(f"projection_drift: {manifest.name} OK — {result.reason}")
+        _print_source_advisories(manifest, base_dir)
 
     if drifted:
         for reason in drifted:
@@ -160,6 +161,17 @@ async def _check_all(manifests: list[Path]) -> int:
         )
         return 1
     return 0
+
+
+def _print_source_advisories(manifest, base_dir: Path) -> None:  # type: ignore[no-untyped-def]
+    """Print the bundle-vs-repo source check. Advisory: never fails the gate."""
+    try:
+        from particles.operations.projection.source_freshness import advisory_lines
+
+        for line in advisory_lines(manifest, base_dir=base_dir, repo_root=REPO_ROOT):
+            print(f"projection_drift: {line}")
+    except Exception as exc:  # noqa: BLE001 — advisory output never fails the gate
+        print(f"projection_drift: advisory source check skipped ({type(exc).__name__})")
 
 
 def main() -> int:

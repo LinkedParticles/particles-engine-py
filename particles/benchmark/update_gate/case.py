@@ -126,17 +126,30 @@ def child_config(
     }
 
 
+def _is_provider_key(name: str) -> bool:
+    """Whether ``name`` holds a named provider's API key (``particles.secrets``)."""
+    return name.startswith("PARTICLES_LLM_API_KEY_") or name == "PARTICLES_LOCAL_LLM_API_KEY"
+
+
 def child_env(run_dir: Path, *, arm: str) -> dict[str, str]:
     """The child's environment: the parent's, scrubbed, with the run's own paths.
 
     Every ``PARTICLES_*`` variable and every config override name is removed,
     so no override of the reader's reaches the child. Secrets pass through:
     ``particles.secrets`` reads only the process environment, so a private
-    ``HOME`` hides no key. ``HF_HOME`` points at the parent's model cache, so
-    the embedding model is not downloaded again.
+    ``HOME`` hides no key. That includes the ``PARTICLES_``-named provider
+    keys (``PARTICLES_LLM_API_KEY_<NAME>``, ``PARTICLES_LOCAL_LLM_API_KEY``),
+    without which a child pinned to a named provider, such as the rot door
+    arm's model-parity row, sends every call unauthenticated. ``HF_HOME``
+    points at the parent's model cache, so the embedding model is not
+    downloaded again.
     """
     drop = env_override_names()
-    env = {k: v for k, v in os.environ.items() if not k.startswith("PARTICLES_") and k not in drop}
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if (_is_provider_key(k) or not k.startswith("PARTICLES_")) and k not in drop
+    }
     home = run_dir / "home"
     (home / ".claude" / "projects").mkdir(parents=True, exist_ok=True)
     env["HF_HOME"] = os.environ.get("HF_HOME") or str(Path.home() / ".cache" / "huggingface")

@@ -31,6 +31,7 @@ from particles.core.schema import CorpusEntry, FetchPolicy, Mutability
 from particles.corpus.fetch import is_refresh_allowed, maybe_refetch, refresh_refusal
 from particles.corpus.local_read import LocalReadRefused, read_local_file, within
 from particles.corpus.store import CorpusEntryRow, get_latest_snapshot
+from tests._corpus_rows import local_entry_row
 
 
 @pytest.fixture(autouse=True)
@@ -135,7 +136,7 @@ async def test_refreshed_memory_file_snapshot_is_redacted(
         deposited_by="claude-code-hook",
         tags=["claude-code", "memory-file", "project:-repo"],
     )
-    db_session.add(CorpusEntryRow.from_model(entry))
+    db_session.add(local_entry_row(entry))
     await db_session.commit()
 
     snap = await maybe_refetch(db_session, entry.entry_id)
@@ -263,7 +264,7 @@ async def test_a_masked_refresh_leaves_the_byte_identity_tier(
         deposited_by="claude-code-hook",
         tags=["claude-code", "memory-file"],
     )
-    db_session.add(CorpusEntryRow.from_model(entry))
+    db_session.add(local_entry_row(entry))
     await db_session.commit()
 
     assert await maybe_refetch(db_session, entry.entry_id) is not None
@@ -290,7 +291,7 @@ async def test_an_operator_lazy_file_is_stored_as_its_bytes(
         deposited_by="operator",
         tags=[],
     )
-    db_session.add(CorpusEntryRow.from_model(entry))
+    db_session.add(local_entry_row(entry))
     await db_session.commit()
 
     snap = await maybe_refetch(db_session, entry.entry_id)

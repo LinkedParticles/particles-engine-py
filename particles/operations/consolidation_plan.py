@@ -16,8 +16,9 @@ It writes nothing, takes no cycle lock and makes no LLM call; the shape copies
 ``particles structure --dry-run``, whose dry run doubles as the coverage probe.
 
 Where a dry gather cannot see what the run would see, the plan says so rather
-than guess: the run computes the delta scope after pass 1, so the plan's scope
-omits the beliefs pass 1 would mint, and pass 1's listing is taken before the
+than guess: the run computes the delta scope after pass 1 and the embed pass,
+so the plan's scope omits the beliefs pass 1 would mint and the beliefs the
+embed pass would give a vector, and pass 1's listing is taken before the
 run's stale-claim reset and superseded-generation collapse.
 
 ``consolidation.budget_usd`` is simulated with the run's own decision
@@ -37,7 +38,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from particles.config import get_config
 from particles.core.consolidation_cadence import decide_census
 from particles.core.schema import SuggestMode
-from particles.core.spend_budget import decide_spend
+from particles.core.spend_budget import admit_round, decide_spend
+from particles.corpus.store import PendingSnapshot
 from particles.llm.usage import format_usd
 from particles.operations.consolidation import (
     PASS_ORDER,
@@ -46,7 +48,9 @@ from particles.operations.consolidation import (
     _event_started_at,
     _extract_selection,
     _plan_utility,
+    _prioritised,
     _reanchor_estimate,
+    _round_heads,
     _semantic_availability,
     _utcnow,
     catchup_listing,
@@ -58,6 +62,11 @@ from particles.operations.consolidation import (
 )
 from particles.operations.contradiction_disclosure import covered_pair_set
 from particles.operations.curation.collect import collect_cards
+from particles.operations.extract_budget import (
+    extraction_route_priced,
+    pass_one_limit,
+    price_candidates,
+)
 from particles.operations.extraction_reads import ReadSummary
 from particles.operations.held_release import run_release
 from particles.operations.lint import ContradictionProbeControl
@@ -70,6 +79,7 @@ from particles.operations.spend_estimate import (
     probe_estimate,
 )
 from particles.operations.utility_mining import estimate_judge_calls
+from particles.store.particle_store import count_active_particles_without_embedding
 
 #: The line a metered run prints afterwards, named so the two can be compared.
 MEASURED_LINE = "LLM usage: … ≈ $X at list price."
@@ -155,6 +165,58 @@ def _skipped(name: str, reason: str) -> PlannedPass:
     return _planned(name, reason, action="skip")
 
 
+async def _plan_budgeted_extract(
+    session: AsyncSession, pending: list[PendingSnapshot], limit: float
+) -> PlannedPass:
+    """Pass 1 under ``consolidation.extract_budget_usd``: its first round exactly.
+
+    Round 1 is sized by worst cases, which need no measurement, so the plan
+    shows it as the run will take it. Later rounds depend on tonight's measured
+    spend; the plan projects them from the last run's recorded factors and says so.
+    """
+    cfg = get_config().consolidation
+    heads = _round_heads(_prioritised(pending), set())
+    window = heads[: max(20, 2 * cfg.max_pending_entries)]
+    candidates = await price_candidates(session, window, {}, batched=cfg.extract_batching)
+    first = admit_round(
+        candidates,
+        remaining_usd=limit,
+        limit_usd=limit,
+        rates={},
+        slots=cfg.max_pending_entries if cfg.extract_batching else 1,
+    )
+    detail = (
+        f"budgeted (consolidation.extract_budget_usd, limit US{format_usd(limit)}): "
+        f"round 1 would read {_plural(len(first.admitted), 'snapshot')}"
+        + (f" of class {first.klass}" if first.klass else "")
+        + f" at a worst case of US{format_usd(first.worst_case_usd)}; "
+        f"{_plural(len(pending), 'pending snapshot')}, "
+        f"ceiling consolidation.max_pending_entries = {cfg.max_pending_entries}"
+    )
+    if first.too_large:
+        detail += f"; {_plural(len(first.too_large), 'snapshot')} too large for the limit"
+    prior = await latest_run_event(session)
+    factors = (prior.payload or {}).get("extract_budget", {}).get("factor") if prior else None
+    estimates = [c.estimate_usd for c in candidates if c.estimate_usd]
+    if isinstance(factors, dict) and factors and estimates:
+        mean = sum(estimates) / len(estimates)
+        k = min(float(v) for v in factors.values())
+        projected = min(cfg.max_pending_entries, int(limit / (k * mean))) if k * mean > 0 else 0
+        detail += (
+            f"; projected night about {projected} snapshots at the last run's factor "
+            f"×{k:.2f} (a projection: later rounds use tonight's measured spend)"
+        )
+    else:
+        detail += "; later rounds use tonight's measured spend, so the night is not projected"
+    return _planned(
+        "extract",
+        detail,
+        PassEstimate(
+            calls=len(first.admitted), usd=limit, basis="consolidation.extract_budget_usd"
+        ),
+    )
+
+
 def _describe_reads(reads: ReadSummary) -> str:
     """What pass 1 would read: the tails, the carried chunks, the capped ones."""
     text = f"would read {reads.read_chars:,} of {reads.whole_chars:,} characters"
@@ -215,6 +277,8 @@ async def plan_consolidation(  # noqa: PLR0915 — one linear walk of the pass l
                 f"{_plural(len(pending), 'snapshot')} pending",
             )
         )
+    elif (limit := pass_one_limit(cfg.budget_usd)) is not None and extraction_route_priced():
+        passes.append(await _plan_budgeted_extract(session, pending, limit))
     else:
         chosen = _extract_selection(pending, batching=cfg.extract_batching)
         estimate, reads = await extraction_plan_estimate(
@@ -233,6 +297,22 @@ async def plan_consolidation(  # noqa: PLR0915 — one linear walk of the pass l
                 f"{priority_note}), {_describe_reads(reads)}; listed before the run's "
                 "stale-claim reset and superseded-generation collapse",
                 estimate,
+            )
+        )
+
+    # pass 1b — embed (zero-LLM, so not gated on semantic_ok)
+    embed_cap = cfg.embed.max_per_run
+    if embed_cap == 0:
+        passes.append(_skipped("embed", "consolidation.embed.max_per_run is 0"))
+    else:
+        missing = await count_active_particles_without_embedding(session)
+        passes.append(
+            _planned(
+                "embed",
+                f"would embed {min(missing, embed_cap)} of "
+                f"{_plural(missing, 'belief')} stored without a vector "
+                f"(consolidation.embed.max_per_run = {embed_cap}); no LLM call; "
+                "skipped by the run if no embedding encoder loads",
             )
         )
 

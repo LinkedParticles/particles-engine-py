@@ -17,7 +17,7 @@ review list) so the seam is tested without mocking the model.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from pathlib import Path
 from typing import Any
 
@@ -228,7 +228,11 @@ class TestHttpBackendRequiresBaseUrl:
             asyncio.run(HttpBackend().quality())
 
 
-def _wire_unreachable_engine(monkeypatch: pytest.MonkeyPatch, base_url: str) -> None:
+def _wire_unreachable_engine(
+    monkeypatch: pytest.MonkeyPatch,
+    base_url: str,
+    error: Callable[[httpx.Request], httpx.TransportError] | None = None,
+) -> None:
     """Point the HttpBackend at ``base_url`` and make every request connection-refused.
 
     Mirrors the operator who configured a remote engine but whose SSH tunnel is
@@ -245,6 +249,8 @@ def _wire_unreachable_engine(monkeypatch: pytest.MonkeyPatch, base_url: str) -> 
     real_async_client = httpx.AsyncClient
 
     def _refuse(request: httpx.Request) -> httpx.Response:
+        if error is not None:
+            raise error(request)
         raise httpx.ConnectError("All connection attempts failed", request=request)
 
     def _refusing_client(
@@ -281,6 +287,37 @@ class TestHttpBackendUnreachable:
         assert "engine.base_url" in msg  # points at the fix
         # Subclasses EngineHttpError so run()/links catch both cases uniformly.
         assert isinstance(excinfo.value, EngineHttpError)
+
+    @pytest.mark.parametrize(
+        ("error", "cause"),
+        [
+            (lambda request: httpx.ReadError("", request=request), "ReadError."),
+            (
+                lambda request: httpx.RemoteProtocolError(
+                    "Server disconnected without sending a response.", request=request
+                ),
+                "Server disconnected without sending a response.",
+            ),
+        ],
+    )
+    def test_a_dropped_tunnel_names_its_cause_once(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        error: Callable[[httpx.Request], httpx.TransportError],
+        cause: str,
+    ) -> None:
+        # The r119-m10 mini rehearsal: a tunnel killed mid-request logged
+        # "…:28766: ." (no cause) and "…response.. Check" (two periods).
+        from particles.api.client.http import EngineUnreachableError
+
+        _wire_unreachable_engine(monkeypatch, "http://127.0.0.1:28766", error)
+
+        with pytest.raises(EngineUnreachableError) as excinfo:
+            asyncio.run(HttpBackend().quality())
+
+        msg = str(excinfo.value)
+        assert f"http://127.0.0.1:28766: {cause} Check" in msg
+        assert ".." not in msg
 
     def test_deposit_url_translated_too(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # The exact verb the operator hit (deposit goes through _post too).

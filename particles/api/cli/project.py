@@ -191,6 +191,14 @@ async def _project(
         typer.echo(f"Invalid manifest {mpath}: {exc}", err=True)
         raise typer.Exit(2) from exc
 
+    if splice is not None and not check and not export_corpus and _is_agent_memory_manifest(mpath):
+        # The agent-memory manifest has one writer, the render-splice cycle,
+        # which keeps the per-project region snapshot the next hook
+        # run compares against. The generic splice wrote the full-document form
+        # beside the manifest instead, so that run saw a dirty region.
+        await _splice_agent_memory(manifest, mpath, output, splice, allow_outside_paths)
+        return
+
     async with session_scope() as session:
         try:
             await _project_in_session(
@@ -211,6 +219,91 @@ async def _project(
             # refused before anything is written.
             typer.echo(f"Refused: {exc}", err=True)
             raise typer.Exit(2) from exc
+
+
+def _is_agent_memory_manifest(mpath: Path) -> bool:
+    """Whether ``mpath`` is the agent-memory projection manifest."""
+    from particles.api.cli._claude_code import memory_manifest_path
+
+    try:
+        return mpath.resolve() == memory_manifest_path().resolve()
+    except OSError:
+        return False
+
+
+async def _splice_agent_memory(
+    manifest: DocManifest,
+    mpath: Path,
+    output: str | None,
+    region: str,
+    allow_outside_paths: bool,
+) -> None:
+    """``--splice`` on the agent-memory manifest, through the render-splice cycle.
+
+    The cycle renders the ``memory-index`` region with the client's observer
+    and source filter, refuses a store the installed hooks do not name, folds
+    and backs up as the SessionEnd hook does, and writes the region snapshot
+    that hook compares against. It refuses a region holding edits no harvest
+    has deposited, since this verb harvests nothing and the edits would be
+    lost: the next SessionEnd run deposits them first.
+    """
+    from particles.api.cli._claude_code import (
+        MEMORY_REGION,
+        is_claude_code_memory_dir,
+        memory_backup_path,
+        memory_snapshot_path,
+    )
+    from particles.api.cli._memory_projection import run_projection_cycle
+    from particles.db import DEFAULT_STORE
+    from particles.operations.projection.paths import read_text_no_follow
+
+    if region != MEMORY_REGION:
+        typer.echo(
+            f"The agent-memory manifest projects only the {MEMORY_REGION!r} region; "
+            f"got --splice {region!r}.",
+            err=True,
+        )
+        raise typer.Exit(2)
+    out_path = _output_path(output, manifest, mpath.parent, allow_outside_paths=allow_outside_paths)
+    memory_dir = out_path.parent
+    if out_path.name != "MEMORY.md" or not is_claude_code_memory_dir(memory_dir):
+        typer.echo(
+            "The agent-memory manifest projects only into a Claude Code memory "
+            f"directory's MEMORY.md (~/.claude/projects/<key>/memory/MEMORY.md); got {out_path}.",
+            err=True,
+        )
+        raise typer.Exit(2)
+    try:
+        current = read_text_no_follow(out_path) if out_path.exists() else None
+    except OSError as exc:
+        typer.echo(f"Refused: {exc}", err=True)
+        raise typer.Exit(2) from exc
+    outcome = await run_projection_cycle(
+        DEFAULT_STORE, memory_dir, current, refuse_unharvested=True
+    )
+    if outcome.get("outcome") in ("rendered", "created"):
+        typer.echo(f"Spliced {manifest.name} → {out_path} (region {region!r})")
+        typer.echo(f"  snapshot: {memory_snapshot_path(memory_dir)}")
+        if outcome["outcome"] == "rendered":
+            typer.echo(f"  backup: {memory_backup_path(memory_dir)}")
+            folded = int(outcome.get("folded") or 0)
+            if folded:
+                typer.echo(f"  folded: {folded} line(s) into the archive")
+        typer.echo("  synthesis: deterministic (no LLM)")
+        return
+    if outcome.get("skipped") == "unharvested-region-edits":
+        typer.echo(
+            f"Refused: the {MEMORY_REGION!r} region of {out_path} differs from its "
+            "last render, so it holds edits no harvest has deposited yet. The next "
+            "SessionEnd hook deposits them and re-renders the region; nothing was written.",
+            err=True,
+        )
+        raise typer.Exit(1)
+    reason = outcome.get("reason") or outcome.get("error") or outcome.get("skipped")
+    typer.echo(
+        f"Not spliced: {outcome.get('skipped') or outcome.get('outcome')}: {reason}", err=True
+    )
+    raise typer.Exit(1)
 
 
 def _output_path(
@@ -257,6 +350,7 @@ async def _project_in_session(
     allow_outside_paths: bool,
 ) -> None:
     from particles.operations.projection import (
+        SelectPinError,
         SpliceError,
         check_drift,
         project_document,
@@ -289,6 +383,13 @@ async def _project_in_session(
             allow_outside_paths=allow,
         )
         typer.echo(result.reason)
+        # advisory only, printed whatever the gate decided.
+        root = containment_root(base_dir)
+        if root is not None and (root / ".git").exists():
+            from particles.operations.projection.source_freshness import advisory_lines
+
+            for line in advisory_lines(manifest, base_dir=base_dir, repo_root=root):
+                typer.echo(line)
         if result.drifted:
             raise typer.Exit(1)
         return
@@ -296,7 +397,18 @@ async def _project_in_session(
     if export_corpus:
         # refresh the drift gate's committed sibling bundle —
         # exactly the deterministic selection, no render.
-        bundle_path = await _write_corpus_bundle(session, manifest, base_dir=base_dir)
+        try:
+            bundle_path = await _write_corpus_bundle(session, manifest, base_dir=base_dir)
+        except SelectPinError as exc:
+            # A pin this store lacks: it is not the store the bundle's corpus
+            # was built in (the operator's own, the engine's). The selection
+            # fails before anything is written.
+            typer.echo(
+                f"Refused: {exc} Export the bundle from the store its corpus was built "
+                "in; nothing was written.",
+                err=True,
+            )
+            raise typer.Exit(2) from None
         typer.echo(f"Exported corpus bundle: {bundle_path}")
         return
 
@@ -438,6 +550,11 @@ async def _write_corpus_bundle(
     from particles.interchange.store import export_particles
     from particles.operations.projection import required_particle_ids
     from particles.operations.projection.paths import write_root, write_text_no_follow
+    from particles.operations.projection.source_freshness import (
+        bundle_source_records,
+        encode_source_records,
+        sources_path_for,
+    )
     from particles.store.particle_store import get_active_particle_by_id_or_prefix
 
     ids = sorted(await required_particle_ids(session, manifest))
@@ -449,7 +566,27 @@ async def _write_corpus_bundle(
     units = await export_particles(session, particles)
     path = base_dir / f"{manifest.name}.corpus.jsonl"
     write_text_no_follow(path, write_jsonl(units), root=write_root(base_dir))
+    # which repository file each bundled claim came from, and its
+    # digest then, so the advisory source check can say when one has changed.
+    records = await bundle_source_records(session, particles, repo_roots=_repo_roots(base_dir))
+    write_text_no_follow(
+        sources_path_for(manifest, base_dir=base_dir),
+        encode_source_records(records),
+        root=write_root(base_dir),
+    )
     return path
+
+
+def _repo_roots(base_dir: Path) -> list[Path]:
+    """The checkout holding ``base_dir``, then its main checkout when it is a worktree."""
+    from particles.corpus.worktree import verified_main_checkout
+    from particles.operations.projection.paths import containment_root
+
+    root = containment_root(base_dir)
+    if root is None:
+        return []
+    main = verified_main_checkout(root)
+    return [root] if main is None else [root, main]
 
 
 # Module-level logger kept for parity with sibling verbs; projection progress

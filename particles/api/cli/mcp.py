@@ -41,6 +41,8 @@ def mcp_serve_cmd(
             "to it. Omit for the store-wide server."
         ),
     ),
+    codex_destination: str | None = typer.Option(None, "--codex-destination", hidden=True),
+    codex_store: str = typer.Option("default", "--codex-store", hidden=True),
 ) -> None:
     """Run the Particles MCP server over stdio.
 
@@ -58,6 +60,7 @@ def mcp_serve_cmd(
     from particles.mcp import bind_project
     from particles.mcp import main as serve_main
 
+    _check_codex_mcp_pin(codex_store, codex_destination)
     if project_observer is not None:
         if project_observer != "cwd":
             typer.echo("Error: --project-observer accepts only `cwd`.", err=True)
@@ -77,12 +80,109 @@ def mcp_serve_cmd(
             bind_project(key)
     # Named stores are reached per tool call, so every configured one is held to
     # the store rule here, before serving (security review P15).
-    prepare_stdio_server_store(DEFAULT_STORE, every_store=True)
+    if codex_destination is None:
+        prepare_stdio_server_store(DEFAULT_STORE, every_store=True)
+    _refuse_an_unusable_token_file()
     try:
         serve_main()
     except UncoveredEventLoop as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from exc
+
+
+def _check_codex_mcp_pin(store: str, destination: str | None) -> None:
+    import os
+    from pathlib import Path
+
+    from particles.config import config_file_path, environment_engine_url, get_config
+
+    cfg = get_config()
+    if destination is None:
+        # An existing local Codex registration pins the state directory.
+        # Identify it by its own manifest, without claiming other MCP sessions.
+        if (
+            cfg.engine.base_url
+            and not environment_engine_url()
+            and os.environ.get("PARTICLES_CODEX_STATE_DIR")
+        ):
+            from particles.api.cli._hook_state import read_json
+
+            state = Path(cfg.codex.state_dir).expanduser().resolve()
+            for owned in (state / "installations").glob("*.json"):
+                try:
+                    manifest = read_json(owned, {})
+                except (ValueError, OSError):
+                    continue
+                if (
+                    manifest.get("config") == str(config_file_path())
+                    and not manifest.get("engine")
+                    and manifest.get("mcp")
+                ):
+                    typer.echo(
+                        "Codex MCP needs an engine install. Re-run particles init codex.", err=True
+                    )
+                    raise typer.Exit(1)
+        return
+
+    import asyncio
+
+    from particles.api._keys import Role, role_from_prefix
+    from particles.api.cli._codex_remote import (
+        CodexKeyRefused,
+        installed_destination,
+        prove_installed_key,
+        token_path,
+    )
+    from particles.api.client.http import HttpBackend
+    from particles.egress import run_armed
+    from particles.secrets import engine_token_file_path, get_engine_token_optional
+
+    try:
+        url, _, manifest = installed_destination(store, destination)
+        state = Path(cfg.codex.state_dir).expanduser().resolve()
+        path = str(token_path(state, "mcp"))
+        if manifest.get("tokens", {}).get("mcp") != path or engine_token_file_path() != path:
+            raise CodexKeyRefused("Codex MCP credential pin changed. Re-run particles init codex.")
+        # Use the same cached value that the serving process will send.
+        key = get_engine_token_optional()
+        if key is None or role_from_prefix(key) is not Role.AGENT:
+            raise CodexKeyRefused("Codex MCP needs its enrolled agent key.")
+        backend = HttpBackend(token=key, base_url=url)
+        run_armed(
+            asyncio.wait_for(
+                prove_installed_key(backend, "mcp", manifest), cfg.codex.hook_deadline_seconds
+            )
+        )
+    except (ValueError, OSError, RuntimeError) as exc:
+        message = (
+            str(exc)
+            if isinstance(exc, CodexKeyRefused)
+            else (
+                "Codex MCP could not verify its engine and key pins. "
+                "Run hook doctor --harness codex."
+            )
+        )
+        typer.echo(message, err=True)
+        raise typer.Exit(1) from None
+
+
+def _refuse_an_unusable_token_file() -> None:
+    """Refuse to serve when the engine key's token file fails a check.
+
+    Every tool reaches a remote engine through the backend seam, so a
+    server with no usable key has nothing to serve. Claude Code shows the exit
+    as a failed server and keeps the message in its MCP log.
+    """
+    from particles.config import get_config
+    from particles.secrets import EngineTokenFileError, get_engine_token_optional
+
+    if not get_config().engine.base_url:
+        return
+    try:
+        get_engine_token_optional()
+    except EngineTokenFileError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(1) from None
 
 
 @mcp_app.command("tools")

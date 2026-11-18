@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
-from hypothesis import given
+from hypothesis import example, given
 from hypothesis import strategies as st
 
 from particles.core.claims import (
@@ -70,6 +70,11 @@ class TestNormalizeTerm:
         value = normalize_term(term)
         assert isinstance(value, datetime)
         assert value.utcoffset() is not None
+
+    def test_datetime_offset_keeps_the_instant(self) -> None:
+        """A non-UTC offset is kept, so the value is the same instant in UTC."""
+        term = _literal("2026-01-02T01:00:00+02:00", "xsd:dateTime")
+        assert normalize_term(term) == datetime(2026, 1, 1, 23, 0, tzinfo=UTC)
 
     def test_untyped_literal_is_lexical(self) -> None:
         assert normalize_term(_literal("3 grams")) == "3 grams"
@@ -148,6 +153,23 @@ class TestMatchClaim:
         claim = _claim(obj=_literal("copper"))
         assert match_claim(claim, filters) is ClaimMatch.MATCHED
 
+    def test_object_eq_untyped_number_matches_lexically(self) -> None:
+        """An untyped "42" stays a string, so a numeric bound falls back to the lexical form."""
+        claim = _claim(obj=_literal("42"))
+        assert match_claim(claim, ClaimFilters(object_eq="42")) is ClaimMatch.MATCHED
+
+    def test_object_eq_untyped_date_matches_lexically(self) -> None:
+        claim = _claim(obj=_literal("1948-06-20"))
+        assert match_claim(claim, ClaimFilters(object_eq="1948-06-20")) is ClaimMatch.MATCHED
+
+    def test_object_eq_dates_compare_as_instants(self) -> None:
+        """Two lexical forms of one date are equal once both normalize."""
+        claim = _claim(obj=_literal("1948-06-20", "xsd:date"))
+        filters = ClaimFilters(object_eq="1948-06-20T00:00:00+00:00")
+        assert match_claim(claim, filters) is ClaimMatch.MATCHED
+        other = ClaimFilters(object_eq="1948-06-21")
+        assert match_claim(claim, other) is ClaimMatch.UNMATCHED
+
     def test_object_contains(self) -> None:
         filters = ClaimFilters(object_contains="gram")
         claim = _claim(obj=_literal("3 Grams"))
@@ -195,6 +217,7 @@ class TestMatchClaim:
         assert ClaimFilters(predicate="x")
 
     @given(st.decimals(allow_nan=False, allow_infinity=False, places=4))
+    @example(Decimal("3.9"))
     def test_gt_lt_partition(self, bound: Decimal) -> None:
         # Against a fixed numeric object, exactly one of gt / lt / eq holds.
         claim = _claim(obj=_literal("3.9", "xsd:decimal"))
@@ -223,6 +246,18 @@ class TestPredicateVocabulary:
             ("nmo:hasWeight", "URI", 2),
             ("was struck at", "TOKEN", 1),
         ]
+
+    def test_a_count_tie_orders_by_value(self) -> None:
+        claims = [_claim(predicate="b:weight"), _claim(predicate="a:weight")]
+        assert [v for v, _kind, _n in predicate_vocabulary(claims)] == ["a:weight", "b:weight"]
+
+    def test_count_descending_before_value(self) -> None:
+        claims = [
+            _claim(predicate="a:weight"),
+            _claim(predicate="z:mass"),
+            _claim(predicate="z:mass"),
+        ]
+        assert predicate_vocabulary(claims) == [("z:mass", "URI", 2), ("a:weight", "URI", 1)]
 
     def test_distinct_as_stored(self) -> None:
         # Case variants are distinct terms in the listing — the vocabulary is

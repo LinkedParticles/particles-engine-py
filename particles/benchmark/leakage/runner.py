@@ -39,12 +39,25 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-# Shared with the sibling harnesses on purpose: one retry/classification rule
-# for a scored call, and one price table.
+from particles.benchmark.ceiling import (
+    INTERRUPTED_DETAIL,
+    UNSTARTED_DETAIL,
+    CeilingReached,
+    InFlight,
+    QuestionGuard,
+    Role,
+    SpendCeiling,
+    StoppedAtCeiling,
+    stopped_note,
+)
 from particles.benchmark.memory.runner import _scored_call
 from particles.benchmark.relevance_floor.harvest import heldout_fingerprint
 from particles.benchmark.relevance_floor.schema import HeldOutQuestion
 from particles.benchmark.rot.runner import _chars_per_token, _price
+
+# Shared with the sibling harnesses on purpose: one retry/classification rule
+# for a scored call, and one price table.
+from particles.benchmark.spend import RunSpend
 from particles.config import get_config
 from particles.core.schema import (
     AnswerFailureCause,
@@ -57,6 +70,7 @@ from particles.core.schema import (
 from particles.db import DEFAULT_STORE, StoreHandle, session_scope
 from particles.embeddings import get_embedding_model_id
 from particles.llm import get_provider
+from particles.llm.usage import track_usage
 from particles.operations.entailment import (
     EntailmentRubric,
     EntailmentVerdict,
@@ -71,6 +85,7 @@ from .metrics import aggregate, split_sentences
 from .schema import (
     EXCLUSION_ANSWER,
     EXCLUSION_BUDGET,
+    EXCLUSION_CEILING,
     EXCLUSION_EMPTY,
     EXCLUSION_INFRA,
     EXCLUSION_UNPARSEABLE,
@@ -323,12 +338,54 @@ class LeakageEstimate(BaseModel):
         return self.answer_calls + self.judge_calls
 
 
-def estimate_run(questions: Sequence[HeldOutQuestion], *, top_k: int) -> LeakageEstimate:
-    """Project a run from the configured assumptions, before anything is retrieved."""
+@dataclass(frozen=True)
+class SentenceMeasure:
+    """Sentences per answer, measured on a saved run."""
+
+    per_answer: float
+    answers: int
+    source: str
+    top_k: int
+
+
+def measured_sentences_per_answer(report: LeakageReport, *, source: str) -> SentenceMeasure | None:
+    """Mean sentences an answer over a saved report's judged answers.
+
+    A judged answer is one neither refused nor excluded; every one of its
+    sentences was a judge call, so this is the figure the judge-call projection
+    needs. ``None`` when the report judged no answer.
+    """
+    judged = [r for r in report.results if not r.refused and not r.excluded]
+    if not judged:
+        return None
+    total = sum(len(r.sentences) for r in judged)
+    return SentenceMeasure(
+        per_answer=total / len(judged),
+        answers=len(judged),
+        source=source,
+        top_k=report.selection.top_k,
+    )
+
+
+def estimate_run(
+    questions: Sequence[HeldOutQuestion],
+    *,
+    top_k: int,
+    sentences: SentenceMeasure | None = None,
+) -> LeakageEstimate:
+    """Project a run before anything is retrieved.
+
+    Judge calls are one per answer sentence. ``sentences`` is a measurement from
+    a saved run (``--calibrate-from``); without one the projection uses
+    ``benchmark_leakage.estimate_sentences_per_answer`` and says it is assumed.
+    """
     cfg = get_config().benchmark_leakage
     composer, judge = resolved_models()
     n = len(questions)
-    sentences = round(n * cfg.estimate_sentences_per_answer)
+    per_answer = (
+        sentences.per_answer if sentences is not None else cfg.estimate_sentences_per_answer
+    )
+    judge_calls = round(n * per_answer)
     context_tokens = top_k * cfg.estimate_particle_tokens
     question_tokens = sum(
         int(len(q.question) / _chars_per_token("query_response")) for q in questions
@@ -336,7 +393,7 @@ def estimate_run(questions: Sequence[HeldOutQuestion], *, top_k: int) -> Leakage
     est = LeakageEstimate(
         questions=n,
         answer_calls=n,
-        judge_calls=sentences,
+        judge_calls=judge_calls,
         composer_model=composer,
         judge_model=judge,
     )
@@ -348,13 +405,33 @@ def estimate_run(questions: Sequence[HeldOutQuestion], *, top_k: int) -> Leakage
     # text, and the sentence: the premises dominate.
     judge_context = int(context_tokens * _chars_per_token("query_response"))
     judge_context = int(judge_context / _chars_per_token("benchmark"))
-    est.judge_input_tokens = sentences * (judge_context + cfg.estimate_judge_prompt_overhead_tokens)
-    est.judge_output_tokens = sentences * cfg.estimate_judge_output_tokens
+    est.judge_input_tokens = judge_calls * (
+        judge_context + cfg.estimate_judge_prompt_overhead_tokens
+    )
+    est.judge_output_tokens = judge_calls * cfg.estimate_judge_output_tokens
+    if sentences is None:
+        sentence_note = (
+            f"~{cfg.estimate_sentences_per_answer:g} sentences an answer, assumed "
+            "(benchmark_leakage.estimate_sentences_per_answer); --calibrate-from a "
+            "saved report measures it"
+        )
+    else:
+        sentence_note = (
+            f"{sentences.per_answer:.1f} sentences an answer, measured over "
+            f"{sentences.answers} judged answers in {sentences.source}"
+        )
+        if sentences.top_k != top_k:
+            sentence_note += (
+                f" at top-k {sentences.top_k} (this run reads {top_k}; a richer "
+                "context writes longer answers)"
+            )
     est.assumptions = [
         f"top-k of {top_k} at ~{cfg.estimate_particle_tokens} tokens a particle (not "
         f"measured: nothing is retrieved before the projection)",
-        f"~{cfg.estimate_sentences_per_answer:g} sentences an answer, answer output "
-        f"{cfg.estimate_answer_output_tokens} tokens, judge output "
+        sentence_note,
+        f"input at {_chars_per_token('query_response'):g} characters a token for the "
+        f"composer, {_chars_per_token('benchmark'):g} for the judge",
+        f"answer output {cfg.estimate_answer_output_tokens} tokens, judge output "
         f"{cfg.estimate_judge_output_tokens} tokens a call",
         "judge calls are an upper bound: a refused or empty answer is never judged",
         "transient-failure retries are not projected",
@@ -369,6 +446,46 @@ def estimate_run(questions: Sequence[HeldOutQuestion], *, top_k: int) -> Leakage
             + est.judge_output_tokens * judge_price[2]
         ) / 1_000_000
     return est
+
+
+def _answer_output_bound() -> int:
+    """The output one answer can bill: the op's budget, and its retry on an empty reply."""
+    q = get_config().query
+    retry = q.answer_retry_max_tokens if q.answer_retry_max_tokens > q.answer_max_tokens else 0
+    return q.answer_max_tokens + retry
+
+
+def stop_calls(
+    est: LeakageEstimate, roles: Sequence[Role]
+) -> tuple[list[InFlight], list[InFlight]]:
+    """``(in flight at the stop, every projected call)`` for the stop's terms.
+
+    At the stop at most ``concurrency`` answers and ``judge_concurrency`` judge
+    calls are in flight. An answer's output bound includes the larger budget
+    the query op retries at when a reply comes back empty, since the stop
+    cannot reach inside the op.
+    """
+    cfg = get_config().benchmark_leakage
+    by_name = {r.name: r for r in roles}
+    answer_in = est.answer_input_tokens // max(est.answer_calls, 1)
+    judge_in = est.judge_input_tokens // max(est.judge_calls, 1)
+    answer_out = _answer_output_bound()
+    in_flight = [
+        InFlight(by_name["answer"], min(cfg.concurrency, est.answer_calls), answer_in, answer_out),
+        InFlight(
+            by_name["judge"],
+            min(cfg.judge_concurrency, est.judge_calls),
+            judge_in,
+            cfg.judge_max_tokens,
+        ),
+    ]
+    projected = [
+        InFlight(
+            by_name["answer"], est.answer_calls, answer_in, get_config().query.answer_max_tokens
+        ),
+        InFlight(by_name["judge"], est.judge_calls, judge_in, cfg.judge_max_tokens),
+    ]
+    return in_flight, projected
 
 
 def render_estimate(est: LeakageEstimate) -> str:
@@ -453,12 +570,22 @@ def _record_text() -> bool:
 
 
 async def _answer(
-    held: HeldOutQuestion, *, store: StoreHandle, top_k: int, grounded: bool = False
+    held: HeldOutQuestion,
+    *,
+    store: StoreHandle,
+    top_k: int,
+    grounded: bool = False,
+    before_call: Callable[[], None] | None = None,
 ) -> QueryResponse:
-    """The real query op, retried on an answer failure like the sibling harnesses."""
+    """The real query op, retried on an answer failure like the sibling harnesses.
+
+    ``before_call`` runs before the op and before each retry (the spend stop).
+    """
     cfg = get_config().benchmark_leakage
     attempt = 0
     while True:
+        if before_call is not None:
+            before_call()
         async with session_scope(store) as session:
             response = await query(
                 session,
@@ -467,6 +594,9 @@ async def _answer(
                     top_k=top_k,
                     audience=AudienceHint.GENERAL,
                     grounded=grounded,
+                    # a refused row still records the context it
+                    # refused over, as on every earlier run.
+                    include_refused_candidates=True,
                 ),
             )
         if response.answer_generation_error is None or attempt >= cfg.call_retries:
@@ -543,6 +673,7 @@ async def _judge_sentence(
     unit: _Unit,
     *,
     protocol: int,
+    before_call: Callable[[], None] | None = None,
 ) -> SentenceResult:
     cfg = get_config().benchmark_leakage
     record = _record_text()
@@ -569,6 +700,7 @@ async def _judge_sentence(
         retries=cfg.call_retries,
         backoff_seconds=cfg.call_retry_backoff_seconds,
         system=system,
+        before_attempt=before_call,
     )
     if call.text is None:
         result.excluded = call.excluded
@@ -593,11 +725,17 @@ async def measure_question(
     protocol: int,
     judge_gate: asyncio.Semaphore | None = None,
     grounded: bool = False,
+    before_call: Callable[[], None] | None = None,
 ) -> QueryLeakage:
     """One question: answer it through the op, then judge each sentence.
 
     ``grounded`` asks the op for a grounded answer and judges each sentence as
     :func:`grounded_units` describes.
+
+    ``before_call`` runs before every call (the spend stop). When
+    it raises :class:`CeilingReached` for a judge call, the sentences already
+    in flight finish first, and the stop is raised again carrying the answer's
+    sentence count.
 
     The sentences are judged concurrently under ``judge_gate``, which a run
     shares across every question so the in-flight judge calls stay bounded
@@ -605,7 +743,9 @@ async def measure_question(
     answer's sentence order.
     """
     record = _record_text()
-    response = await _answer(held, store=store, top_k=top_k, grounded=grounded)
+    response = await _answer(
+        held, store=store, top_k=top_k, grounded=grounded, before_call=before_call
+    )
     result = QueryLeakage(
         question_id=held.question_id,
         source=held.source,
@@ -643,10 +783,25 @@ async def measure_question(
     async def _bounded(index: int) -> SentenceResult:
         async with gate:
             return await _judge_sentence(
-                held.question, sentences, index, units[index], protocol=protocol
+                held.question,
+                sentences,
+                index,
+                units[index],
+                protocol=protocol,
+                before_call=before_call,
             )
 
-    result.sentences = list(await asyncio.gather(*(_bounded(i) for i in range(len(sentences)))))
+    # Gathered with their exceptions so a stop on one sentence lets the
+    # sentences already in flight finish before the question gives up.
+    outcomes = await asyncio.gather(
+        *(_bounded(i) for i in range(len(sentences))), return_exceptions=True
+    )
+    for outcome in outcomes:
+        if isinstance(outcome, BaseException) and not isinstance(outcome, CeilingReached):
+            raise outcome
+    if any(isinstance(outcome, CeilingReached) for outcome in outcomes):
+        raise CeilingReached(sentences=len(sentences))
+    result.sentences = [o for o in outcomes if isinstance(o, SentenceResult)]
     return result
 
 
@@ -657,8 +812,21 @@ async def run_leakage(
     selection: RunSelection,
     checkpoint_path: Path | None = None,
     progress: Callable[[str], None] | None = None,
+    restored_out: list[str] | None = None,
+    ceiling: SpendCeiling | None = None,
 ) -> list[QueryLeakage]:
-    """Measure every question; restores any checkpointed outcome first."""
+    """Measure every question; restores any checkpointed outcome first.
+
+    ``restored_out``, when given, is extended with the ids of the questions
+    restored from the checkpoint: they make no call, and the spend comparison
+    says so.
+
+    ``ceiling`` is the run's spend stop, checked before every
+    call. Once it is reached no call starts; a question with a call left
+    unstarted is excluded as ``budget_ceiling`` and never checkpointed, and
+    ``ceiling.report`` describes the stop when the run returns. Questions start
+    in the held-out order with or without a stop.
+    """
     check_distinct_judge()
     protocol = selection.judge_protocol
     rubric(protocol)  # refuse an unknown protocol before any call
@@ -666,6 +834,8 @@ async def run_leakage(
     done = _load_checkpoint(checkpoint_path, key) if checkpoint_path is not None else {}
     if done and progress is not None:
         progress(f"restored {len(done)} checkpointed outcome(s)")
+    if restored_out is not None:
+        restored_out.extend(q.question_id for q in questions if q.question_id in done)
     gate = asyncio.Semaphore(get_config().benchmark_leakage.concurrency)
     judge_gate = asyncio.Semaphore(get_config().benchmark_leakage.judge_concurrency)
     finished = 0
@@ -675,14 +845,32 @@ async def run_leakage(
         if held.question_id in done:
             return done[held.question_id]
         async with gate:
+            guard = QuestionGuard(ceiling)
             try:
-                result = await measure_question(
-                    held,
-                    store=store,
-                    top_k=selection.top_k,
-                    protocol=protocol,
-                    judge_gate=judge_gate,
-                    grounded=selection.grounded,
+                # Per question, so an interrupted one's discarded spend is known.
+                with track_usage() as question_usage:
+                    result = await measure_question(
+                        held,
+                        store=store,
+                        top_k=selection.top_k,
+                        protocol=protocol,
+                        judge_gate=judge_gate,
+                        grounded=selection.grounded,
+                        before_call=guard.before_call,
+                    )
+            except CeilingReached as stop:
+                assert ceiling is not None  # only a stop raises it
+                ceiling.record_stopped_question(
+                    held.source.value,
+                    started=guard.started,
+                    usage=question_usage.snapshot(),
+                    sentences=stop.sentences,
+                )
+                result = QueryLeakage(
+                    question_id=held.question_id,
+                    source=held.source,
+                    excluded=EXCLUSION_CEILING,
+                    excluded_detail=INTERRUPTED_DETAIL if guard.started else UNSTARTED_DETAIL,
                 )
             except Exception as exc:  # noqa: BLE001 — one bad question must not abort the run
                 # A store or transport failure outside the scored calls (a
@@ -703,7 +891,16 @@ async def run_leakage(
             progress(f"measured {finished}/{len(questions) - len(done)}")
         return result
 
-    return list(await asyncio.gather(*(_one(held) for held in questions)))
+    results = list(await asyncio.gather(*(_one(held) for held in questions)))
+    if ceiling is not None:
+        complete_rows = [r for r in results if r.excluded != EXCLUSION_CEILING]
+        ceiling.settle(
+            finished_sources=[r.source.value for r in complete_rows],
+            finished_sentences=[
+                len(r.sentences) for r in complete_rows if not r.excluded and not r.refused
+            ],
+        )
+    return results
 
 
 # ---------------------------------------------------------------------------
@@ -711,8 +908,19 @@ async def run_leakage(
 # ---------------------------------------------------------------------------
 
 
-def build_report(selection: RunSelection, results: Sequence[QueryLeakage]) -> LeakageReport:
-    """Assemble the report of record from recorded rows — pure, so re-aggregable."""
+def build_report(
+    selection: RunSelection,
+    results: Sequence[QueryLeakage],
+    *,
+    spend: RunSpend | None = None,
+    stopped: StoppedAtCeiling | None = None,
+) -> LeakageReport:
+    """Assemble the report of record from recorded rows — pure, so re-aggregable.
+
+    ``spend`` is the run's projection beside its measured usage.
+    ``stopped`` marks a run that stopped at its spend ceiling: the report says
+    it is incomplete in its first note, its table heading and this field.
+    """
     notes = [
         "The judge reads only the particles the answer was composed from. A sentence "
         "it labels unsupported carries content the store did not supply for this "
@@ -749,7 +957,12 @@ def build_report(selection: RunSelection, results: Sequence[QueryLeakage]) -> Le
             "memory queries, and many depend on conversational context. Read the "
             "per-source rows."
         )
-    report = LeakageReport(selection=selection, results=list(results))
+    if stopped is not None:
+        finished = sum(1 for r in results if r.excluded != EXCLUSION_CEILING)
+        notes.insert(0, stopped_note(stopped, finished=finished))
+    report = LeakageReport(
+        selection=selection, results=list(results), spend=spend, stopped_at_ceiling=stopped
+    )
     report = aggregate(report)
     if report.excluded:
         detail = ", ".join(f"{kind}: {count}" for kind, count in report.excluded.items())

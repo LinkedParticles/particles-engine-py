@@ -67,11 +67,12 @@ from particles.core.consolidation_cadence import CensusDecision, decide_census, 
 from particles.core.contradiction_disclosure import ConfirmedPair, census_sides
 from particles.core.progress import ProgressCallback, ProgressEvent
 from particles.core.schema import SuggestMode
-from particles.core.spend_budget import decide_spend
+from particles.core.spend_budget import ClassRate, RoundCandidate, admit_round, decide_spend
 from particles.core.status import Status
 from particles.db import store_of, write_transaction
 from particles.ingest.absence import absences_last
 from particles.ingest.ladder_shell import rung_tally
+from particles.ingest.retirement_cap import count_capped
 from particles.ingest.update_supersession import speaker_forms, speaker_openers_digest
 from particles.llm.batch_budget import (
     BatchWaitBudget,
@@ -100,6 +101,7 @@ from particles.operations.closure_measure import (
     render_closure_lines,
     window_start_after,
 )
+from particles.operations.consolidation_metrics import record_run_metrics
 from particles.operations.contradiction_disclosure import (
     DisclosureReport,
     covered_pair_set,
@@ -109,6 +111,19 @@ from particles.operations.curation.cards import CardKind, CurationCard
 from particles.operations.curation.collect import cards_from_findings, collect_cards
 from particles.operations.curation.session import _suppressed_keys, build_curation_queue
 from particles.operations.curation.snapshot import QueueSource, collect_and_persist
+from particles.operations.embed_backfill import (
+    EmbedBackfillReport,
+    embedding_backfilled_particle_ids_since,
+    run_embed_backfill,
+)
+from particles.operations.extract_budget import (
+    ExtractBudgetSummary,
+    ExtractRound,
+    extraction_route_priced,
+    pass_one_limit,
+    price_candidates,
+    render_budget_clause,
+)
 from particles.operations.extraction_reads import ReadSummary, plan_reads
 from particles.operations.held_release import ReleaseReport, run_release
 from particles.operations.lint import ContradictionProbeControl
@@ -201,6 +216,7 @@ CONSOLIDATION_ACTOR = "memory-consolidate"
 PASS_ORDER: tuple[str, ...] = (
     "refresh",
     "extract",
+    "embed",
     "reconcile",
     "reconcile_updates",
     "paraphrases",
@@ -444,6 +460,8 @@ class LockHeld:
 #: A context variable, not a global: the benchmark runs several cycles
 #: concurrently in one process, each on its own lock path.
 _active_lock: ContextVar[CycleLock | None] = ContextVar("_active_lock", default=None)
+#: The run's usage scope, which a budgeted pass 1 measures each round against.
+_active_usage: ContextVar[UsageAccumulator | None] = ContextVar("_active_usage", default=None)
 
 
 def cycle_lock_path() -> Path:
@@ -894,6 +912,11 @@ class ConsolidationReport(BaseModel):
     refresh_absent_recorded: int = 0
     # Outside every allowed root, so not read.
     refresh_refused: int = 0
+    # LAZY file:// entries of another host, which that host
+    # pushes (informational), and ones that record no host (a warning). Neither
+    # is selected, so neither takes a place under the cap.
+    refresh_other_host: int = 0
+    refresh_origin_unknown: int = 0
     refresh_remaining: int = 0
     # Why pass 0.5 read no local source at all: ``"cwd_store"`` when the store
     # resolves against the working directory or lies in a git work tree
@@ -957,9 +980,19 @@ class ConsolidationReport(BaseModel):
     #: call of their last pass and the hold is current. Still
     #: owed; not part of ``pending_total`` or the remainder.
     pending_held: int = 0
+    #: PENDING snapshots of metered agent keys' entries that pass 1's
+    #: per-principal share left for a later run. Still owed and
+    #: part of the remainder.
+    pending_deferred_metered: int = 0
+    #: How many metered principals those snapshots belong to; never their names.
+    metered_principals_deferred: int = 0
     #: Of ``pending_retry``, the snapshots whose every call this run was
     #: refused: recorded, so later runs hold them.
     pending_refused: int = 0
+
+    # Pass 1b — the embed pass: vectors for beliefs stored without
+    # one. Local and model-free, so it runs on degraded nights too.
+    embed: EmbedBackfillReport | None = None
 
     # Pass 2 — reconcile sweep (probe-bearing: one semantic_lint call per
     # candidate pair, capped at consolidation.max_reconcile_probes).
@@ -1009,6 +1042,9 @@ class ConsolidationReport(BaseModel):
 
     # Pass 3 — census (the machine-readable fields).
     card_counts: dict[str, int] = Field(default_factory=dict)
+    # what the episode fold would withhold on the stored
+    # collection, in shadow. ``None`` when the run built no collection.
+    episode_shadow: dict[str, Any] | None = None
     # the CONTESTED class basis, so a delta of "+2
     # contested" is attributable to the instrument that produced it rather
     # than being one unattributed total. A card firing two bases counts under
@@ -1033,6 +1069,14 @@ class ConsolidationReport(BaseModel):
     contradiction_grouped_pairs: int = 0
     duplicate_candidate_pairs_total: int = 0
     duplicate_in_scope: int = 0
+    # the class counts groups, one curation card each; the pair
+    # count above stays, for the finder's reach.
+    duplicate_groups_total: int = 0
+    duplicate_groups_in_scope: int = 0
+    duplicate_group_beliefs: int = 0
+    # the candidate pairs each withholding rung kept out of the
+    # duplicate groups, by stamp; None for a rung switched off.
+    duplicate_withheld: dict[str, int | None] = Field(default_factory=dict)
     # what the census's contradiction ladder did, None when the
     # census did not probe.
     contradiction_ladder: CensusLadder | None = None
@@ -1102,6 +1146,9 @@ class ConsolidationReport(BaseModel):
     # The run's dollar budget and spend; None for a run recorded
     # without one (the interactive audit).
     budget: BudgetSummary | None = None
+    # Pass 1's nightly extraction budget and what it did; None when
+    # no extraction budget applied.
+    extract_budget: ExtractBudgetSummary | None = None
     #: Why the census ran without its contradiction probe this run, when the
     #: budget skipped it; the headline then reads "not probed".
     census_probe_skipped: str | None = None
@@ -1120,6 +1167,8 @@ class ConsolidationReport(BaseModel):
     #: Per-ladder, per-rung verdict counts for the run, the run
     #: record's ``rungs`` block. Written on every run, structural-only included.
     rung_counts: dict[str, Any] = Field(default_factory=dict)
+    #: Pairs the per-entry update bound held back this run.
+    capped_updates: int = 0
     #: Each shadow rung's running precision, read from the probe
     #: ledger for the report. Not recorded: the ledger is the record.
     shadow_standings: list[ShadowStanding] = Field(default_factory=list, exclude=True)
@@ -1320,7 +1369,9 @@ def build_run_payload(
     budget: BudgetSummary | None = None,
     closure: ClosureMeasure | None = None,
     rungs: Mapping[str, Any] | None = None,
+    extract_budget: ExtractBudgetSummary | None = None,
     rank_lift: RankLiftMonitorReport | None = None,
+    capped_updates: int = 0,
 ) -> dict[str, Any]:
     """The versioned ``CONSOLIDATION_RUN`` payload (``format: 1``).
 
@@ -1344,7 +1395,9 @@ def build_run_payload(
     them, and any shadow rung's verdicts. The key is written on every run, an
     empty block on a night no ladder ran, so its absence is never ambiguous.
     ``rank_lift`` is additive too: the monitor's reading of every
-    view, omitted for a run that did not monitor.
+    view, omitted for a run that did not monitor. ``capped_updates`` is
+    additive too: the pairs the per-entry update bound sent to
+    rung 3 or left for review, written on every run.
     """
     payload: dict[str, Any] = {
         "format": RUN_PAYLOAD_FORMAT,
@@ -1370,6 +1423,7 @@ def build_run_payload(
         ],
         "census": census,
         "rungs": dict(rungs or {}),
+        "capped_updates": capped_updates,
     }
     if llm_usage is not None:
         payload["llm_usage"] = llm_usage.model_dump(mode="json")
@@ -1377,6 +1431,9 @@ def build_run_payload(
         payload["batch_wait"] = batch_wait.model_dump(mode="json")
     if budget is not None:
         payload["budget"] = {**budget.model_dump(mode="json"), "limited": budget.limited}
+    if extract_budget is not None:
+        # additive, like ``budget``.
+        payload["extract_budget"] = extract_budget.payload()
     if closure is not None:
         payload[CLOSURE_PAYLOAD_KEY] = closure.payload()
     if rank_lift is not None:
@@ -1426,20 +1483,6 @@ def _semantic_availability(structural_only: bool) -> tuple[bool, str | None]:
 # ---------------------------------------------------------------------------
 # The operation
 # ---------------------------------------------------------------------------
-
-
-def _restatement_parts(report: ConsolidationReport) -> list[str]:
-    """The pending-pass summary parts for the restatement match."""
-    parts: list[str] = []
-    if report.pending_restated:
-        parts.append(f"{report.pending_restated} restated claim(s) carried forward")
-    if report.pending_restatement_lineage:
-        parts.append(f"{report.pending_restatement_lineage} restatement(s) recorded as updates")
-    if report.pending_restatement_shadow:
-        parts.append(f"{report.pending_restatement_shadow} would-be restatement carry(ies)")
-    if report.pending_restatement_unasked:
-        parts.append(f"{report.pending_restatement_unasked} restatement pair(s) unasked")
-    return parts
 
 
 async def run_consolidation(
@@ -1535,9 +1578,11 @@ async def run_consolidation(
     with (
         track_usage() as usage,
         rung_tally() as tally,
+        count_capped() as capped,
         batch_wait_budget(budget),
         spend_budget(_run_spend_budget(cfg.budget_usd, usage)) as spend,
     ):
+        usage_token = _active_usage.set(usage)
         try:
             semantic_ok, degrade_reason = _semantic_availability(structural_only)
             report.semantic_degraded = not semantic_ok
@@ -1577,6 +1622,19 @@ async def run_consolidation(
                     await _count_backlog(session, report)
             else:
                 await _run_pass(session, report, "extract", lambda: _pass_extract(session, report))
+
+            # ---------------------------------------- pass 1b: embed
+            # Before the delta scope is computed, so a belief filled here is in
+            # this run's scope, and before every pass that reads vectors. After
+            # pass 1, so a snapshot extracted while the encoder was down and
+            # since restored is filled in the same run. Local and model-free, so
+            # it is not gated on ``semantic_ok``.
+            if get_config().consolidation.embed.max_per_run == 0:
+                _skip(report, "embed", "consolidation.embed.max_per_run is 0")
+            else:
+                await _run_pass(
+                    session, report, "embed", lambda: _pass_embed(session, report, actor=actor)
+                )
 
             # §4 delta scope — computed AFTER pass 1 (correction v1.74.1), so the
             # particles pass 1 just minted (asserted_at > the previous run's
@@ -1891,13 +1949,17 @@ async def run_consolidation(
             report.completed_at = _utcnow()
             report.llm_usage = usage.snapshot()
             report.rung_counts = tally.payload()
+            report.capped_updates = capped.n
             report.shadow_standings = await shadow_standings(session)
             report.batch_wait = BatchWaitSummary.from_budget(budget)
             report.budget.spent_usd = report.llm_usage.priced_cost_usd
             if spend is not None:
-                report.budget.skipped_chunks = spend.skipped_chunks
-                report.budget.skipped_requests = spend.skipped_requests
-                report.budget.exhausted_in_pass = spend.exhausted_in_pass
+                # += : pass 1's own backstop may have counted first.
+                report.budget.skipped_chunks += spend.skipped_chunks
+                report.budget.skipped_requests += spend.skipped_requests
+                report.budget.exhausted_in_pass = (
+                    report.budget.exhausted_in_pass or spend.exhausted_in_pass
+                )
             prior = await latest_run_event(session)
             if prior is not None:
                 report.previous_run_at = _event_completed_at(prior)
@@ -1922,9 +1984,11 @@ async def run_consolidation(
                 llm_usage=report.llm_usage,
                 batch_wait=report.batch_wait,
                 budget=report.budget,
+                extract_budget=report.extract_budget,
                 closure=report.closure,
                 rungs=report.rung_counts,
                 rank_lift=report.rank_lift,
+                capped_updates=report.capped_updates,
             )
             async with write_transaction(session):
                 event = await record_event(
@@ -1934,7 +1998,10 @@ async def run_consolidation(
                     payload=payload,
                 )
             report.event_id = event.event_id
+            # After the record is written: the dashboard's figures.
+            await record_run_metrics(session, report, store)
         finally:
+            _active_usage.reset(usage_token)
             _active_progress.reset(progress_token)
             _active_lock.reset(lock_token)
             release_cycle_lock(lock)
@@ -1952,6 +2019,14 @@ class _BudgetSkip(Exception):  # noqa: N818 — a control-flow signal, not an er
     :func:`_run_pass` records the pass as skipped with the message, the way a
     probe cap is disclosed. The body raises it after its gather and
     before any LLM call, so nothing it would have paid for has been sent.
+    """
+
+
+class _EmbedSkip(Exception):  # noqa: N818 — a control-flow signal, not an error
+    """Raised by the embed pass when no encoder loads.
+
+    Nothing was written; :func:`_run_pass` records the pass as skipped with the
+    reason, and the beliefs wait for the next run.
     """
 
 
@@ -2094,7 +2169,7 @@ async def _run_pass(
         entry.status = "skipped"
         entry.detail = str(skipped)
         _note_budget_skip(report, name)
-    except _EgressSkip as skipped:
+    except (_EgressSkip, _EmbedSkip) as skipped:
         entry.status = "skipped"
         entry.detail = str(skipped)
     except Exception as exc:  # noqa: BLE001 — §8: continue and report
@@ -2151,6 +2226,235 @@ def _plural(count: int, noun: str) -> str:
     return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
 
 
+@dataclass(frozen=True)
+class _Counter:
+    """One :class:`ConsolidationReport` counter, phrased once for every renderer.
+
+    The ``pass_end`` line, the report's pass line and the report's disclosures
+    all read a counter's wording from here, so a new counter is described in
+    one place and no two renderers phrase it differently. Every text is a
+    format string: ``{n}`` is the count, ``{r}`` the report. The run-record key
+    is ``field_name`` (the payload renames only ``pending_remaining``, as
+    ``pending_backlog``), and the payload stays spelled out in
+    :func:`_census_payload`, since it is a stored record format.
+    """
+
+    field_name: str
+    #: The clause the ``pass_end`` line and the report's pass line print, or
+    #: None for a counter only a disclosure names.
+    phrase: str | None
+    #: Print the clause at zero too (as ``zero``, when that is set).
+    always: bool = False
+    zero: str | None = None
+    #: What the report's pass line adds to a non-zero clause: the consequence,
+    #: or where to look for the cause.
+    detail: str = ""
+    #: The report's disclosure for a non-zero count, or None.
+    disclosure: str | None = None
+    #: The disclosure finishes the previous counter's disclosure line, and is
+    #: left out when that line is.
+    continues: bool = False
+
+    def count(self, report: ConsolidationReport) -> int:
+        return int(getattr(report, self.field_name))
+
+    def clause(self, report: ConsolidationReport, *, detail: bool = False) -> str | None:
+        n = self.count(report)
+        if self.phrase is None:
+            return None
+        if n:
+            text = self.phrase.format(n=n, r=report)
+            return text + self.detail.format(n=n, r=report) if detail else text
+        if self.zero is not None:
+            return self.zero
+        return self.phrase.format(n=n, r=report) if self.always else None
+
+
+def _clauses(
+    report: ConsolidationReport, counters: Sequence[_Counter], *, detail: bool = False
+) -> list[str]:
+    """The clauses of ``counters`` that print for this report, in order."""
+    return [
+        text for counter in counters if (text := counter.clause(report, detail=detail)) is not None
+    ]
+
+
+def _disclosures(report: ConsolidationReport, counters: Sequence[_Counter]) -> list[str]:
+    """The report's disclosure lines for the non-zero ``counters``, in order."""
+    lines: list[str] = []
+    previous_shown = False
+    for counter in counters:
+        n = counter.count(report)
+        text = counter.disclosure.format(n=n, r=report) if counter.disclosure and n else None
+        if counter.continues:
+            text = text if previous_shown else None
+            if text is not None:
+                lines[-1] += f" {text}"
+        elif text is not None:
+            lines.append(f"  {text}")
+        previous_shown = text is not None
+    return lines
+
+
+#: Pass 0.5, the local-source refresh.
+_REFRESH_COUNTERS = (
+    _Counter("refresh_checked", "{n} checked", always=True),
+    _Counter("refresh_updated", "{n} changed", zero="none changed", detail=" → re-extracting"),
+    _Counter("refresh_missing", "{n} missing"),
+    _Counter("refresh_absent_recorded", "{n} recorded as deleted"),
+    _Counter(
+        "refresh_refused",
+        "{n} refused by the refresh roots",
+        detail=" (`particles rules` names the cause and the fix)",
+    ),
+    _Counter("refresh_other_host", "{n} another host's (it pushes them)"),
+    _Counter(
+        "refresh_origin_unknown",
+        "{n} with no recorded host",
+        detail=" (`particles rules` names the fix)",
+    ),
+)
+
+#: Why pass 0.5 read no local source (``refresh_skipped``): the reason both
+#: renderers print, and the fix the report adds.
+_REFRESH_SKIPS: dict[str, tuple[str, str]] = {
+    "cwd_store": (
+        "the store may be one a repository shipped",
+        "name a store of your own outside any repository with an absolute "
+        "DATABASE_URL to refresh it",
+    ),
+    "store_writable_by_others": (
+        "other users can write the store",
+        "remove group and other write permission from the store file, its SQLite "
+        "sidecars and its directory to refresh it",
+    ),
+    "config_writable_by_others": (
+        "other users can write the config file that chooses the refresh roots",
+        "remove their write access, or move it to a directory only you may write, to refresh them",
+    ),
+}
+
+#: Pass 1, the extract catch-up: what became of the snapshots it tried.
+_EXTRACT_COUNTERS = (
+    _Counter(
+        "pending_failed",
+        "{n} failed",
+        disclosure="{n} snapshot(s) failed to extract; the log names each one and why.",
+    ),
+    _Counter(
+        "pending_retry",
+        "{n} left for retry",
+        disclosure="{n} snapshot(s) left PENDING after failed LLM calls. "
+        "A later run retries them after the snapshots not yet tried.",
+    ),
+    _Counter(
+        "pending_partial",
+        "{n} kept part of their read",
+        disclosure="{n} of them kept the chunks that answered, "
+        "and their retry reads only the rest.",
+        continues=True,
+    ),
+    _Counter(
+        "pending_waiting",
+        "{n} waiting on a partial whole read",
+        disclosure="{n} snapshot(s) wait on an earlier snapshot of their entry that "
+        "holds a partial whole read; the log names each one. "
+        "`particles reindex <entry>` releases a wait by hand.",
+    ),
+    _Counter(
+        "pending_empty",
+        "{n} with no beliefs",
+        disclosure="{n} snapshot(s) completed with no beliefs. "
+        "`particles lint` lists them as EMPTY_COMPLETE_SNAPSHOT.",
+    ),
+    _Counter("pending_revision_settled", "{n} revision pair(s) settled"),
+    # The restatement match.
+    _Counter("pending_restated", "{n} restated claim(s) carried forward"),
+    _Counter("pending_restatement_lineage", "{n} restatement(s) recorded as updates"),
+    _Counter("pending_restatement_shadow", "{n} would-be restatement carry(ies)"),
+    _Counter("pending_restatement_unasked", "{n} restatement pair(s) unasked"),
+    _Counter(
+        "pending_reset_stale",
+        None,
+        disclosure="{n} snapshot(s) stranded IN_PROGRESS by an interrupted run "
+        "were returned to PENDING.",
+    ),
+)
+
+#: Pass 1's remainder, which the report's pending line puts in parentheses.
+_PENDING_REMAINING = _Counter("pending_remaining", "{n} remain")
+
+#: Pass 1's snapshots set aside rather than tried, after the pending line's remainder.
+_EXTRACT_SET_ASIDE = (
+    _Counter("pending_collapsed", "skipped {n} superseded snapshot(s)"),
+    _Counter("pending_refused", "{n} declined by the extraction model and now held"),
+    _Counter(
+        "pending_held",
+        "{n} held: refused (see `particles curate`, or "
+        "`particles extract --all-pending --retry-refused`)",
+    ),
+    _Counter(
+        "pending_deferred_metered",
+        "{n} left for a later run by the per-agent-key share "
+        "(consolidation.max_pending_per_metered_principal)",
+    ),
+)
+
+#: Pass 2, the reconcile sweep.
+_RECONCILE_DEMOTED = _Counter("reconcile_demoted", "demoted {n} superseded claim(s)", always=True)
+
+#: Pass 2b, the same-subject update sweep. The ``pass_end`` line
+#: puts the probe count after the first.
+_UPDATE_COUNTERS = (
+    _Counter("update_demoted", "retired {n} replaced claim(s)", always=True),
+    _Counter("update_fixed_slot", "{n} fixed-slot pair(s) sent to review"),
+    _Counter(
+        "update_previously_cleared",
+        "{n} previously cleared",
+        disclosure="update sweep: {n} pair(s) skipped as previously cleared "
+        "(not counted against consolidation.max_update_probes)",
+    ),
+    _Counter(
+        "update_cap_reached",
+        "cap {r.update_probe_cap} reached, {r.update_not_reached} not reached",
+        disclosure="update probe: {r.update_probes_run:,} of {r.update_candidate_pairs:,} "
+        "pairs probed; cap {r.update_probe_cap:,} reached (consolidation.max_update_probes; "
+        "pairs are probed by content cosine, highest first, so the "
+        "{r.update_not_reached:,} not reached rank below every probed pair)",
+    ),
+)
+
+#: Pass 3, the census: pairs the probe-verdict ledger let it skip.
+_CONTRADICTION_CLEARED = _Counter(
+    "contradiction_previously_cleared",
+    "{n} previously cleared",
+    disclosure="contradiction probe: {n} pair(s) skipped as previously cleared (both "
+    "claims unchanged since a probe answered no; not counted against "
+    "audit.max_contradiction_probes)",
+)
+
+
+def _embed_clause(embed: EmbedBackfillReport) -> str:
+    """What the embed pass did, for the ``pass_end`` line and the report."""
+    if embed.skipped_reason is not None:
+        parts = [
+            f"{_plural(embed.still_missing, 'belief')} without a vector, "
+            f"not filled ({embed.skipped_reason})"
+        ]
+    else:
+        parts = [f"filled {_plural(embed.filled, 'belief')} stored without a vector"]
+    if embed.still_missing and embed.skipped_reason is None:
+        parts.append(f"{embed.still_missing} still without one")
+    if embed.refused:
+        parts.append(f"{embed.refused} changed by another writer first")
+    if embed.other_model:
+        parts.append(
+            f"{_plural(embed.other_model, 'belief')} embedded with another model, "
+            "which no search reads until a re-embed"
+        )
+    return ", ".join(parts)
+
+
 def _pass_summary(
     report: ConsolidationReport, entry: ConsolidationPass, progress: _RunProgress
 ) -> str:
@@ -2166,56 +2470,30 @@ def _pass_summary(
     parts: list[str]
     match entry.name:
         case "refresh":
-            parts = [f"{report.refresh_checked} checked", f"{report.refresh_updated} changed"]
-            if report.refresh_missing:
-                parts.append(f"{report.refresh_missing} missing")
-            if report.refresh_refused:
-                parts.append(f"{report.refresh_refused} refused by the refresh roots")
-            if report.refresh_skipped == "cwd_store":
-                parts = ["skipped: the store may be one a repository shipped"]
-            elif report.refresh_skipped == "store_writable_by_others":
-                parts = ["skipped: other users can write the store"]
-            elif report.refresh_skipped == "config_writable_by_others":
-                parts = ["skipped: other users can write the config file"]
+            skip = _REFRESH_SKIPS.get(report.refresh_skipped or "")
+            parts = [f"skipped: {skip[0]}"] if skip else _clauses(report, _REFRESH_COUNTERS)
         case "extract":
             _done, attempted = progress.counters.get("extract", (0, 0))
-            parts = [f"{report.pending_extracted} of {attempted} extracted"]
-            if report.pending_retry:
-                parts.append(f"{report.pending_retry} left for retry")
-            if report.pending_partial:
-                parts.append(f"{report.pending_partial} kept part of their read")
-            if report.pending_waiting:
-                parts.append(f"{report.pending_waiting} waiting on a partial whole read")
-            if report.pending_failed:
-                parts.append(f"{report.pending_failed} failed")
-            if report.pending_empty:
-                parts.append(f"{report.pending_empty} with no beliefs")
-            if report.pending_revision_settled:
-                parts.append(f"{report.pending_revision_settled} revision pair(s) settled")
-            parts.extend(_restatement_parts(report))
-            if report.pending_remaining:
-                parts.append(f"{report.pending_remaining} still pending")
-        case "reconcile":
             parts = [
-                f"demoted {report.reconcile_demoted}",
-                f"probed {report.reconcile_probes_run} of "
-                f"{_plural(report.reconcile_candidate_pairs, 'pair')}",
+                f"{report.pending_extracted} of {attempted} extracted",
+                *_clauses(report, (*_EXTRACT_COUNTERS, _PENDING_REMAINING)),
             ]
+        case "embed" if report.embed is not None:
+            parts = [_embed_clause(report.embed)]
+        case "reconcile":
+            parts = _clauses(report, (_RECONCILE_DEMOTED,))
+            parts.append(
+                f"probed {report.reconcile_probes_run} of "
+                f"{_plural(report.reconcile_candidate_pairs, 'pair')}"
+            )
         case "reconcile_updates":
+            retired, *rest = _clauses(report, _UPDATE_COUNTERS)
             parts = [
-                f"demoted {report.update_demoted}",
+                retired,
                 f"probed {report.update_probes_run} of "
                 f"{_plural(report.update_candidate_pairs, 'pair')}",
+                *rest,
             ]
-            if report.update_cap_reached:
-                parts.append(
-                    f"cap {report.update_probe_cap} reached, "
-                    f"{_plural(report.update_not_reached, 'pair')} not reached"
-                )
-            if report.update_fixed_slot:
-                parts.append(f"{report.update_fixed_slot} fixed-slot pair(s) sent to review")
-            if report.update_previously_cleared:
-                parts.append(f"{report.update_previously_cleared} previously cleared")
         case "paraphrases" if report.paraphrases is not None:
             parts = [
                 render_paraphrases_line(report.paraphrases)
@@ -2238,9 +2516,12 @@ def _pass_summary(
                     f"probed {report.contradiction_probes_run} of "
                     f"{_plural(report.contradiction_candidate_pairs, 'pair')}"
                 )
-            if report.contradiction_previously_cleared and not report.semantic_degraded:
-                parts.append(f"{report.contradiction_previously_cleared} previously cleared")
-            parts.append(_plural(report.duplicate_candidate_pairs_total, "duplicate pair"))
+            if not report.semantic_degraded:
+                parts.extend(_clauses(report, (_CONTRADICTION_CLEARED,)))
+            parts.append(_plural(report.duplicate_groups_total, "duplicate group"))
+            withheld = sum(n for n in report.duplicate_withheld.values() if n)
+            if withheld:
+                parts.append(f"{_plural(withheld, 'candidate pair')} withheld")
             parts.append(f"{report.headline_stale} stale")
         case "disclose" if report.disclosure is not None:
             parts = [
@@ -2310,10 +2591,13 @@ async def _delta_scope_ids(session: AsyncSession, watermark: datetime) -> frozen
     default was rewritten since, threaded through the
     at-least-one-side-in-scope seams unchanged.
 
-    The last term reads ``MODALITY_RECLASSIFIED`` events rather than the
+    The third term reads ``MODALITY_RECLASSIFIED`` events rather than the
     stamp's timestamp: an event is written for an operator verdict and for a
     value a regeneration run changed, never for a restamp that confirmed the
     stored value, so a confirming run queues nothing to re-pair.
+    The fourth reads ``EMBEDDING_BACKFILLED`` events the same way: a belief the
+    embed pass gave a vector keeps its old ``asserted_at``, and is paired by the
+    run that filled it and the next.
     """
     from particles.corpus.store import list_entry_ids_created_since
 
@@ -2322,6 +2606,7 @@ async def _delta_scope_ids(session: AsyncSession, watermark: datetime) -> frozen
     if entry_ids:
         changed |= await get_particle_ids_for_entries(session, entry_ids)
     changed |= await reclassified_particle_ids_since(session, watermark)
+    changed |= await embedding_backfilled_particle_ids_since(session, watermark)
     return frozenset(changed)
 
 
@@ -2371,6 +2656,7 @@ async def _pass_refresh(session: AsyncSession, report: ConsolidationReport) -> i
         cwd_relative_store,
         store_refusal,
     )
+    from particles.corpus.origin import count_file_entries_by_origin
     from particles.corpus.refresh_outcome import RefreshOutcome
     from particles.corpus.store import list_refreshable_local_entries
     from particles.operations.corpus_refresh import refresh_entries
@@ -2414,6 +2700,9 @@ async def _pass_refresh(session: AsyncSession, report: ConsolidationReport) -> i
         return 0
 
     entries = await list_refreshable_local_entries(session)
+    by_origin = await count_file_entries_by_origin(session, lazy_only=True)
+    report.refresh_other_host = by_origin.other_hosts
+    report.refresh_origin_unknown = by_origin.unstamped
     cap = get_config().local_refresh.max_entries
     report.refresh_remaining = max(0, len(entries) - cap)
     planned = min(len(entries), cap)
@@ -2444,6 +2733,10 @@ async def _pass_refresh(session: AsyncSession, report: ConsolidationReport) -> i
 
 async def _pass_extract(session: AsyncSession, report: ConsolidationReport) -> int:
     """Pass 1: extract PENDING snapshots, least-tried then oldest, capped per run (§3.1).
+
+    Under ``consolidation.extract_budget_usd`` the pass reads in
+    rounds until that budget is spent instead (:func:`_pass_extract_budgeted`),
+    measured against the run's usage scope.
 
     Level-triggered like the harvest — the corpus is the state; a
     capped run discloses the remainder and the next run continues. Per-snapshot
@@ -2498,7 +2791,28 @@ async def _pass_extract(session: AsyncSession, report: ConsolidationReport) -> i
             f"{host}:{port}; {len(pending)} snapshot(s) stay PENDING"
         )
     batching = get_config().consolidation.extract_batching
-    chosen = _extract_selection(pending, batching=batching)
+    run_spend = current_spend_budget()
+    run_left = None if run_spend is None else run_spend.budget_usd - run_spend.spent()
+    usage = _active_usage.get()
+    limit = pass_one_limit(run_left) if usage is not None else None
+    if limit is not None and not extraction_route_priced():
+        # no dollar can be read, so the budget cannot mean anything.
+        report.extract_budget = ExtractBudgetSummary(
+            budget_usd=get_config().consolidation.extract_budget_usd or 0.0,
+            limit_usd=limit,
+            stopped_by="unpriced",
+        )
+        log.warning(
+            "consolidation: consolidation.extract_budget_usd is set but the extraction "
+            "model has no llm.price_per_mtok entry; pass 1 runs unbudgeted"
+        )
+        limit = None
+    if limit is not None and usage is not None:
+        extracted = await _pass_extract_budgeted(session, report, pending, limit, usage)
+        report.pending_oldest_at = await _oldest_pending_at(session)
+        return extracted
+    selected, deferred = _selection_with_share(pending, batching=batching)
+    chosen = [(item.entry_id, item.snapshot_id) for item in selected]
     if current_spend_budget() is not None:
         # price the chosen snapshots before the first call.
         estimate, _ = await extraction_plan_estimate(session, chosen, batching=batching)
@@ -2508,6 +2822,7 @@ async def _pass_extract(session: AsyncSession, report: ConsolidationReport) -> i
             report.pending_oldest_at = await _oldest_pending_at(session)
             await session.commit()
             raise _BudgetSkip(reason)
+    _disclose_metered_deferral(report, deferred)
     if batching:
         # The pooled tasks open sessions of their own; end this one's read so
         # it does not pin a connection for the whole pass.
@@ -2525,8 +2840,7 @@ async def _pass_extract(session: AsyncSession, report: ConsolidationReport) -> i
         if absences:
             extracted = await _pass_extract_serial(session, absences, report, extract_snapshot)
     else:
-        cap = get_config().consolidation.max_pending_entries
-        chosen_serial = _prioritised(pending)[:cap]
+        chosen_serial = selected
         # the absences the cap admitted run after the RESPONSE work.
         extracted = await _pass_extract_serial(
             session,
@@ -2538,21 +2852,276 @@ async def _pass_extract(session: AsyncSession, report: ConsolidationReport) -> i
     return extracted
 
 
+async def _pass_extract_budgeted(
+    session: AsyncSession,
+    report: ConsolidationReport,
+    pending: Sequence[PendingSnapshot],
+    limit: float,
+    usage: UsageAccumulator,
+) -> int:
+    """Pass 1 under ``consolidation.extract_budget_usd``: rounds until it is spent.
+
+    Gather / decide / apply per round: the candidates are each unfinished
+    entry's oldest pending snapshot in §4's order, priced twice from the read
+    plan; :func:`~particles.core.spend_budget.admit_round` decides; the round
+    runs as one pooled pass (or, unbatched, one snapshot at a time). Between
+    rounds the pass reads what the round actually cost from the run's usage
+    scope, which is what each class's factor is fitted on. A snapshot handed
+    back PENDING ends its entry's run. The batch adapter's chunk check is held
+    to the limit for the whole pass, the measured backstop.
+    """
+    from particles.operations.extract import extract_snapshot
+
+    cfg = get_config().consolidation
+    batching = cfg.extract_batching
+    summary = ExtractBudgetSummary(
+        budget_usd=cfg.extract_budget_usd if cfg.extract_budget_usd is not None else limit,
+        limit_usd=limit,
+    )
+    report.extract_budget = summary
+    start = usage.snapshot().priced_cost_usd
+
+    def spent() -> float:
+        return usage.snapshot().priced_cost_usd - start
+
+    wait = current_batch_wait_budget()
+    wait_start = wait.spent_seconds if wait is not None else 0.0
+    wait_share = wait.budget_seconds * cfg.extract_batch_wait_share if wait is not None else None
+    ceiling = cfg.max_pending_entries
+    rates: dict[str, ClassRate] = {}
+    prices: dict[str, RoundCandidate] = {}
+    finished: set[str] = set()
+    passed: set[str] = set()
+    admitted_total = 0
+    slowest = 0.0
+    # each metered principal's share, summed over the rounds.
+    metered_used: dict[str, int] = {}
+    metered_deferred: dict[str, PendingSnapshot] = {}
+    listing: Sequence[PendingSnapshot] = pending
+    backstop = SpendBudget(
+        budget_usd=start + limit,
+        spent=lambda: usage.snapshot().priced_cost_usd,
+        estimate_chunk=estimate_batch_chunk,
+        pass_name="extract",
+    )
+    with spend_budget(backstop):
+        while True:
+            if admitted_total >= ceiling:
+                summary.stopped_by = "ceiling"
+                break
+            if batching and len(summary.rounds) >= cfg.extract_max_rounds:
+                summary.stopped_by = "rounds"
+                break
+            if batching and wait is not None and wait_share is not None and summary.rounds:
+                used = wait.spent_seconds - wait_start
+                if (
+                    used + slowest > wait_share
+                    or wait.live_remaining() < wait.min_remaining_seconds
+                ):
+                    summary.stopped_by = "batch_wait"
+                    break
+            heads, set_aside = _within_metered_share(
+                _round_heads(_prioritised(listing), finished), len(listing), dict(metered_used)
+            )
+            metered_deferred.update((item.snapshot_id, item) for item in set_aside)
+            if not heads:
+                summary.stopped_by = "queue"
+                break
+            left = ceiling - admitted_total
+            window = heads[: max(20, 2 * left)]
+            candidates = await price_candidates(session, window, prices, batched=batching)
+            await session.commit()
+            admission = admit_round(
+                candidates,
+                remaining_usd=limit - spent(),
+                limit_usd=limit,
+                rates=rates,
+                slots=left if batching else 1,
+            )
+            for snapshot_id in admission.too_large:
+                if snapshot_id not in summary.too_large:
+                    summary.too_large.append(snapshot_id)
+            by_id = {h.snapshot_id: h for h in window}
+            finished.update(by_id[sid].entry_id for sid in admission.too_large)
+            passed.update(admission.passed_over)
+            if not admission.admitted:
+                summary.stopped_by = "budget"
+                break
+            chosen = [(by_id[sid].entry_id, sid) for sid in admission.admitted]
+            spent_before = spent()
+            wait_before = wait.spent_seconds if wait is not None else 0.0
+            account: list[bool] = []
+            if batching:
+                await _pass_extract_pooled(chosen, report, account_level_out=account)
+            else:
+                await _pass_extract_serial(
+                    session,
+                    [by_id[sid] for sid in admission.admitted],
+                    report,
+                    extract_snapshot,
+                    account_level_out=account,
+                )
+            round_spent = spent() - spent_before
+            round_wait = (wait.spent_seconds if wait is not None else 0.0) - wait_before
+            slowest = max(slowest, round_wait)
+            admitted_total += len(chosen)
+            for sid in admission.admitted:
+                # A head set aside in an earlier round can be admitted once an
+                # earlier head of its principal is finished without a read.
+                metered_deferred.pop(sid, None)
+                if (principal := by_id[sid].metered_principal) is not None:
+                    metered_used[principal] = metered_used.get(principal, 0) + 1
+            klass = admission.klass or "unknown"
+            rates[klass] = rates.get(klass, ClassRate()).plus(
+                snapshots=len(chosen), spent_usd=round_spent, estimated_usd=admission.estimated_usd
+            )
+            summary.rounds.append(
+                ExtractRound(
+                    klass=klass,
+                    bounded=admission.bounded,
+                    admitted=len(chosen),
+                    charged_usd=round(admission.charged_usd, 6),
+                    estimated_usd=round(admission.estimated_usd, 6),
+                    worst_case_usd=round(admission.worst_case_usd, 6),
+                    spent_usd=round(round_spent, 6),
+                    wait_seconds=round(round_wait, 3),
+                )
+            )
+            summary.worst_case_usd = round(admission.worst_case_usd, 6)
+            listing, _ = await catchup_listing(session)
+            still = {item.snapshot_id for item in listing}
+            # A snapshot handed back PENDING ends its entry's run.
+            finished.update(entry_id for entry_id, sid in chosen if sid in still)
+            passed.difference_update(sid for _, sid in chosen)
+            if account:
+                summary.stopped_by = "failure"
+                break
+            if backstop.skipped_requests:
+                summary.stopped_by = "budget"
+                break
+    absences = [item for item in pending if item.absent][: max(0, ceiling - admitted_total)]
+    if absences:
+        # an absence makes no model call; it follows the rounds.
+        await _pass_extract_serial(session, absences, report, extract_snapshot)
+    _disclose_metered_deferral(report, list(metered_deferred.values()))
+    summary.admitted = admitted_total
+    summary.passed_over = len(passed)
+    summary.spent_usd = round(spent(), 6)
+    summary.estimated_usd = round(sum(r.estimated_usd for r in summary.rounds), 6)
+    summary.factor = {
+        k: round(f, 4) for k, rate in rates.items() if (f := rate.factor()) is not None
+    }
+    summary.factor_snapshots = {k: rate.snapshots for k, rate in rates.items()}
+    summary.skipped_requests = backstop.skipped_requests
+    if report.budget is not None and backstop.skipped_requests:
+        report.budget.skipped_chunks += backstop.skipped_chunks
+        report.budget.skipped_requests += backstop.skipped_requests
+        report.budget.exhausted_in_pass = report.budget.exhausted_in_pass or "extract"
+    _finish_pending_counts(report)
+    return report.pending_extracted
+
+
+def _round_heads(ordered: Sequence[PendingSnapshot], finished: set[str]) -> list[PendingSnapshot]:
+    """Each unfinished entry's oldest pending snapshot, in the order entries first appear.
+
+    Absences are left out: they make no model call and follow the rounds.
+    """
+    heads: dict[str, PendingSnapshot] = {}
+    for item in ordered:
+        if item.absent or item.entry_id in finished:
+            continue
+        held = heads.get(item.entry_id)
+        if held is None or (item.captured_at, item.snapshot_id) < (
+            held.captured_at,
+            held.snapshot_id,
+        ):
+            heads[item.entry_id] = item
+    return list(heads.values())
+
+
 def _extract_selection(
     pending: Sequence[PendingSnapshot], *, batching: bool
 ) -> list[tuple[str, str]]:
     """``(entry_id, snapshot_id)`` pass 1 would extract from the catch-up queue.
 
-    The priority class goes first (:func:`_prioritised`). The
+    The priority class goes first (:func:`_prioritised`), then
+    transcripts newest session first. The
     pooled pass then takes one snapshot per entry up to the cap;
     the serial loop takes the first ``cap`` snapshots. The plan preview calls
     this same function, so it shows the set the run will take.
     """
+    chosen, _ = _selection_with_share(pending, batching=batching)
+    return [(item.entry_id, item.snapshot_id) for item in chosen]
+
+
+def _selection_with_share(
+    pending: Sequence[PendingSnapshot], *, batching: bool
+) -> tuple[list[PendingSnapshot], list[PendingSnapshot]]:
+    """Pass 1's chosen snapshots, and those the per-principal share set aside.
+
+    The pooled pass counts the share after taking one snapshot per entry, so a
+    later snapshot of a chosen entry never uses it; the serial loop counts each
+    snapshot it would take.
+    """
     cap = get_config().consolidation.max_pending_entries
     ordered = _prioritised(pending)
-    if batching:
-        return _one_per_entry(ordered, cap)
-    return [(item.entry_id, item.snapshot_id) for item in ordered[:cap]]
+    return _within_metered_share(_entry_heads(ordered) if batching else ordered, cap, {})
+
+
+def _entry_heads(ordered: Sequence[PendingSnapshot]) -> list[PendingSnapshot]:
+    """Each entry's first snapshot in ``ordered``, in the order entries first appear.
+
+    A pooled run takes at most one snapshot per entry. Applying
+    that rule after slicing the queue to the cap spent a slot on every later
+    snapshot of an entry already chosen: on the owner's store twenty slots
+    bought thirteen extractions a night. Choosing entries first fills the cap.
+    """
+    seen: set[str] = set()
+    heads: list[PendingSnapshot] = []
+    for item in ordered:
+        if item.entry_id not in seen:
+            seen.add(item.entry_id)
+            heads.append(item)
+    return heads
+
+
+def _within_metered_share(
+    items: Sequence[PendingSnapshot], cap: int, used: dict[str, int]
+) -> tuple[list[PendingSnapshot], list[PendingSnapshot]]:
+    """The first ``cap`` of ``items`` within each metered principal's share.
+
+    A snapshot of an entry a metered agent key deposited is admitted only while
+    its principal has had fewer than ``consolidation.max_pending_per_metered_principal``
+    admitted this run; ``used`` holds those counts and is updated in place, so
+    a budgeted run sums them over its rounds. The share is checked in every
+    class, the priority class included, and is not work-conserving: a slot it
+    refuses is not handed to the principal's next snapshot. Returns the
+    admitted items and those the share set aside before the cap filled. Pure.
+    """
+    share = get_config().consolidation.max_pending_per_metered_principal
+    admitted: list[PendingSnapshot] = []
+    deferred: list[PendingSnapshot] = []
+    for item in items:
+        if len(admitted) >= cap:
+            break
+        principal = item.metered_principal
+        if principal is not None:
+            if used.get(principal, 0) >= share:
+                deferred.append(item)
+                continue
+            used[principal] = used.get(principal, 0) + 1
+        admitted.append(item)
+    return admitted, deferred
+
+
+def _disclose_metered_deferral(
+    report: ConsolidationReport, deferred: Sequence[PendingSnapshot]
+) -> None:
+    """Count what the share set aside: snapshots and principals, never a principal's name."""
+    report.pending_deferred_metered = len({item.snapshot_id for item in deferred})
+    report.metered_principals_deferred = len(
+        {item.metered_principal for item in deferred if item.metered_principal is not None}
+    )
 
 
 def _prioritised(pending: Sequence[PendingSnapshot]) -> list[PendingSnapshot]:
@@ -2563,12 +3132,39 @@ def _prioritised(pending: Sequence[PendingSnapshot]) -> list[PendingSnapshot]:
     so the backlog count and ``oldest waiting since`` still describe the
     whole queue rather than the class.
     """
-    priority = set(get_config().consolidation.priority_tags)
-    if not priority:
-        return list(pending)
-    first = [item for item in pending if item.tags & priority]
-    rest = [item for item in pending if not item.tags & priority]
+    cfg = get_config().consolidation
+    priority = set(cfg.priority_tags)
+    first = [item for item in pending if priority and item.tags & priority]
+    rest = [item for item in pending if not (priority and item.tags & priority)]
+    if cfg.transcripts_newest_first:
+        # transcripts newest session first, ahead of other sources.
+        transcripts = [item for item in rest if item.source_type == _CONVERSATION]
+        if transcripts:
+            others = [item for item in rest if item.source_type != _CONVERSATION]
+            rest = _newest_entries_first(transcripts) + others
     return first + rest
+
+
+#: ``SourceType.CONVERSATION``'s stored value: a harvested transcript.
+_CONVERSATION = "CONVERSATION"
+
+
+def _newest_entries_first(items: Sequence[PendingSnapshot]) -> list[PendingSnapshot]:
+    """Transcripts by entry: least-tried, then newest pending capture first.
+
+    An entry's attempts are those of its oldest pending snapshot, and its
+    snapshots stay together, oldest first, as delta reads and
+    rule 4 require.
+    """
+    by_entry: dict[str, list[PendingSnapshot]] = {}
+    for item in items:
+        by_entry.setdefault(item.entry_id, []).append(item)
+    groups = [
+        sorted(snapshots, key=lambda p: (p.captured_at, p.snapshot_id))
+        for snapshots in by_entry.values()
+    ]
+    groups.sort(key=lambda g: (g[0].attempts, -max(p.captured_at for p in g).timestamp()))
+    return [item for group in groups for item in group]
 
 
 async def extraction_plan_estimate(
@@ -2589,26 +3185,6 @@ async def extraction_plan_estimate(
         summary.calls, entries=sum(1 for read in reads if read.calls), batched=batching
     )
     return estimate, summary
-
-
-def _one_per_entry(pending: Sequence[PendingSnapshot], cap: int) -> list[tuple[str, str]]:
-    """The first ``cap`` distinct entries of the catch-up queue, one snapshot each.
-
-    A pooled run takes at most one snapshot per entry. Applying
-    that rule after slicing the queue to ``cap`` spent a slot on every later
-    snapshot of an entry already chosen: on the owner's store twenty slots
-    bought thirteen extractions a night. Choosing entries first fills the cap.
-    """
-    seen: set[str] = set()
-    chosen: list[tuple[str, str]] = []
-    for item in pending:
-        if len(chosen) >= cap:
-            break
-        if item.entry_id in seen:
-            continue
-        seen.add(item.entry_id)
-        chosen.append((item.entry_id, item.snapshot_id))
-    return chosen
 
 
 async def _oldest_pending_at(session: AsyncSession) -> datetime | None:
@@ -2752,6 +3328,8 @@ async def _pass_extract_serial(
     batch: Sequence[PendingSnapshot],
     report: ConsolidationReport,
     extract_snapshot: Callable[..., Awaitable[list[Particle]]],
+    *,
+    account_level_out: list[bool] | None = None,
 ) -> int:
     """The serial extract loop (``consolidation.extract_batching: false``)."""
     from particles.ingest.pipeline import SnapshotOutcome
@@ -2782,6 +3360,8 @@ async def _pass_extract_serial(
             await session.rollback()
             report.pending_failed += 1
             log.error("consolidation: extraction unavailable (account-level): %s", exc)
+            if account_level_out is not None:
+                account_level_out.append(True)
             break
         except Exception as exc:  # noqa: BLE001 — §8: continue the batch, disclose
             await session.rollback()
@@ -2851,7 +3431,12 @@ class _StoreSlot:
         return _idle
 
 
-async def _pass_extract_pooled(batch: list[tuple[str, str]], report: ConsolidationReport) -> int:
+async def _pass_extract_pooled(
+    batch: list[tuple[str, str]],
+    report: ConsolidationReport,
+    *,
+    account_level_out: list[bool] | None = None,
+) -> int:
     """The pooled twin of the serial extract loop.
 
     One asyncio task per snapshot, each on its own session, all registered on
@@ -2965,10 +3550,25 @@ async def _pass_extract_pooled(batch: list[tuple[str, str]], report: Consolidati
             "consolidation: extraction unavailable (account-level); "
             "untried snapshots remain PENDING for the next run"
         )
+        if account_level_out is not None:
+            account_level_out.append(True)
     _finish_pending_counts(report)
     # A lower bound on the spend, as in the serial loop; per-chunk counts ride
     # the OTel spans.
     return report.pending_extracted
+
+
+async def _pass_embed(session: AsyncSession, report: ConsolidationReport, *, actor: str) -> int:
+    """Pass 1b: store a vector on beliefs written without one. No LLM call.
+
+    With no encoder the pass is recorded as skipped with the reason, and the
+    beliefs wait for the next run.
+    """
+    result = await run_embed_backfill(session, actor=actor)
+    report.embed = result
+    if result.skipped_reason is not None:
+        raise _EmbedSkip(result.skipped_reason)
+    return 0
 
 
 async def _pass_reconcile(session: AsyncSession, report: ConsolidationReport) -> int:
@@ -3198,6 +3798,7 @@ async def _pass_census(
         duplicate_mode=SuggestMode.REPORT,
         contradiction_probe=probe_control,
         duplicate_scope_ids=scope_ids,
+        withheld=report.duplicate_withheld,
     )
 
     _count_cards(report, cards, scope_ids)
@@ -3237,16 +3838,23 @@ def _count_cards(
     report.contested_bases = bases
 
     # hybrid: in-scope headline, store-wide tail always disclosed.
-    dup_total = sum(1 for c in cards if c.kind is CardKind.DUPLICATE_PAIR)
-    report.duplicate_candidate_pairs_total = dup_total
-    if scope_ids is None:
-        report.duplicate_in_scope = dup_total
-    else:
-        report.duplicate_in_scope = sum(
-            1
-            for c in cards
-            if c.kind is CardKind.DUPLICATE_PAIR and any(pid in scope_ids for pid in c.particle_ids)
-        )
+    # the class is counted in groups, and the pairs they hold
+    # are kept beside it.
+    groups = [c for c in cards if c.kind in (CardKind.DUPLICATE_GROUP, CardKind.DUPLICATE_PAIR)]
+    report.duplicate_groups_total = len(groups)
+    report.duplicate_group_beliefs = len({pid for c in groups for pid in c.particle_ids})
+    report.duplicate_candidate_pairs_total = sum(
+        len(c.pairs or []) if c.kind is CardKind.DUPLICATE_GROUP else 1 for c in groups
+    )
+    in_scope = (
+        groups
+        if scope_ids is None
+        else [c for c in groups if any(pid in scope_ids for pid in c.particle_ids)]
+    )
+    report.duplicate_groups_in_scope = len(in_scope)
+    report.duplicate_in_scope = sum(
+        len(c.pairs or []) if c.kind is CardKind.DUPLICATE_GROUP else 1 for c in in_scope
+    )
 
 
 async def _pass_disclose(
@@ -3371,10 +3979,18 @@ async def _pass_curation(
     replace-vs-carry-forward rule: a delta run must not let its narrower
     contradiction set erase the store-wide picture built by earlier runs.
     """
+    episode: dict[str, Any] = {}
     merged, snapshot_id = await collect_and_persist(
-        session, semantic=semantic, scope=scope, cards=cards, covered_pairs=covered
+        session,
+        semantic=semantic,
+        scope=scope,
+        cards=cards,
+        covered_pairs=covered,
+        episode_sink=episode,
+        withheld=report.duplicate_withheld,
     )
     report.curation_snapshot_id = snapshot_id
+    report.episode_shadow = episode or None
 
     suppressed = await _suppressed_keys(session)
     eligible = [c for c in merged if c.key not in suppressed]
@@ -3595,7 +4211,7 @@ def _contradiction_headline(
 def _headline_values(report: ConsolidationReport) -> dict[str, int]:
     return {
         "contradictions": report.headline_contradictions,
-        "duplicates": report.duplicate_candidate_pairs_total,
+        "duplicates": report.duplicate_groups_total,
         "stale": report.headline_stale,
     }
 
@@ -3616,13 +4232,18 @@ def _headline_from_payload(payload: dict[str, Any]) -> dict[str, int] | None:
     grouped = census.get("contradiction_disagreements")
     pairs = census.get("contradiction_grouped_pairs", 0)
     headline: dict[str, int] = {
-        "duplicates": int(census.get("duplicate_candidate_pairs_total", 0) or 0),
         "stale": (
             _count(CardKind.STALE)
             + _count(CardKind.RECENCY_DECAY)
             + _count(CardKind.CONFIDENCE_DECAY)
         ),
     }
+    # duplicates count groups. A record written before the group
+    # card counted pairs, which cannot be restated as groups, so that one run
+    # gets no duplicates delta.
+    groups = census.get("duplicate_groups_total")
+    if isinstance(groups, int):
+        headline["duplicates"] = groups
     # a record written before the INCONSISTENCY card kind counted
     # conflicts by claim, and its per-record count cannot be recovered, so the
     # contradictions delta is omitted for that one run rather than reported as
@@ -3666,6 +4287,7 @@ def _census_payload(report: ConsolidationReport) -> dict[str, Any]:
         "watermark": _iso(report.census_watermark),
         "scope_particle_count": report.census_scope_particle_count,
         "cards": dict(report.card_counts),
+        **({"episode": report.episode_shadow} if report.episode_shadow is not None else {}),
         "contested_bases": dict(report.contested_bases),
         "contradiction_candidate_pairs": report.contradiction_candidate_pairs,
         "contradiction_intra_scope_pairs": report.contradiction_intra_scope_pairs,
@@ -3687,6 +4309,10 @@ def _census_payload(report: ConsolidationReport) -> dict[str, Any]:
         **({"disclosure": report.disclosure.payload()} if report.disclosure is not None else {}),
         "duplicate_candidate_pairs_total": report.duplicate_candidate_pairs_total,
         "duplicate_in_scope": report.duplicate_in_scope,
+        "duplicate_groups_total": report.duplicate_groups_total,
+        "duplicate_groups_in_scope": report.duplicate_groups_in_scope,
+        "duplicate_group_beliefs": report.duplicate_group_beliefs,
+        "duplicate_withheld": dict(report.duplicate_withheld),
         "pending_backlog": report.pending_remaining,
         "pending_extracted": report.pending_extracted,
         "pending_empty": report.pending_empty,
@@ -3707,13 +4333,19 @@ def _census_payload(report: ConsolidationReport) -> dict[str, Any]:
         ),
         "pending_collapsed": report.pending_collapsed,
         "pending_held": report.pending_held,
+        "pending_deferred_metered": report.pending_deferred_metered,
+        "metered_principals_deferred": report.metered_principals_deferred,
         "pending_refused": report.pending_refused,
         "refresh_checked": report.refresh_checked,
         "refresh_updated": report.refresh_updated,
         "refresh_missing": report.refresh_missing,
         "refresh_absent_recorded": report.refresh_absent_recorded,
         "refresh_refused": report.refresh_refused,
+        "refresh_other_host": report.refresh_other_host,
+        "refresh_origin_unknown": report.refresh_origin_unknown,
         "refresh_skipped": report.refresh_skipped,
+        # the embed pass's counts; omitted on a run that skipped it.
+        **({"embed": report.embed.payload()} if report.embed is not None else {}),
         "reconcile_demoted": report.reconcile_demoted,
         "reconcile_candidate_pairs": report.reconcile_candidate_pairs,
         "reconcile_probes_run": report.reconcile_probes_run,
@@ -3826,6 +4458,9 @@ async def record_audit_run(
         contradiction_grouped_pairs=audit_report.contradiction_grouped_pairs,
         contradiction_ladder=audit_report.contradiction_ladder,
         duplicate_candidate_pairs_total=audit_report.duplicate_candidate_pairs_total,
+        # the audit's store-wide duplicate count is in groups.
+        duplicate_groups_total=audit_report.duplicate_candidate_pairs_total,
+        duplicate_group_beliefs=audit_report.duplicate_group_beliefs,
         pending_extracted=audit_report.extracted_snapshots,
     )
     payload = build_run_payload(
@@ -3868,33 +4503,17 @@ def _fmt_delta(deltas: dict[str, int], key: str) -> str:
 
 def _pending_line(report: ConsolidationReport) -> str:
     """The pass 1 headline: what was extracted, and how much is still waiting."""
-    parts = [f"extracted {report.pending_extracted}"]
-    if report.pending_retry:
-        parts.append(f"{report.pending_retry} left for retry")
-    if report.pending_partial:
-        parts.append(f"{report.pending_partial} kept part of their read")
-    if report.pending_waiting:
-        parts.append(f"{report.pending_waiting} waiting")
-    if report.pending_empty:
-        parts.append(f"{report.pending_empty} with no beliefs")
-    if report.pending_revision_settled:
-        parts.append(f"{report.pending_revision_settled} revision pair(s) settled")
-    parts.extend(_restatement_parts(report))
+    parts = [f"extracted {report.pending_extracted}", *_clauses(report, _EXTRACT_COUNTERS)]
     line = "  pending          " + ", ".join(parts)
-    if report.pending_remaining:
-        waiting = f"{report.pending_remaining} remain"
+    remaining = _PENDING_REMAINING.clause(report)
+    if remaining is not None:
         if report.pending_oldest_at is not None:
-            waiting += f", oldest waiting since {report.pending_oldest_at:%Y-%m-%d}"
-        line += f" ({waiting}; the next run continues)"
-    if report.pending_collapsed:
-        line += f"; skipped {report.pending_collapsed} superseded snapshot(s)"
-    if report.pending_refused:
-        line += f"; {report.pending_refused} declined by the extraction model and now held"
-    if report.pending_held:
-        line += (
-            f"; {report.pending_held} held: refused (see `particles curate`, or "
-            "`particles extract --all-pending --retry-refused`)"
-        )
+            remaining += f", oldest waiting since {report.pending_oldest_at:%Y-%m-%d}"
+        line += f" ({remaining}; the next run continues)"
+    for clause in _clauses(report, _EXTRACT_SET_ASIDE):
+        line += f"; {clause}"
+    if report.extract_budget is not None:
+        line += f"; {render_budget_clause(report.extract_budget)}"
     return line
 
 
@@ -4118,7 +4737,7 @@ def render_consolidation_report(report: ConsolidationReport) -> str:
         if last:
             lines.append(
                 f"  as of that census: {_plural(last.get('contradictions', 0), 'contradiction')}, "
-                f"{_plural(last.get('duplicates', 0), 'duplicate pair')}, "
+                f"{_plural(last.get('duplicates', 0), 'duplicate group')}, "
                 f"{last.get('stale', 0)} stale"
             )
     elif report.semantic_degraded or report.census_probe_skipped:
@@ -4145,58 +4764,38 @@ def render_consolidation_report(report: ConsolidationReport) -> str:
     if report.disclosure is not None:
         lines.append(render_disclosure_line(report.disclosure))
     if report.census_skipped is None:
-        dup_line = f"  duplicates       {report.duplicate_candidate_pairs_total}"
+        dup_line = (
+            f"  duplicates       {_plural(report.duplicate_groups_total, 'group')} over "
+            f"{_plural(report.duplicate_group_beliefs, 'belief')}"
+        )
         dup_line += _fmt_delta(report.deltas, "duplicates")
         if (
             report.census_scope == "delta"
-            and report.duplicate_in_scope < report.duplicate_candidate_pairs_total
+            and report.duplicate_groups_in_scope < report.duplicate_groups_total
         ):
-            dup_line += f"  [{report.duplicate_in_scope} touch the census's delta]"
+            dup_line += f"  [{report.duplicate_groups_in_scope} touch the census's delta]"
         lines.append(dup_line)
         lines.append(
             f"  stale            {report.headline_stale}{_fmt_delta(report.deltas, 'stale')}"
         )
     if report.closure is not None:
         lines.extend(render_closure_lines(report.closure, report.closure_previous))
-    if report.refresh_skipped == "cwd_store":
-        lines.append(
-            "  local sources    not read: the store may be one a repository shipped "
-            "(name a store of your own outside any repository with an absolute "
-            "DATABASE_URL to refresh it)"
-        )
-    elif report.refresh_skipped == "store_writable_by_others":
-        lines.append(
-            "  local sources    not read: other users can write the store "
-            "(remove group and other write permission from the store file, its SQLite "
-            "sidecars and its directory to refresh it)"
-        )
-    elif report.refresh_skipped == "config_writable_by_others":
-        lines.append(
-            "  local sources    not read: other users can write the config file that "
-            "chooses the refresh roots (remove their write access, or move it to a "
-            "directory only you may write, to refresh them)"
-        )
+    skip = _REFRESH_SKIPS.get(report.refresh_skipped or "")
+    if skip is not None:
+        reason, fix = skip
+        lines.append(f"  local sources    not read: {reason} ({fix})")
     if report.refresh_checked:
-        refresh_line = f"  local sources    {report.refresh_checked} checked"
-        if report.refresh_updated:
-            refresh_line += f", {report.refresh_updated} changed → re-extracting"
-        else:
-            refresh_line += ", none changed"
-        if report.refresh_missing:
-            refresh_line += f", {report.refresh_missing} missing"
-        if report.refresh_absent_recorded:
-            refresh_line += f", {report.refresh_absent_recorded} recorded as deleted"
-        if report.refresh_refused:
-            refresh_line += (
-                f", {report.refresh_refused} refused by the refresh roots "
-                "(`particles rules` names the cause and the fix)"
-            )
-        lines.append(refresh_line)
+        refresh = ", ".join(_clauses(report, _REFRESH_COUNTERS, detail=True))
+        lines.append(f"  local sources    {refresh}")
     lines.append(_pending_line(report))
-    if report.reconcile_demoted:
-        lines.append(f"  reconcile        demoted {report.reconcile_demoted} superseded claim(s)")
-    if report.update_demoted:
-        lines.append(f"  update sweep     retired {report.update_demoted} replaced claim(s)")
+    if report.embed is not None and (
+        report.embed.filled or report.embed.still_missing or report.embed.other_model
+    ):
+        lines.append(f"  embeddings       {_embed_clause(report.embed)}")
+    if _RECONCILE_DEMOTED.count(report):
+        lines.append(f"  reconcile        {_RECONCILE_DEMOTED.clause(report)}")
+    if any(counter.count(report) for counter in _UPDATE_COUNTERS):
+        lines.append(f"  update sweep     {', '.join(_clauses(report, _UPDATE_COUNTERS))}")
     if report.paraphrases is not None:
         lines.append(render_paraphrases_line(report.paraphrases))
     if report.reanchor is not None:
@@ -4278,29 +4877,13 @@ def render_consolidation_report(report: ConsolidationReport) -> str:
             f"(audit.max_contradiction_probes = {cap})"
         )
     # the saving from the probe-verdict ledger, as a number.
-    if not report.semantic_degraded and report.contradiction_previously_cleared:
-        lines.append("")
-        lines.append(
-            f"  contradiction probe: {report.contradiction_previously_cleared} pair(s) "
-            f"skipped as previously cleared (both claims unchanged since a probe answered "
-            f"no; not counted against audit.max_contradiction_probes)"
-        )
+    if not report.semantic_degraded:
+        for line in _disclosures(report, (_CONTRADICTION_CLEARED,)):
+            lines.extend(("", line))
     lines.extend(render_rung_lines(report))
-    if not report.semantic_degraded and report.update_previously_cleared:
-        lines.append("")
-        lines.append(
-            f"  update sweep: {report.update_previously_cleared} pair(s) skipped as "
-            f"previously cleared (not counted against consolidation.max_update_probes)"
-        )
-    if not report.semantic_degraded and report.update_cap_reached:
-        lines.append("")
-        lines.append(
-            f"  update probe: {report.update_probes_run:,} of "
-            f"{report.update_candidate_pairs:,} pairs probed; cap "
-            f"{report.update_probe_cap:,} reached (consolidation.max_update_probes; "
-            f"pairs are probed by content cosine, highest first, so the "
-            f"{report.update_not_reached:,} not reached rank below every probed pair)"
-        )
+    if not report.semantic_degraded:
+        for line in _disclosures(report, _UPDATE_COUNTERS):
+            lines.extend(("", line))
     if (
         not report.semantic_degraded
         and report.reconcile_probes_run < report.reconcile_candidate_pairs
@@ -4365,38 +4948,7 @@ def render_consolidation_report(report: ConsolidationReport) -> str:
             lines.append(f"  pass skipped: {entry.name} — {entry.detail}")
         elif entry.status == "failed":
             lines.append(f"  pass FAILED: {entry.name} — {entry.detail}")
-    if report.pending_failed:
-        lines.append(
-            f"  {report.pending_failed} snapshot(s) failed to extract; "
-            f"the log names each one and why."
-        )
-    if report.pending_retry:
-        kept = (
-            f" {report.pending_partial} of them kept the chunks that answered, and their "
-            f"retry reads only the rest."
-            if report.pending_partial
-            else ""
-        )
-        lines.append(
-            f"  {report.pending_retry} snapshot(s) left PENDING after failed LLM calls. "
-            f"A later run retries them after the snapshots not yet tried.{kept}"
-        )
-    if report.pending_waiting:
-        lines.append(
-            f"  {report.pending_waiting} snapshot(s) wait on an earlier snapshot of their "
-            f"entry that holds a partial whole read; the log names each one. "
-            f"`particles reindex <entry>` releases a wait by hand."
-        )
-    if report.pending_empty:
-        lines.append(
-            f"  {report.pending_empty} snapshot(s) completed with no beliefs. "
-            f"`particles lint` lists them as EMPTY_COMPLETE_SNAPSHOT."
-        )
-    if report.pending_reset_stale:
-        lines.append(
-            f"  {report.pending_reset_stale} snapshot(s) stranded IN_PROGRESS by an "
-            f"interrupted run were returned to PENDING."
-        )
+    lines.extend(_disclosures(report, _EXTRACT_COUNTERS))
 
     # --- The morning's curation queue (§3.4) --------------------------------
     if report.curation_queue:

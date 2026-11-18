@@ -65,13 +65,10 @@ async def test_default_from_local_config(db_session: object) -> None:
     policy = await load_utility_policy(db_session)  # type: ignore[arg-type]
     assert policy.default is not None
     # The calibrated default: (half_life_uses_days, rank_lift), set there
-    # and re-centred into the intersection of every rendered
-    # head size's band; that intersection was re-measured after the
-    # duplicate merge. It was re-centred again once the
-    # duplicate ceiling was removed entirely: with no upper edge the
-    # log-midpoint rule no longer applies, so 0.015 is chosen for margin above
-    # the N=60 floor of 0.011, bounded by the omega coupling.
-    assert policy.default == (30.0, 0.015)
+    # and re-measured re-measured it on the
+    # gated use signal by the criterion: the band is
+    # [0.038, 0.111] at every rendered head, and 0.065 is its log-midpoint.
+    assert policy.default == (30.0, 0.065)
 
 
 @pytest.mark.asyncio
@@ -86,7 +83,7 @@ async def test_lens_makes_default_more_skeptical_only(db_session: object) -> Non
     await materialise_lens(db_session, lens)  # type: ignore[arg-type]
     await adopt_lens(db_session, "skeptic")  # type: ignore[arg-type]
     policy = await load_utility_policy(db_session)  # type: ignore[arg-type]
-    # min each: half_life min(30,10)=10, rank_lift min(0.015,0.005)=0.005
+    # min each: half_life min(30,10)=10, rank_lift min(0.065,0.005)=0.005
     assert policy.default == (10.0, 0.005)
 
 

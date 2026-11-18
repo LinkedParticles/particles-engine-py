@@ -56,6 +56,11 @@ def test_the_upload_type_sniffers_stay_within_a_small_multiple_of_the_upload(
     data = b"[" + b"{}," * (2 * 1024 * 1024 // 3) + b"{}]"
     path = tmp_path / "wide.json"
     path.write_bytes(data)
+    # One untraced call first: what a first call sets up once (the mimetypes
+    # table, and under coverage the tracer's record of each line run for the
+    # first time) is not memory per input byte, and how much of it lands in
+    # the window depends on which tests ran earlier in the same worker.
+    resolve_upload_source_type(path)
     tracemalloc.start()
     try:
         resolve_upload_source_type(path)

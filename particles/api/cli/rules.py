@@ -32,6 +32,7 @@ from particles.api.cli._output import (
     configure_output,
     narrate,
 )
+from particles.config import get_config
 from particles.db import DEFAULT_STORE, session_scope
 
 if TYPE_CHECKING:
@@ -174,12 +175,16 @@ def _print_resolution_notes(resolution: RuleSourceResolution, *, named: bool = F
 
 
 async def _report(store: str) -> None:
+    from particles.api.client import get_backend
     from particles.core.schema import FetchPolicy
     from particles.corpus.rule_sources import resolve_rule_sources
     from particles.corpus.store import get_entry_by_uri, list_snapshots_for_entry
     from particles.extraction.scope import is_scope_exempt_source
 
     if not _enabled_or_report():
+        return
+    if get_backend().remote:
+        _report_remote(store)
         return
 
     resolution = resolve_rule_sources()
@@ -259,7 +264,7 @@ async def _report_refresh_roots(store: str) -> None:
     typer.echo("Recorded refresh roots:" if roots else "No refresh root recorded yet.")
     for root in roots:
         typer.echo(_root_line(root))
-    for line in refused.lines():
+    for line in refused.info_lines() + refused.lines():
         typer.echo(line)
 
 
@@ -351,6 +356,90 @@ async def _restamp(session: Any, files: list[Path]) -> tuple[int, int]:
     return entries, particles
 
 
+def _remote_rule_files(paths: list[str] | None) -> tuple[list[Path], list[Path]]:
+    """``(files, roots)`` a remote sync pushes.
+
+    Named paths are taken as given. Otherwise the project is the working
+    directory's repository resolved to its main checkout, as the SessionEnd push
+    resolves it, so a run from a worktree pushes the main checkout's files and
+    never the worktree's, and ``~/.claude`` contributes the two files directly in it.
+    """
+    from particles.api.cli._claude_code import repository_root
+    from particles.api.cli._rule_push import global_rule_files, session_rule_files, user_claude_dir
+    from particles.corpus.rule_sources import resolve_rule_sources
+
+    if paths or get_config().rule_sources.paths:
+        resolution = resolve_rule_sources(paths)
+        return list(resolution.files), [*resolution.roots, user_claude_dir()]
+    files, roots = session_rule_files(repository_root(Path.cwd()))
+    return sorted(set(files) | set(global_rule_files())), roots
+
+
+async def _sync_remote(
+    paths: list[str] | None, store: str, *, dry_run: bool, restamp_only: bool
+) -> None:
+    from particles.api.cli._remote import remote_refusal_message
+    from particles.api.cli._rule_push import push_rule_files, split_nested
+
+    if restamp_only:
+        # The restamp acts on extracted particles, which have no route.
+        typer.echo(remote_refusal_message("rules sync --restamp-only"), err=True)
+        raise typer.Exit(1)
+    files, roots = _remote_rule_files(paths)
+    if not files:
+        typer.echo("No rule sources resolved; nothing to push.")
+        return
+    if dry_run:
+        pushable, nested = split_nested(files)
+        for path in pushable:
+            typer.echo(f"  would push  {path}")
+        for path in nested:
+            narrate(f"  not pushed (below ~/.claude, not directly in it)  {path}")
+        typer.echo(f"\n--dry-run: {len(pushable)} file(s) would be pushed to the engine.")
+        return
+    report = await push_rule_files(
+        files, store=store, roots=roots, filter_text=projected_region_filter()
+    )
+    for path in report.pushed:
+        typer.echo(f"  pushed  {path}")
+    for path in report.skipped_nested:
+        narrate(f"  not pushed (below ~/.claude, not directly in it)  {path}")
+    for path in report.skipped_empty:
+        narrate(f"  skipped (no authored content after the projected-region strip)  {path}")
+    for path, error in report.refused:
+        typer.echo(f"  refused  {path}: {error}", err=True)
+    for path, error in report.failed:
+        narrate(f"  error  {path}: {error}")
+    typer.echo(
+        f"\n{len(files)} rule source(s): {len(report.pushed)} pushed, "
+        f"{len(report.unchanged)} unchanged, {len(report.refused)} refused, "
+        f"{len(report.failed)} failed. The engine extracts them at its next consolidation; "
+        "its scope-exemption restamp is not run from a client."
+    )
+    if report.refused:
+        raise typer.Exit(1)
+
+
+def _report_remote(store: str) -> None:
+    """The bare ``particles rules`` against a remote engine: this client's side only."""
+    from particles.api.cli._rule_push import load_push_record, push_record_key, split_nested
+
+    files, _roots = _remote_rule_files(None)
+    record = load_push_record()
+    base_url = get_config().engine.base_url or ""
+    pushable, nested = split_nested(files)
+    typer.echo(f"Rule sources this client pushes to {base_url} (store {store}):")
+    for path in pushable:
+        state = "pushed" if push_record_key(base_url, store, path) in record else "not pushed yet"
+        typer.echo(f"  {state:<14}  {path}")
+    for path in nested:
+        typer.echo(f"  {'not pushed':<14}  {path} (below ~/.claude, not directly in it)")
+    typer.echo(
+        "\nWhat the store holds for them is the engine's; `particles rules` on the engine's "
+        "host reports it. `particles rules sync` pushes what changed."
+    )
+
+
 async def _sync(paths: list[str] | None, store: str, dry_run: bool, restamp_only: bool) -> None:
     from particles.api.cli._remote import ensure_local
     from particles.corpus.rule_sources import (
@@ -361,6 +450,13 @@ async def _sync(paths: list[str] | None, store: str, dry_run: bool, restamp_only
     from particles.corpus.rule_sources import sync_rule_sources as _sync_rule_sources
 
     if not _enabled_or_report():
+        return
+    from particles.api.client import get_backend
+
+    if get_backend().remote:
+        # The engine never reads this client's files from its own disk, so the
+        # client pushes them.
+        await _sync_remote(paths, store, dry_run=dry_run, restamp_only=restamp_only)
         return
     ensure_local("rules sync")
 
@@ -398,6 +494,8 @@ async def _sync(paths: list[str] | None, store: str, dry_run: bool, restamp_only
         narrate(f"  skipped (no authored content after the projected-region strip)  {path}")
     for path, error in report.failed:
         narrate(f"  error  {path}: {error}")
+    for path, host in report.other_host:
+        narrate(f"  not tracked here  {path}: the path is tracked for host {host}")
 
     if dry_run:
         typer.echo(f"\n--dry-run: {len(report.deposited)} file(s) would be registered.")

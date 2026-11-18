@@ -86,10 +86,21 @@ class BagOfWordsEncoder:
         return out
 
 
+#: The passage confirmation's claim block: ``claim: <text>`` on
+#: its first line, then the source line and the passage.
+_PASSAGE_BLOCK = re.compile(r"\Aclaim: (?P<claim>.*?)\n(?:record|note): ", re.DOTALL)
+
+
 def unfence_claim(text: str) -> str:
-    """A probe's claim text with its data fence, if any, removed."""
+    """A probe's claim text with its data fence, if any, removed.
+
+    A passage-reading block yields its claim alone, so a scripted arm answers
+    the passage confirmation as it answers the claim-text one.
+    """
     match = _CLAIM_FENCE.match(text.strip())
-    return (match["text"] if match else text).strip()
+    inner = (match["text"] if match else text).strip()
+    block = _PASSAGE_BLOCK.match(inner)
+    return block["claim"].strip() if block else inner
 
 
 def source_key(text: str) -> str:

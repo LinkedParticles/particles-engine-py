@@ -27,6 +27,7 @@ from particles.ingest.conflict_plan import (
     ConflictWritePlan,
     plan_conflict_writes,
     plan_retired_hold,
+    source_entry_id,
 )
 from particles.store.event_store import EventRefKind, OperatorEventType
 
@@ -79,7 +80,13 @@ def _records_winner(plan: ConflictWritePlan, retired: Particle, winner: Particle
     event = plan.update_event
     assert event is not None
     assert event.event_type is OperatorEventType.UPDATE_SUPERSESSION
-    assert event.payload == {"retired_id": retired.id, "winner_id": winner.id, "route": "ladder"}
+    assert event.payload == {
+        "retired_id": retired.id,
+        "winner_id": winner.id,
+        "route": "ladder",
+        # The entry the per-entry cap counts and the digest groups by.
+        "winner_entry_id": source_entry_id(winner),
+    }
     assert set(event.refs) == {
         (EventRefKind.PARTICLE, retired.id),
         (EventRefKind.PARTICLE, winner.id),
@@ -193,20 +200,20 @@ class TestExistingWins:
             (ConflictVerdict.UPDATE_SUPERSEDED_BY_EXISTING, StatusReason.SUPERSEDED_BY_UPDATE),
         ],
     )
-    def test_mirror_inserts_active_then_demotes_the_new_row(
+    def test_mirror_inserts_the_new_row_born_demoted(
         self, verdict: ConflictVerdict, reason: StatusReason
     ) -> None:
-        # The insert seam forbids a born-PROVENANCE_STALE row other than the
-        # CONFLICT_PENDING quarantine, so the loser is inserted ACTIVE first.
+        # The loser is born demoted under its verdict: no ACTIVE
+        # insert and no demotion of the row just inserted.
         plan = _plan(verdict)
-        assert plan.insert is NEW
-        assert plan.insert.status is Status.ACTIVE
-        assert plan.demote == (NEW.id, reason)
+        assert plan.insert is not None
+        assert plan.insert.id == NEW.id
+        assert plan.insert.status is Status.PROVENANCE_STALE
+        assert plan.insert.status_reason is reason
+        assert plan.born_demoted_by is verdict
+        assert plan.demote is None
         assert not plan.cache_add_new and not plan.cache_drop_existing
-        assert plan.result is not None
-        assert plan.result.id == NEW.id
-        assert plan.result.status is Status.PROVENANCE_STALE
-        assert plan.result.status_reason is reason
+        assert plan.result is plan.insert
         assert plan.result.supersedes is None
         _no_side_writes(plan)
 
@@ -339,7 +346,13 @@ class TestDecidedBy:
             _outcome_decided_by(ConflictVerdict.UPDATE_SUPERSEDES, probe=False, reading=None)
             == update_decided_by()
         )
-        assert update_decided_by().startswith("update_slot_second@")
+        # A sourced route rests on the passage reading, the assertion door on
+        # the claim-text one.
+        assert update_decided_by().startswith("update_slot_passage@")
+        assert update_decided_by(sourced=False).startswith("update_slot_second@")
+        assert _outcome_decided_by(
+            ConflictVerdict.UPDATE_SUPERSEDES, probe=False, reading=None, sourced=False
+        ) == update_decided_by(sourced=False)
         assert _outcome_decided_by(ConflictVerdict.CORROBORATES, probe=False, reading=None) is None
 
     @pytest.mark.asyncio
@@ -410,11 +423,29 @@ class TestDecidedBy:
             same_slot_update=True,
         )
         assert outcome.verdict is ConflictVerdict.UPDATE_SUPERSEDES
-        stamped = _outcome_decided_by(outcome.verdict, probe=False, reading=None)
-        assert stamped == str(reading.decided_by) == update_decided_by()
+        stamped = _outcome_decided_by(outcome.verdict, probe=False, reading=None, sourced=False)
+        assert stamped == str(reading.decided_by) == update_decided_by(sourced=False)
         # The probe-confirmed path names the same rung: the probe is not what retired.
-        assert _outcome_decided_by(ConflictVerdict.UPDATE_SUPERSEDES, probe=True, reading=None) == (
-            stamped
+        assert _outcome_decided_by(
+            ConflictVerdict.UPDATE_SUPERSEDES, probe=True, reading=None, sourced=False
+        ) == (stamped)
+        # A sourced pair is confirmed on its passages, and names that rung.
+        from particles.ingest.second_reading import ClaimContext
+
+        def ctx(content: str) -> ClaimContext:
+            return ClaimContext(content=content, source="s", date="2026-01-01", passage=content)
+
+        with (
+            patch.object(pipeline, "_llm_call", changes),
+            patch.object(pipeline, "llm_circuit_open", lambda: False),
+        ):
+            sourced = await read_update_slot(
+                EXISTING.content, NEW.content, contexts=(ctx(EXISTING.content), ctx(NEW.content))
+            )
+        assert (
+            str(sourced.decided_by)
+            == update_decided_by()
+            == _outcome_decided_by(outcome.verdict, probe=False, reading=None)
         )
 
 
@@ -449,7 +480,9 @@ class TestRetirementEvents:
         plan = _plan(verdict)
         event = plan.retirement_event
         assert event is not None and event.event_type is event_type
-        assert plan.demote is not None and plan.demote[0] == retired.id
+        demoted = plan.demote[0] if plan.demote is not None else None
+        born_demoted = plan.insert.id if plan.born_demoted_by is not None else None
+        assert retired.id in (demoted, born_demoted)
         assert event.payload["retired_id"] == retired.id
         assert event.payload["winner_id"] == winner.id
         assert event.payload["route"] == "ladder"

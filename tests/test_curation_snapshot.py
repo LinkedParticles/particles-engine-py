@@ -848,3 +848,85 @@ class TestRefreshKeepsCensusContradictions:
 
         served = await build_curation_queue(db_session)
         assert served.kind_as_of[CardKind.CONTRADICTION.value] == built
+
+
+# --------------------------------------------------------------------------- #
+# the withheld duplicate pairs, counted and carried                #
+# --------------------------------------------------------------------------- #
+
+
+async def _seed_duplicate(session: AsyncSession, a: str, b: str) -> None:
+    """Two near-identical embeddings under one Subject: a duplicate candidate pair."""
+    import numpy as np
+
+    subject = await _subject(session)
+    vec_a = [0.6, 0.8] + [0.0] * 382
+    vec_b = [0.61, 0.79] + [0.0] * 382
+    for content, vec in ((a, vec_a), (b, vec_b)):
+        particle = _active(content, subject_ids=[subject], valid_until=None)
+        await insert_particle(
+            session, particle, embedding=np.asarray(vec, dtype=np.float32).tolist()
+        )
+    await session.flush()
+
+
+class TestWithheldPairs:
+    @pytest.mark.asyncio
+    async def test_a_crossed_pair_is_withheld_and_counted(self, db_session: AsyncSession) -> None:
+        from particles.operations.curation.collect import collect_cards
+
+        await _seed_duplicate(db_session, "PR #284 was opened.", "PR #288 was opened.")
+        await _seed_duplicate(db_session, "Acme acquired Widget.", "Acme Corp bought Widget.")
+        withheld: dict[str, int | None] = {}
+        cards = await collect_cards(db_session, semantic=False, withheld=withheld)
+
+        groups = [c for c in cards if c.kind is CardKind.DUPLICATE_GROUP]
+        assert len(groups) == 1
+        assert withheld == {"identifier_cross@1": 1}
+
+    @pytest.mark.asyncio
+    async def test_switched_off_every_pair_is_carried_and_the_count_is_null(
+        self, db_session: AsyncSession
+    ) -> None:
+        from particles.operations.curation.collect import collect_cards
+
+        get_config().curation.identifier_cross.enabled = False
+        await _seed_duplicate(db_session, "PR #284 was opened.", "PR #288 was opened.")
+        withheld: dict[str, int | None] = {}
+        cards = await collect_cards(db_session, semantic=False, withheld=withheld)
+
+        assert [c.kind for c in cards].count(CardKind.DUPLICATE_GROUP) == 1
+        assert withheld == {"identifier_cross@1": None}
+
+    @pytest.mark.asyncio
+    async def test_the_count_rides_the_snapshot_to_the_queue(
+        self, db_session: AsyncSession
+    ) -> None:
+        await _seed_duplicate(db_session, "PR #284 was opened.", "PR #288 was opened.")
+        await collect_and_persist(db_session, semantic=False)
+        await db_session.flush()
+
+        served = await build_curation_queue(db_session, semantic=False)
+        assert served.source == "snapshot"
+        assert served.withheld == {"identifier_cross@1": 1}
+
+    @pytest.mark.asyncio
+    async def test_a_supplied_collection_persists_the_counts_handed_with_it(
+        self, db_session: AsyncSession
+    ) -> None:
+        await collect_and_persist(
+            db_session, semantic=False, cards=[], withheld={"identifier_cross@1": 7}
+        )
+        await db_session.flush()
+        served = await build_curation_queue(db_session, semantic=False)
+        assert served.withheld == {"identifier_cross@1": 7}
+
+    def test_a_blob_without_the_count_reads_as_none(self) -> None:
+        import json
+
+        from particles.operations.curation.snapshot import _decode
+
+        blob = json.dumps({"format": 4, "cards": [], "first_seen": {}, "kind_as_of": {}})
+        assert _decode(blob)[3] == {}
+        bad = json.dumps({"format": 5, "cards": [], "withheld": {"a@1": -1, "b@1": True, "c@1": 2}})
+        assert _decode(bad)[3] == {"c@1": 2}

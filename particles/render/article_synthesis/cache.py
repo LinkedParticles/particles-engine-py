@@ -38,6 +38,7 @@ from typing import Any
 
 import yaml
 
+from particles.config import get_config
 from particles.core import bounded_yaml
 from particles.core.schema import Particle, Subject
 from particles.render.escape import synthesized_prose
@@ -103,7 +104,9 @@ def compute_input_hash(
     and operations that don't render per-subject articles).
 
     ``_PROMPT_VERSION`` is mixed in so a synthesis-prompt edit
-    invalidates every cached article on next run.
+    invalidates every cached article on next run, and so is the digest of
+    the operator's ``wiki.prompt_template`` when one is set: the
+    same particles under another prompt are another article.
     """
     hasher = hashlib.sha256()
     raw_triples = [(p.id, p.status.value, round(p.confidence.value, 4)) for p in particles]
@@ -140,6 +143,12 @@ def compute_input_hash(
             hasher.update(b"\x00")
     hasher.update(b"prompt_version=")
     hasher.update(_PROMPT_VERSION.encode())
+    # an operator's own first-attempt prompt is an input too. Mixed in
+    # only when set, so a store with no template keeps every cached article.
+    template = get_config().wiki.prompt_template
+    if template is not None:
+        hasher.update(b"\x00prompt_template=")
+        hasher.update(hashlib.sha256(template.encode()).hexdigest().encode())
     return hasher.hexdigest()
 
 

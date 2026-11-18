@@ -2120,6 +2120,41 @@ async def test_an_admitted_rung_writes_no_ledger_row_and_a_shadow_rung_does(
     }
 
 
+def test_a_shadow_rung_that_reads_more_than_the_texts_writes_no_row() -> None:
+    """a row is keyed on the two texts, which such a rung's verdict is not."""
+    from particles.core.ladders import ClaimPair
+    from particles.core.rung_ladder import (
+        ContradictionVerdict,
+        CostClass,
+        Ladder,
+        QuestionKind,
+        Rung,
+    )
+    from particles.operations.lint.contradictions import _PairRungs
+
+    def always_no(pair: ClaimPair) -> ContradictionVerdict:
+        return ContradictionVerdict.NO
+
+    per_record = Rung(
+        name="per_record",
+        version="1",
+        cost=CostClass.PURE,
+        decide=always_no,
+        shadow=True,
+        content_keyed=False,
+    )
+    rungs = _PairRungs(
+        Ladder(
+            kind=QuestionKind.CONTRADICTION,
+            abstain=ContradictionVerdict.ABSTAIN,
+            rungs=(per_record,),
+        )
+    )
+    assert rungs(_make_particle("Main is at 1.2."), _make_particle("Main is at 1.3.")) is False
+    assert rungs.counts[per_record.stamp] == {"no": 1}
+    assert rungs.rows == {}
+
+
 @pytest.mark.asyncio
 async def test_a_non_truth_apt_pair_is_answered_by_the_adjudicability_rung(
     db_session: object,
@@ -2136,6 +2171,56 @@ async def test_a_non_truth_apt_pair_is_answered_by_the_adjudicability_rung(
     for p in (apt, opinion):
         await insert_particle(session, p, embedding=_EMB_HI_A)  # type: ignore[arg-type]
     await session.commit()  # type: ignore[union-attr]
+    probe = AsyncMock(return_value=None)
+    control = ContradictionProbeControl()
+    with patch("particles.operations.lint.contradictions._llm_check_contradiction", probe):
+        await _check_contradictions(session, fix=False, control=control)  # type: ignore[arg-type]
+    probe.assert_not_awaited()
+    assert control.ladder.decided == {"adjudicability@1": 1}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["current", "stale"])
+async def test_a_stale_modality_stamp_changes_no_adjudicability_decision(
+    db_session: object, state: str
+) -> None:
+    """The rung reads the stored modality whatever its stamp.
+
+    A stamp reader that made the rung abstain on the stale store would send
+    this pair to the probe.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    from sqlalchemy import update
+
+    from particles.core.modality import StampState
+    from particles.extraction.modality import current_modality_classifiers
+    from particles.operations.lint import ContradictionProbeControl, _check_contradictions
+    from particles.operations.modality import particle_stamp
+    from particles.store.particle_store import ParticleRow
+
+    session = db_session  # type: ignore[assignment]
+    apt = _make_particle("The office opens at nine.")
+    opinion = _make_particle("The office is a lovely place.").model_copy(
+        update={"assertion_modality": AssertionModality.EVALUATIVE}
+    )
+    for p in (apt, opinion):
+        await insert_particle(session, p, embedding=_EMB_HI_A)  # type: ignore[arg-type]
+    current = sorted(c for c in current_modality_classifiers() if c.startswith("prompt.modality@"))
+    classifier = current[0] if state == "current" else "prompt.modality@0000000000000000"
+    await session.execute(  # type: ignore[union-attr]
+        update(ParticleRow)
+        .where(ParticleRow.id == opinion.id)
+        .values(
+            modality_classifier=classifier,
+            modality_classifier_model="test-model",
+            modality_classified_at=datetime.now(UTC),
+        )
+    )
+    await session.commit()  # type: ignore[union-attr]
+    resolved = await particle_stamp(session, opinion.id)  # type: ignore[arg-type]
+    assert resolved is not None and resolved[1] is StampState(state)
+
     probe = AsyncMock(return_value=None)
     control = ContradictionProbeControl()
     with patch("particles.operations.lint.contradictions._llm_check_contradiction", probe):

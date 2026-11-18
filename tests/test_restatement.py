@@ -26,6 +26,7 @@ import pytest
 
 from particles.config import get_config
 from particles.core.conflict_resolution import SlotVerdict
+from particles.core.ladders import RESTATEMENT_KEY, restatement_ladder
 from particles.core.rung_ladder import DuplicateVerdict
 from particles.core.schema import (
     Confidence,
@@ -36,6 +37,8 @@ from particles.core.schema import (
 )
 from particles.core.status import Status, StatusReason
 from particles.extraction.general import CandidateParticle, ExtractionResult
+from particles.ingest.duplicate_judge import duplicate_judge_stamp
+from particles.ingest.ladder_shell import rung_tally
 from particles.ingest.pipeline import SnapshotOutcome
 from particles.ingest.restatement import (
     RESTATED,
@@ -193,6 +196,12 @@ class TestDecideCarry:
         assert got is Carry.NO
 
 
+def test_the_ladder_judge_is_the_judge_that_stamps_its_verdicts() -> None:
+    """The restatement ladder's model rung and the judge's ledger rows carry one stamp."""
+    ladder = restatement_ladder(duplicate_judge_stamp().version)
+    assert ladder.rung("duplicate_judge").stamp == duplicate_judge_stamp()
+
+
 def test_notes_disclose_every_outcome() -> None:
     outcome = RestatementOutcome(shadow=2, unasked=3)
     notes = restatement_notes(outcome, carried=1, lineage_written=0)
@@ -280,6 +289,26 @@ class TestMatch:
         outcome, _, _, _ = await self._run(db_session, judge)
         assert outcome.unasked == 1 and outcome.judged == 0
         judge.assert_not_awaited()
+
+    async def test_each_answered_pair_settles_on_the_restatement_ladder(
+        self, db_session: Any
+    ) -> None:
+        """The key decides one pair and the judge the other, both on the tally."""
+        x, y = _claim(PODCAST), _claim(WEEKLY)
+        with rung_tally() as tally:
+            outcome = await match_restatements(
+                db_session,
+                [_cand(PODCAST, _vec(1, 0)), _cand(PODCAST_REWORDED, _vec(0, 1))],
+                [(x, _vec(1, 0)), (y, _vec(0, 1))],
+                judge_call=_judge_reply("DISTINCT"),
+                read_slot=_slot(_QUIET),
+                probe_contradiction=AsyncMock(return_value=False),
+            )
+        assert outcome.carried == {0: x} and outcome.judged == 1
+        assert tally.payload()["duplicate"]["settled"] == {
+            str(RESTATEMENT_KEY.stamp): {"same": 1},
+            str(duplicate_judge_stamp()): {"different": 1},
+        }
 
     async def test_off_matches_nothing(
         self, db_session: Any, monkeypatch: pytest.MonkeyPatch
@@ -382,7 +411,7 @@ def scripted() -> Generator[dict[str, Any], None, None]:
     async def judge(prompt: str, *, max_tokens: int, system: str | None = None) -> str:
         return json.dumps({"p0": script["judge"]})
 
-    async def slot(earlier: str, later: str) -> UpdateGuard:
+    async def slot(earlier: str, later: str, contexts: Any = None) -> UpdateGuard:
         guard: UpdateGuard = script["guard"]
         return guard
 

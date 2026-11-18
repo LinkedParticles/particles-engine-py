@@ -82,7 +82,7 @@ def _stub_sweep_slot(monkeypatch: pytest.MonkeyPatch, reconcile_mod: Any, probe:
     """
     from particles.ingest.pipeline import SlotReading
 
-    async def read(earlier: str, later: str) -> SlotReading:
+    async def read(earlier: str, later: str, contexts: Any = None) -> SlotReading:
         return SlotReading(await probe(earlier, later), "semantic_lint")
 
     monkeypatch.setattr(reconcile_mod, "_read_update_slot", read)
@@ -241,6 +241,9 @@ class TestSubjectIndex:
 # ---------------------------------------------------------------------------
 
 
+PROJECT = "project:-Users-o-src-app"
+
+
 def _entry(
     *,
     uri: str = "claude-code://session/a",
@@ -258,7 +261,8 @@ def _entry(
         snapshots=[snap],
         contributors=contributors,
         deposited_by=deposited_by,
-        tags=tags or [],
+        # One project by default: a harness lineage is keyed on it.
+        tags=[PROJECT] if tags is None else tags,
     )
     return entry, snap.snapshot_id
 
@@ -331,11 +335,12 @@ class TestRuleFileLineage:
         path: str, tags: list[str], day: int = 0, deposited_by: str = "claude-code-hook"
     ) -> tuple[CorpusEntry, str]:
         # The SessionEnd harvest's depositor id, which the lineage guard reads.
+        # Every entry here is in the one project, so only the guard under test decides.
         return _entry(
             uri=f"file://{path}",
             source_type="LOCAL_MARKDOWN",
             published=T0 + timedelta(days=day),
-            tags=tags,
+            tags=[*tags, PROJECT],
             deposited_by=deposited_by,
         )
 
@@ -412,11 +417,182 @@ class TestLocalMarkdownLineage:
         )
         assert update_order(_p(), new, ns, _p(), old, os_) == 1
 
-    def test_an_authority_still_keys_the_lineage(self) -> None:
-        """Entries with a URL authority are unaffected (two sessions, one harness)."""
+    def test_sessions_keep_their_project_lineage_without_a_publisher(self) -> None:
+        """Same-harness sessions retain same-project update ordering."""
         old, os_ = _entry(uri="claude-code://session/a")
         new, ns = _entry(uri="claude-code://session/b", published=T0 + timedelta(days=1))
         assert update_order(_p(), new, ns, _p(), old, os_) == 1
+
+
+class TestProjectLineage:
+    """a lineage that rests on no principal is keyed on its project."""
+
+    _md = staticmethod(TestRuleFileLineage._md)
+    LATER = T0 + timedelta(days=1)
+
+    def test_a_session_in_another_project_never_orders_against_this_one(self) -> None:
+        mine, ms = _entry(uri="claude-code://session/a")
+        hostile, hs = _entry(
+            uri="claude-code://session/b", published=self.LATER, tags=["project:-tmp-clone"]
+        )
+        assert update_order(_p(), hostile, hs, _p(), mine, ms) is None
+        assert update_order(_p(), mine, ms, _p(), hostile, hs) is None
+
+    def test_an_unattributed_session_is_one_lineage_with_no_other_entry(self) -> None:
+        mine, ms = _entry(uri="claude-code://session/a")
+        keyless, ks = _entry(uri="claude-code://session/b", published=self.LATER, tags=[])
+        assert update_order(_p(), keyless, ks, _p(), mine, ms) is None
+        other, os_ = _entry(uri="claude-code://session/c", tags=[])
+        assert update_order(_p(), keyless, ks, _p(), other, os_) is None
+
+    def test_an_unattributed_session_still_updates_its_own_earlier_snapshot(self) -> None:
+        entry, first = _entry(uri="claude-code://session/a", tags=[])
+        later = Snapshot(content_hash="1" * 64, content_published_at=self.LATER)
+        entry.snapshots.append(later)
+        assert update_order(_p(), entry, later.snapshot_id, _p(), entry, first) == 1
+
+    def test_one_shared_project_among_several_is_enough(self) -> None:
+        mine, ms = _entry(uri="claude-code://session/a", tags=[PROJECT, "project:-other"])
+        theirs, ts = _entry(uri="claude-code://session/b", published=self.LATER)
+        assert update_order(_p(), theirs, ts, _p(), mine, ms) == 1
+
+    def test_owner_harvests_in_two_projects_are_two_lineages(self) -> None:
+        mine, ms = _entry(
+            uri="file:///m/a.md",
+            source_type="LOCAL_MARKDOWN",
+            tags=["claude-code", "memory-file", PROJECT],
+            deposited_by="claude-code-hook",
+        )
+        theirs, ts = _entry(
+            uri="file:///m/b.md",
+            source_type="LOCAL_MARKDOWN",
+            published=self.LATER,
+            tags=["claude-code", "memory-file", "project:-other"],
+            deposited_by="claude-code-hook",
+        )
+        assert update_order(_p(), theirs, ts, _p(), mine, ms) is None
+
+    def test_a_recorded_author_is_left_alone(self) -> None:
+        """Two authored local entries keep their principal, with or without a key."""
+        old, os_ = _entry(uri="file:///a.md", source_type="LOCAL_MARKDOWN", author="u:o", tags=[])
+        new, ns = _entry(
+            uri="file:///b.md",
+            source_type="LOCAL_MARKDOWN",
+            author="u:o",
+            published=self.LATER,
+            tags=["project:-elsewhere"],
+        )
+        assert update_order(_p(), new, ns, _p(), old, os_) == 1
+
+    def test_a_web_authority_is_left_alone(self) -> None:
+        old, os_ = _entry(uri="https://example.org/a", source_type="WEB_PAGE", tags=[])
+        new, ns = _entry(
+            uri="https://example.org/b", source_type="WEB_PAGE", published=self.LATER, tags=[]
+        )
+        assert update_order(_p(), new, ns, _p(), old, os_) == 1
+
+
+class TestHarvestPrincipal:
+    """and §3: in ``multi`` an owner harvest is the operator's lineage."""
+
+    LATER = T0 + timedelta(days=1)
+    HARVEST_TAGS = ["claude-code", "memory-file", PROJECT]
+
+    def _memory(
+        self, name: str, *, later: bool = False, by: str = "claude-code-hook", **kw: Any
+    ) -> tuple[CorpusEntry, str]:
+        return _entry(
+            uri=f"file:///Users/o/.claude/projects/-Users-o-src-app/memory/{name}.md",
+            source_type="LOCAL_MARKDOWN",
+            published=self.LATER if later else T0,
+            deposited_by=by,
+            **({"tags": self.HARVEST_TAGS} | kw),
+        )
+
+    def _session(
+        self, name: str, *, later: bool = False, by: str = "claude-code-hook", **kw: Any
+    ) -> tuple[CorpusEntry, str]:
+        return _entry(
+            uri=f"claude-code://session/{name}",
+            published=self.LATER if later else T0,
+            deposited_by=by,
+            **({"tags": ["claude-code", PROJECT]} | kw),
+        )
+
+    @staticmethod
+    def _multi(new: tuple[CorpusEntry, str], old: tuple[CorpusEntry, str]) -> int | None:
+        (ne, ns), (oe, os_) = new, old
+        return update_order(_p(), ne, ns, _p(), oe, os_, require_attribution=True)
+
+    def test_two_memory_files_update_in_multi(self) -> None:
+        assert self._multi(self._memory("b", later=True), self._memory("a")) == 1
+        assert self._multi(self._memory("a"), self._memory("b", later=True)) == -1
+
+    def test_two_harvested_sessions_update_in_multi(self) -> None:
+        assert self._multi(self._session("b", later=True), self._session("a")) == 1
+
+    def test_the_audit_and_the_hook_are_one_principal(self) -> None:
+        assert self._multi(self._memory("b", later=True), self._memory("a", by="audit")) == 1
+        assert self._multi(self._memory("b", later=True, by="audit"), self._memory("a")) == 1
+
+    def test_harvests_in_two_projects_stay_two_lineages(self) -> None:
+        """still applies to a harvest principal."""
+        other = self._memory("b", later=True, tags=["claude-code", "memory-file", "project:-other"])
+        assert self._multi(other, self._memory("a")) is None
+
+    def test_a_harvest_never_pairs_with_an_agent_deposit(self) -> None:
+        agent = _entry(
+            uri="claude-code://session/agent",
+            published=self.LATER,
+            author="agent:laptop-mcp",
+            deposited_by="agent:laptop-mcp",
+            tags=["claude-code", PROJECT],
+        )
+        assert self._multi(agent, self._session("a")) is None
+        assert self._multi(self._session("b", later=True), agent) is None
+
+    def test_an_unauthored_agent_session_is_not_the_operators_lineage(self) -> None:
+        """Decided by the attribution clause itself: one side is no owner harvest."""
+        agent = _entry(
+            uri="claude-code://session/agent",
+            published=self.LATER,
+            deposited_by="agent:laptop-mcp",
+            tags=["claude-code", PROJECT],
+        )
+        (ae, as_), (he, hs) = agent, self._session("a")
+        assert update_order(_p(), ae, as_, _p(), he, hs) == 1  # single: one principal
+        assert self._multi(agent, self._session("a")) is None
+
+    def test_a_harvest_never_pairs_with_a_vault_note(self) -> None:
+        note = self._memory("note", later=True, by="operator")
+        assert self._multi(note, self._memory("a")) is None
+        assert self._multi(self._memory("b", later=True), note) is None
+
+    def test_harvest_tags_without_a_harvester_depositor_name_no_principal(self) -> None:
+        forged = self._memory("b", later=True, by="web-clipper")
+        assert self._multi(forged, self._memory("a")) is None
+
+    def test_backfilled_sessions_stay_unattributed(self) -> None:
+        """The owner's ruling of 2026-11-08: ``adr0190-backfill`` is no harvester."""
+        backfill = self._session("old", by="adr0190-backfill")
+        assert self._multi(self._memory("b", later=True), backfill) is None
+        newer = self._session("new", later=True, by="adr0190-backfill")
+        assert self._multi(newer, backfill) is None
+
+    def test_codex_sessions_stay_unattributed(self) -> None:
+        """A harvest principal for Codex waits."""
+        old = _entry(uri="codex://session/a", deposited_by="codex-hook", tags=["codex", PROJECT])
+        new = _entry(
+            uri="codex://session/b",
+            published=self.LATER,
+            deposited_by="codex-hook",
+            tags=["codex", PROJECT],
+        )
+        assert self._multi(new, old) is None
+
+    def test_single_is_unchanged(self) -> None:
+        (ne, ns), (oe, os_) = self._memory("b", later=True), self._memory("a")
+        assert update_order(_p(), ne, ns, _p(), oe, os_) == 1
 
 
 class TestAttributionAndAgents:
@@ -546,12 +722,21 @@ async def _contradicts(a: str, b: str) -> bool:
     return bool(ca and cb and ca != cb)
 
 
-async def _updates(earlier: str, later: str) -> SlotVerdict:
+async def _updates(earlier: str, later: str, contexts: Any = None) -> SlotVerdict:
     """Scripted update probe: a home city is one slot that changes; the scripted pairs as listed."""
     scripted = _SCRIPTED.get(frozenset((earlier, later)))
     if scripted is not None:
         return scripted
     return SlotVerdict.CHANGES if await _contradicts(earlier, later) else SlotVerdict.DIFFERENT
+
+
+def _asked_on_passages(probe: AsyncMock, earlier: str, later: str) -> None:
+    """The update probe was asked once, earlier first, with both claims' passages."""
+    probe.assert_awaited_once()
+    assert probe.await_args.args == (earlier, later)
+    contexts = probe.await_args.kwargs["contexts"]
+    assert [c.content for c in contexts] == [earlier, later]
+    assert all(c.passage for c in contexts)
 
 
 @pytest.fixture
@@ -584,6 +769,8 @@ async def _say(
     uri: str | None = None,
     source_type: str = SourceType.CONVERSATION,
     author: str | None = None,
+    tags: list[str] | None = None,
+    deposited_by: str = "operator",
 ) -> list[Particle]:
     from particles.corpus.deposit import deposit_text_versioned
     from particles.ingest.pipeline import extract_snapshot
@@ -597,10 +784,14 @@ async def _say(
         source_type=source_type,
         mutability=Mutability.STABLE,
         content_published_at=T0 + timedelta(days=day),
+        # Every session in one project, as the harness stamps it.
+        tags=[PROJECT] if tags is None else tags,
+        deposited_by=deposited_by,
     )
     if author is not None:
-        # No deposit path stamps attribution yet (leaves that to the
-        # multi-user MVP), so the test writes it where a harvester would.
+        # No deposit path stamps a snapshot author for a harvest (
+        # a harvest's principal is read from its depositor), so the test writes
+        # the author directly.
         from particles.corpus.store import SnapshotRow
 
         row = await session.get(SnapshotRow, snapshot_id)
@@ -655,6 +846,13 @@ class TestPipeline:
         assert late_arrival.status_reason is StatusReason.SUPERSEDED_BY_UPDATE
         [current] = await _by_content(db_session, DENVER)
         assert current.status is Status.ACTIVE
+        # Born demoted: never held, so it has no retirement instant.
+        from particles.store.particle_store import ParticleRow
+
+        row = await db_session.get(ParticleRow, late_arrival.id)
+        assert row is not None
+        assert row.born_retired is True
+        assert row.retired_at is None
 
     async def test_multi_store_without_attribution_leaves_both_active(
         self, db_session: Any, bow: None, monkeypatch: pytest.MonkeyPatch
@@ -687,6 +885,43 @@ class TestPipeline:
         assert new.status is Status.ACTIVE
         [old] = await _by_content(db_session, BOSTON)
         assert old.status_reason is StatusReason.SUPERSEDED_BY_UPDATE
+
+    async def test_multi_store_updates_across_the_owners_memory_files(
+        self, db_session: Any, bow: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """two owner harvests are the operator's lineage in ``multi``."""
+        from particles.config import get_config
+
+        monkeypatch.setattr(get_config().reconciliation, "store_mode", "multi")
+        ex = _OneClaim()
+        memory = "file:///Users/o/.claude/projects/-Users-o-src-app/memory"
+        harvest: dict[str, Any] = {
+            "source_type": SourceType.LOCAL_MARKDOWN,
+            "tags": ["claude-code", "memory-file", PROJECT],
+            "deposited_by": "claude-code-hook",
+        }
+        await _say(db_session, ex, BOSTON, day=1, uri=f"{memory}/a.md", **harvest)
+        [new] = await _say(db_session, ex, DENVER, day=9, uri=f"{memory}/b.md", **harvest)
+        assert new.status is Status.ACTIVE
+        [old] = await _by_content(db_session, BOSTON)
+        assert old.status_reason is StatusReason.SUPERSEDED_BY_UPDATE
+
+    async def test_multi_store_leaves_a_non_harvest_beside_a_harvest(
+        self, db_session: Any, bow: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two sessions the harness rule joins, one not harvested: refused in ``multi`` only."""
+        from particles.config import get_config
+
+        monkeypatch.setattr(get_config().reconciliation, "store_mode", "multi")
+        ex = _OneClaim()
+        tags = ["claude-code", PROJECT]
+        await _say(db_session, ex, BOSTON, day=1, tags=tags, deposited_by="adr0190-backfill")
+        written = await _say(
+            db_session, ex, DENVER, day=9, tags=tags, deposited_by="claude-code-hook"
+        )
+        assert [p.status for p in written] == [Status.ACTIVE]
+        [old] = await _by_content(db_session, BOSTON)
+        assert old.status is Status.ACTIVE
 
     async def test_a_revert_re_mints_instead_of_being_held(
         self, db_session: Any, bow: None
@@ -771,6 +1006,7 @@ class TestPipeline:
             "winner_id": new.id,
             "route": "ladder",
             "decided_by": update_decided_by(),
+            "winner_entry_id": new.provenance[0].corpus_entry_id,
         }
 
 
@@ -821,7 +1057,7 @@ class TestSlotRule:
         assert new.status is Status.ACTIVE and new.supersedes is None
         # The pair was asked, earlier claim first, and nothing went to review:
         # a cross-entry pair in different slots leaves the store as it was.
-        bow.assert_awaited_once_with(FAVOURITE, NOT_YET)
+        _asked_on_passages(bow, FAVOURITE, NOT_YET)
         assert await get_particles_by_status(db_session, Status.INCONSISTENCY) == []
 
     @pytest.mark.parametrize(("old", "new"), SAME_SLOT_UPDATES)
@@ -834,7 +1070,7 @@ class TestSlotRule:
         [stale] = await _by_content(db_session, old)
         assert stale.status_reason is StatusReason.SUPERSEDED_BY_UPDATE
         assert written.status is Status.ACTIVE and written.supersedes == stale.id
-        bow.assert_awaited_once_with(old, new)
+        _asked_on_passages(bow, old, new)
 
     async def test_an_out_of_order_claim_is_asked_in_date_order(
         self, db_session: Any, bow: AsyncMock
@@ -843,7 +1079,7 @@ class TestSlotRule:
         await _say(db_session, ex, DENVER, day=9)
         [late_arrival] = await _say(db_session, ex, BOSTON, day=1)
         assert late_arrival.status_reason is StatusReason.SUPERSEDED_BY_UPDATE
-        bow.assert_awaited_once_with(BOSTON, DENVER)
+        _asked_on_passages(bow, BOSTON, DENVER)
 
     async def test_an_incomplete_update_probe_retires_nothing(
         self, db_session: Any, bow: AsyncMock
@@ -919,6 +1155,7 @@ class TestSlotRule:
         assert favourite.status is Status.ACTIVE
         # The assertion path fails closed: the pair goes to review.
         assert written.status is Status.INCONSISTENCY
+        # The assertion door has no source passage.
         bow.assert_awaited_once_with(FAVOURITE, NOT_YET)
 
 
@@ -961,7 +1198,7 @@ class TestFixedSlotRule:
             r.corpus_entry_id for r in record.provenance if r.type is ProvenanceRefType.PARTICLE
         ]
         assert named[:2] == [earlier.id, later.id]
-        bow.assert_awaited_once_with(KAWAI_EARLIER, KAWAI_LATER)
+        _asked_on_passages(bow, KAWAI_EARLIER, KAWAI_LATER)
 
     async def test_the_agent_path_never_retires_its_own_fixed_fact(
         self, db_session: Any, bow: AsyncMock
@@ -1196,11 +1433,19 @@ class TestSlotVerdictParser:
             == "ab53e6673bfb5981"
         )
         # The ledger's hash also names the reading protocol: a
-        # verdict settled by two readings is never confused with one.
-        from particles.ingest.pipeline import UPDATE_SLOT_PROTOCOL
+        # verdict settled by two readings is never confused with one, and one
+        # confirmed on the passages never with one confirmed on the claim
+        # texts.
+        from particles.ingest.pipeline import UPDATE_SLOT_PROTOCOL, _update_passage_prompt
+        from particles.ingest.second_reading import ClaimContext
 
+        template = ClaimContext(
+            content="{claim}", source="{source}", date="{date}", passage="{passage}"
+        )
         assert update_prompt_hash() == prompt_hash(
-            *_update_prompt("{earlier}", "{later}", nonce="{nonce}"), UPDATE_SLOT_PROTOCOL
+            *_update_prompt("{earlier}", "{later}", nonce="{nonce}"),
+            *_update_passage_prompt(template, template, nonce="{nonce}"),
+            UPDATE_SLOT_PROTOCOL,
         )
         assert update_prompt_hash() not in (hashed(), "ab53e6673bfb5981")
         assert (
@@ -1484,7 +1729,7 @@ class TestMemoryFileSpeaker:
             mutability=Mutability.MUTABLE,
             content_published_at=dated,
             # What `particles audit` and the SessionEnd harvest stamp.
-            tags=["claude-code", "memory-file"],
+            tags=["claude-code", "memory-file", PROJECT],
             deposited_by="claude-code-hook",
         )
         await session.commit()
@@ -1515,7 +1760,7 @@ class TestMemoryFileSpeaker:
         assert await self._speaker(db_session, mumbai) == "the user"
         assert delhi.status_reason is StatusReason.SUPERSEDED_BY_UPDATE
         assert mumbai.status is Status.ACTIVE and mumbai.supersedes == delhi.id
-        bow.assert_awaited_once_with(DELHI, MUMBAI)
+        _asked_on_passages(bow, DELHI, MUMBAI)
 
     async def test_the_speaker_never_reaches_a_live_authority(
         self, db_session: Any, bow: AsyncMock
@@ -1591,6 +1836,7 @@ class TestSweep:
             "winner_id": new.id,
             "route": "sweep",
             "decided_by": update_decided_by(),
+            "winner_entry_id": new.provenance[0].corpus_entry_id,
         }
 
         second = await reconcile_updates(db_session)
@@ -1826,6 +2072,7 @@ class TestSweepReadsTheNewerClaim:
             "winner_id": lisbon.id,
             "route": "sweep",
             "decided_by": update_decided_by(),
+            "winner_entry_id": lisbon.provenance[0].corpus_entry_id,
         }
 
 
@@ -2023,7 +2270,7 @@ class TestOneUpdateProbe:
 
         seen: list[tuple[str, str]] = []
 
-        async def read(earlier: str, later: str) -> Any:
+        async def read(earlier: str, later: str, contexts: Any = None) -> Any:
             seen.append((earlier, later))
             return pipeline.SlotReading(SlotVerdict.FIXED, "verification")
 
@@ -2039,7 +2286,7 @@ class TestOneUpdateProbe:
 
         seen: list[tuple[str, str]] = []
 
-        async def read(earlier: str, later: str) -> SlotReading:
+        async def read(earlier: str, later: str, contexts: Any = None) -> SlotReading:
             seen.append((earlier, later))
             return SlotReading(SlotVerdict.CHANGES, "verification")
 
@@ -2425,3 +2672,316 @@ class TestSpeakerAttachRecord:
         assert SPEAKER_COMPONENT in tally.available
         assert SPEAKER_COMPONENT not in tally.exercised
         assert result.quality_notes == []
+
+
+@pytest.mark.asyncio
+class TestEntryCap:
+    """one entry wins at most ``max_retirements_per_entry`` updates a day."""
+
+    @staticmethod
+    async def _won(session: Any, entry_id: str, *, hours_ago: float = 0) -> None:
+        from particles.store.event_store import (
+            OperatorEventRow,
+            OperatorEventType,
+            record_event,
+        )
+
+        event = await record_event(
+            session,
+            actor="test",
+            event_type=OperatorEventType.UPDATE_SUPERSESSION,
+            payload={"retired_id": "r", "winner_id": "w", "winner_entry_id": entry_id},
+        )
+        if hours_ago:
+            row = await session.get(OperatorEventRow, event.event_id)
+            row.occurred_at = datetime.now(UTC) - timedelta(hours=hours_ago)
+            await session.flush()
+
+    async def test_the_count_reads_a_rolling_day_of_events(self, db_session: Any) -> None:
+        from particles.ingest.retirement_cap import entry_retirements
+
+        await self._won(db_session, "e1")
+        await self._won(db_session, "e1", hours_ago=23)
+        await self._won(db_session, "e1", hours_ago=25)
+        await self._won(db_session, "e2")
+        assert await entry_retirements(db_session, "e1") == 2
+        assert await entry_retirements(db_session, "e2") == 1
+
+    async def test_admission_stops_at_the_bound_and_counts_the_refusal(
+        self, db_session: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from collections import Counter
+
+        from particles.config import get_config
+        from particles.ingest.retirement_cap import admits_retirement, count_capped
+
+        cfg = get_config().reconciliation.update_supersession
+        monkeypatch.setattr(cfg, "max_retirements_per_entry", 2)
+        await self._won(db_session, "e1")
+        with count_capped() as capped:
+            assert await admits_retirement(db_session, "e1", pair=("a", "b"))
+            pending = Counter({"e1": 1})
+            assert not await admits_retirement(db_session, "e1", pair=("a", "b"), pending=pending)
+            await self._won(db_session, "e1")
+            assert not await admits_retirement(db_session, "e1", pair=("a", "b"))
+            assert not await admits_retirement(db_session, "e1", pair=("c", "d"))
+            assert await admits_retirement(db_session, None, pair=("e", "f"))
+        assert capped.n == 2
+
+    async def test_a_capped_pair_goes_to_rung_3_at_extraction(
+        self, db_session: Any, bow: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.config import get_config
+        from particles.ingest.retirement_cap import count_capped
+
+        cfg = get_config().reconciliation.update_supersession
+        monkeypatch.setattr(cfg, "max_retirements_per_entry", 1)
+        monkeypatch.setattr(get_config().extraction, "verify_conflicts", False)
+        ex = _OneClaim()
+        hostile = "claude-code://session/hostile"
+        await _say(db_session, ex, BOSTON, day=1)
+        [denver] = await _say(db_session, ex, DENVER, day=9, uri=hostile)
+        [boston] = await _by_content(db_session, BOSTON)
+        assert boston.status_reason is StatusReason.SUPERSEDED_BY_UPDATE
+        [event] = await _update_events(db_session)
+        assert event.payload["winner_entry_id"] == denver.provenance[0].corpus_entry_id
+
+        # Without the bound this older claim would be stored retired by Denver;
+        # Denver's entry has spent its one, so the pair is held for review.
+        with count_capped() as capped:
+            [written] = await _say(db_session, ex, "The user's home city is Lisbon.", day=3)
+        assert capped.n == 1
+        assert written.status is Status.INCONSISTENCY
+        [lisbon] = await _by_content(db_session, "The user's home city is Lisbon.")
+        assert lisbon.status_reason is StatusReason.CONFLICT_PENDING
+        [denver] = await _by_content(db_session, DENVER)
+        assert denver.status is Status.ACTIVE
+        assert len(await _update_events(db_session)) == 1
+
+    async def test_the_sweep_leaves_a_capped_pair_unprobed(
+        self, db_session: Any, bow: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.config import get_config
+        from particles.ingest import retirement_cap
+        from particles.operations import reconcile as reconcile_mod
+        from particles.operations.reconcile import reconcile_updates
+
+        cfg = get_config().reconciliation.update_supersession
+        monkeypatch.setattr(cfg, "enabled", False)
+        ex = _OneClaim()
+        await _say(db_session, ex, BOSTON, day=1)
+        await _say(db_session, ex, DENVER, day=9)
+        monkeypatch.setattr(cfg, "enabled", True)
+        monkeypatch.setattr(
+            reconcile_mod, "_has_contradiction_signal", AsyncMock(return_value=True)
+        )
+        slot = AsyncMock(side_effect=_updates)
+        _stub_sweep_slot(monkeypatch, reconcile_mod, slot)
+        monkeypatch.setattr(retirement_cap, "entry_retirements", AsyncMock(return_value=5))
+        for dry_run in (True, False):
+            out = await reconcile_updates(db_session, dry_run=dry_run)
+            assert out["entry_capped"] == 1 and out["demoted"] == 0 and out["probed"] == 0
+        slot.assert_not_awaited()
+        [old] = await _by_content(db_session, BOSTON)
+        assert old.status is Status.ACTIVE
+
+    async def test_a_dry_run_counts_its_own_retirements(
+        self, db_session: Any, bow: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A dry run records no event, so it must count what it would retire."""
+        from particles.config import get_config
+        from particles.operations import reconcile as reconcile_mod
+        from particles.operations.reconcile import reconcile_updates
+
+        cfg = get_config().reconciliation.update_supersession
+        monkeypatch.setattr(cfg, "enabled", False)
+        ex = _OneClaim()
+        hub = "claude-code://session/hub"
+        await _say(db_session, ex, BOSTON, day=1)
+        await _say(db_session, ex, "The user's favourite city is Lisbon.", day=2)
+        await _say(db_session, ex, DENVER, day=9, uri=hub)
+        await _say(db_session, ex, "The user's favourite city is Boston.", day=10, uri=hub)
+        monkeypatch.setattr(cfg, "enabled", True)
+        monkeypatch.setattr(cfg, "max_retirements_per_entry", 1)
+        monkeypatch.setattr(
+            reconcile_mod, "_has_contradiction_signal", AsyncMock(return_value=True)
+        )
+        _stub_sweep_slot(monkeypatch, reconcile_mod, AsyncMock(side_effect=_updates))
+        dry = await reconcile_updates(db_session, dry_run=True)
+        real = await reconcile_updates(db_session)
+        assert dry["demoted"] == real["demoted"] == 1
+        assert dry["entry_capped"] == real["entry_capped"] >= 1
+
+
+@pytest.mark.asyncio
+class TestPassageConfirmation:
+    """the confirmation reads each claim's source passage."""
+
+    @staticmethod
+    def _ctx(content: str, passage: str) -> Any:
+        from particles.ingest.second_reading import ClaimContext
+
+        return ClaimContext(content=content, source="s", date="2026-10-01", passage=passage)
+
+    async def test_a_sourced_pair_is_confirmed_on_its_passages(self) -> None:
+        from particles.ingest import pipeline
+
+        prompts: list[tuple[str, str]] = []
+
+        async def call(prompt: str, **kwargs: Any) -> str:
+            prompts.append((kwargs["system"], prompt))
+            return "REASON: one slot.\nSLOT: CHANGES\nVERDICT: YES"
+
+        newer = self._ctx(DENVER, "## User\n\nwe moved to Denver last month")
+        with (
+            patch.object(pipeline, "_llm_call", side_effect=call),
+            patch.object(pipeline, "llm_circuit_open", lambda: False),
+        ):
+            reading = await pipeline.read_update_slot(
+                BOSTON, DENVER, contexts=(self._ctx(BOSTON, "I live in Boston."), newer)
+            )
+        assert reading.verdict is SlotVerdict.CHANGES and reading.purpose == "verification"
+        assert str(reading.decided_by) == pipeline.update_decided_by()
+        first, confirm = prompts
+        assert "we moved to Denver" not in first[1]
+        assert "we moved to Denver" in confirm[1]
+        assert "in the source's own voice" in confirm[0]
+        assert "in the source's own voice" not in first[0]
+
+    async def test_an_unreadable_newer_passage_abstains_and_keeps_the_claim(self) -> None:
+        from particles.ingest import pipeline
+
+        call = AsyncMock(return_value="REASON: one slot.\nSLOT: CHANGES\nVERDICT: YES")
+        with (
+            patch.object(pipeline, "_llm_call", call),
+            patch.object(pipeline, "llm_circuit_open", lambda: False),
+        ):
+            reading = await pipeline.read_update_slot(
+                BOSTON, DENVER, contexts=(self._ctx(BOSTON, ""), self._ctx(DENVER, ""))
+            )
+        assert reading.verdict is None
+        assert call.await_count == 1  # the first reading only
+
+    async def test_a_missing_older_passage_reads_not_found(self) -> None:
+        from particles.ingest import pipeline
+
+        _, user = pipeline._update_passage_prompt(
+            self._ctx(BOSTON, ""), self._ctx(DENVER, "we moved to Denver")
+        )
+        assert "passage: (not found)" in user
+
+    async def test_the_sweep_and_the_paraphrase_pass_send_passages(
+        self, db_session: Any, bow: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.config import get_config
+        from particles.ingest.pipeline import SlotReading
+        from particles.operations import reconcile as reconcile_mod
+        from particles.operations.reconcile import reconcile_updates
+
+        cfg = get_config().reconciliation.update_supersession
+        monkeypatch.setattr(cfg, "enabled", False)
+        ex = _OneClaim()
+        await _say(db_session, ex, BOSTON, day=1)
+        await _say(db_session, ex, DENVER, day=9)
+        monkeypatch.setattr(cfg, "enabled", True)
+        seen: list[Any] = []
+
+        async def read(earlier: str, later: str, contexts: Any = None) -> SlotReading:
+            seen.append(contexts)
+            return SlotReading(SlotVerdict.CHANGES, "verification")
+
+        monkeypatch.setattr(reconcile_mod, "_read_update_slot", read)
+        monkeypatch.setattr(
+            reconcile_mod, "_has_contradiction_signal", AsyncMock(return_value=True)
+        )
+        await reconcile_updates(db_session)
+        [contexts] = seen
+        assert [c.content for c in contexts] == [BOSTON, DENVER]
+        assert "day 1" in contexts[0].passage and "day 9" in contexts[1].passage
+
+
+@pytest.mark.asyncio
+class TestRestoredHolds:
+    """a claim restored under ``holds`` is never retired by replacement again."""
+
+    async def test_neither_the_sweep_nor_a_later_update_retires_it(
+        self, db_session: Any, bow: None, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.config import get_config
+        from particles.operations import reconcile as reconcile_mod
+        from particles.operations.reconcile import reconcile_updates
+        from particles.operations.retirement_restore import restore_retirement
+
+        monkeypatch.setattr(get_config().extraction, "verify_conflicts", False)
+        monkeypatch.setattr(get_config().benchmark, "record_demotion_rulings", False)
+        ex = _OneClaim()
+        await _say(db_session, ex, BOSTON, day=1)
+        await _say(db_session, ex, DENVER, day=9)
+        [boston] = await _by_content(db_session, BOSTON)
+        outcome = await restore_retirement(
+            db_session, boston.id, "holds", actor="test", store="default"
+        )
+        await db_session.commit()
+        restored = outcome.successor.id
+
+        monkeypatch.setattr(
+            reconcile_mod, "_has_contradiction_signal", AsyncMock(return_value=True)
+        )
+        _stub_sweep_slot(monkeypatch, reconcile_mod, AsyncMock(side_effect=_updates))
+        swept = await reconcile_updates(db_session)
+        assert swept["demoted"] == 0
+        await _say(db_session, ex, "The user's home city is Lisbon.", day=12)
+        current = {p.id: p for c in (BOSTON,) for p in await _by_content(db_session, c)}
+        assert current[restored].status is Status.ACTIVE
+
+
+def test_the_scripted_arms_read_the_claim_out_of_a_passage_block() -> None:
+    """the rot oracle and the scripted arm answer the passage reading as the other."""
+    from particles.benchmark.rot.oracle import _CLAIMS
+    from particles.benchmark.update_gate.scripted import unfence_claim
+    from particles.ingest.pipeline import _update_passage_prompt, _update_prompt
+    from particles.ingest.second_reading import ClaimContext
+
+    def ctx(content: str) -> ClaimContext:
+        return ClaimContext(
+            content=content, source="s", date="2026-10-01", passage=f"## User\n\n{content} Lisbon"
+        )
+
+    for _system, user in (
+        _update_passage_prompt(ctx(BOSTON), ctx(DENVER)),
+        _update_prompt(BOSTON, DENVER),
+    ):
+        match = _CLAIMS.search(user)
+        assert match is not None
+        assert (unfence_claim(match["a"]), unfence_claim(match["b"])) == (BOSTON, DENVER)
+
+
+@pytest.mark.parametrize("scheme", ["claude-code", "codex"])
+def test_harness_lineage_has_no_publisher_and_requires_a_shared_project(scheme):
+    from particles.ingest.update_supersession import _authority
+
+    old, os_ = _entry(uri=f"{scheme}://session/old", tags=[PROJECT])
+    newer, ns = _entry(
+        uri=f"{scheme}://session/new", tags=[PROJECT], published=T0 + timedelta(days=1)
+    )
+    assert _authority(newer.uri_r) is None
+    assert update_order(_p(), newer, ns, _p(), old, os_) == 1
+    newer.tags = ["project:foreign"]
+    assert update_order(_p(), newer, ns, _p(), old, os_) is None
+    assert update_order(_p(), old, os_, _p(), newer, ns) is None
+    newer.tags = []
+    assert update_order(_p(), newer, ns, _p(), old, os_) is None
+
+
+def test_harness_namespaces_do_not_join_as_one_session_publisher():
+    old, os_ = _entry(uri="claude-code://session/old", tags=[PROJECT])
+    newer, ns = _entry(uri="codex://session/new", tags=[PROJECT], published=T0 + timedelta(days=1))
+    assert update_order(_p(), newer, ns, _p(), old, os_) is None
+
+
+def test_a_session_never_joins_a_web_publisher_named_session():
+    old, os_ = _entry(uri="claude-code://session/old", tags=[PROJECT])
+    webpage, ws = _entry(uri="http://session/new", tags=[PROJECT], published=T0 + timedelta(days=1))
+    assert update_order(_p(), webpage, ws, _p(), old, os_) is None
+    prior_web, ps = _entry(uri="http://session/prior", tags=[PROJECT])
+    assert update_order(_p(), webpage, ws, _p(), prior_web, ps) == 1

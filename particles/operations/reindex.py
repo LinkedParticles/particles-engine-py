@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 
@@ -989,8 +989,14 @@ def _entry_claims(particles: list[Particle], entry_id: str) -> list[Particle]:
 
 
 async def _reindex_append_entry(
-    session: AsyncSession, entry_id: str, snapshot_ids: list[str]
-) -> None:
+    session: AsyncSession,
+    entry_id: str,
+    snapshot_ids: list[str],
+    *,
+    first_base: str | None = None,
+    renderings: Mapping[str, bytes] | None = None,
+    retire: Sequence[Particle] | None = None,
+) -> int:
     """Retire an append-only entry's claims and replay its snapshots in order.
 
     **Retire** is every ACTIVE extractor claim with a source ref to the entry,
@@ -1007,16 +1013,26 @@ async def _reindex_append_entry(
     A step that fails stops the replay and retires nothing. The steps already
     done have written their claims beside the old ones; running the reindex
     again retires both and replays from the start.
+
+    The re-read of a multi-day transcript uses the same replay
+    from a later point: ``first_base`` is the snapshot the first step reads as
+    a delta from (``None``, the default, reads it whole), ``renderings`` maps a
+    snapshot to the marked text read in its place, and ``retire`` narrows the
+    claims retired (the re-anchored ones stay exempt either way). Returns how
+    many claims were retired.
     """
-    existing = await get_active_particles_for_entry(session, entry_id)
-    to_retire = _entry_claims(existing, entry_id)
+    if retire is None:
+        existing = await get_active_particles_for_entry(session, entry_id)
+        to_retire = _entry_claims(existing, entry_id)
+    else:
+        to_retire = list(retire)
     reanchored = await _reanchored_ids(session, to_retire)
     to_retire = [p for p in to_retire if p.id not in reanchored]
     supersede_ids = frozenset(p.id for p in to_retire)
 
     carry_forward_ids: list[str] = []
     suppressed_ids: list[str] = []
-    previous: str | None = None
+    previous: str | None = first_base
     for snapshot_id in snapshot_ids:
         outcome = SnapshotOutcome()
         await extract_snapshot(
@@ -1030,6 +1046,7 @@ async def _reindex_append_entry(
             append_base=previous,
             outcome_out=outcome,
             ignore_partial=True,
+            content_override=(renderings or {}).get(snapshot_id),
         )
         if outcome.failed_calls or outcome.skipped is not None:
             raise RuntimeError(
@@ -1065,8 +1082,9 @@ async def _reindex_append_entry(
         "Replayed append-only entry %s over %d snapshot(s); %d claim(s) retired",
         entry_id,
         len(snapshot_ids),
-        len([p for p in to_retire if p.id not in kept]),
+        len(retired),
     )
+    return len(retired)
 
 
 async def _record_reindex_retirements(

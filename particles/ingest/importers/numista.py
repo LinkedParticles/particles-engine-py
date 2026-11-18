@@ -121,10 +121,24 @@ class NumistaImporter:
 
 async def _fetch_coin(coin_id: str) -> bytes:
     """The Numista API's JSON for one coin type."""
-    from particles.http import get_capped, particles_client
-    from particles.secrets import get_numista_api_key
+    from particles.http import (
+        ServiceCredentialWithheld,
+        get_capped,
+        particles_client,
+        service_credential,
+        service_credentials_withheld,
+    )
 
-    api_key = get_numista_api_key()
+    api_key = service_credential("numista")
+    if api_key is None:
+        # The API has no anonymous mode, and the operator's key is not spent on
+        # a coin a confined principal or a followed link chose (security review
+        # 2026-11-17-1, RA1).
+        raise ServiceCredentialWithheld(
+            f"Numista coin type {coin_id} was not fetched: the API needs the operator's "
+            f"NUMISTA_API_KEY, which is withheld from {service_credentials_withheld()}. "
+            "The operator can deposit the coin's URL."
+        )
     api_url = f"{NUMISTA_API_BASE}/types/{coin_id}"
     # No redirect is followed: httpx strips only ``Authorization`` on a
     # cross-origin hop, so the custom key header would travel to whatever host a

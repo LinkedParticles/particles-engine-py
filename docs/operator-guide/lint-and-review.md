@@ -72,6 +72,9 @@ uv run particles lint --fix          # apply auto-fixable status transitions
 
 ## The review workflow
 
+For the whole picture of how a conflict is settled before it reaches review,
+see [User guide → when sources disagree](../user-guide/conflicts.md).
+
 An `INCONSISTENCY` particle is created when the §6.6 extraction-time
 ladder finds a new candidate conflicting with an existing claim it
 cannot out-rank on trust. The losing candidate is persisted alongside
@@ -146,9 +149,8 @@ uv run particles curate apply affirm <key>    # the replacement was right
 uv run particles curate apply dismiss <key>   # both claims hold
 ```
 
-Neither gesture changes a status. A retirement records a judgment, so it is
-not reversible: dismissing the card leaves the retired claim retired. If the
-retired claim is still true, assert it again.
+Neither gesture changes a status: dismissing the card leaves the retired
+claim retired. To bring the claim back, restore it (below).
 
 What the gesture adds is a **labelled pair**. Each affirm or dismiss appends
 one line to `demotion-rulings.jsonl` in `benchmark.runs_dir` (default
@@ -181,6 +183,97 @@ A retirement whose replacing claim was never recorded has no card. Document
 supersession never records one, so a claim a document's newer version
 retired is not shown. Neither is an older claim that arrived after its
 successor and was stored already retired.
+
+### Automatic retirements at session start
+
+Every claim an update, a document supersession or the re-anchor pass retired
+since your previous session is named at the top of the session-start digest,
+one line per source the replacing claims came from:
+
+```
+_Retired automatically since your last session: 7, from 2 sources._
+- session 4f2a1b9c… (2026-10-31) retired 6, e.g. "The user's home city is Boston." → "The user's home city is Denver." · restore all: particles particle restore --from-entry 9e01c2d4 --replacement wrong|holds
+- memory file project_notes.md (2026-10-30) retired 1: "Tasks live in Notion." → "Tasks live in Things." · restore: particles particle restore 1c4124ed --replacement wrong|holds
+```
+
+The section appears whether or not the session injects the full digest. A
+project session sees only retirements whose claim is in view for its
+project. At most `mcp.recall.digest_max_retirements` sources are listed
+(default 5), newest first; the header counts every retirement. With no
+earlier digest on record, the section looks back
+`mcp.recall.digest_retirement_window_days` (default 7).
+
+One corpus entry may win at most
+`reconciliation.update_supersession.max_retirements_per_entry` update
+retirements in any 24 hours (default 5). Past that, its pairs are held for
+review, and the run's `EXTRACT_RUN` or `CONSOLIDATION_RUN` record counts them
+as `capped_updates`. A file or page that tries to rewrite many of your
+memories at once gets through five a day at most, and all of them appear on
+one digest line.
+
+### Restoring a replaced claim
+
+```bash
+uv run particles particle restore <id> --replacement wrong
+uv run particles particle restore <id> --replacement holds
+uv run particles particle restore --from-entry <entry-id> --replacement wrong
+```
+
+The retired row is never revived. A successor is minted with the claim's
+content, confidence, provenance, subjects and embedding, and a
+`RETIREMENT_RESTORED` event records your ruling. `--replacement` is required,
+because the two rulings fail in opposite directions:
+
+- **`wrong`**: the replacing claim is retracted under operator authority, so
+  a re-extraction of the same text from the same source is held for review
+  rather than retiring the restored claim again. A later, different value can
+  still replace the restored claim. A replacement ruled wrong by mistake has
+  no automatic road back yet: state the value again in a note or a session.
+- **`holds`**: both claims stay ACTIVE, and the restored claim is never again
+  retired by a replacement, on any route (extraction, the update sweep, the
+  paraphrase pass, a re-extracted file, the re-anchor pass). A later claim
+  that conflicts with it is held for review instead.
+
+`--from-entry` applies one ruling to every claim whose replacement came from
+that corpus entry within the digest window: the restore a hostile source
+calls for. A claim the re-anchor pass restated because it relied on the
+retired one is listed by the command and restored on its own. Each ruling is
+also appended to `demotion-rulings.jsonl` (`coexist` for `holds`, `rejected`
+for `wrong`). The verb is local and operator-only, with no MCP tool.
+
+## Session-bound claims (the episode reading)
+
+Most of a coding agent's memory comes from session transcripts, and many of
+those claims report one moment of one session: "PR #447 is open", "the version
+was bumped from 1.114.1 to 1.114.2". Each session tends to state such a moment
+several times in slightly different words, so they arrive in the curation
+queue as near-duplicate and contradiction pairs.
+
+Every claim whose sources are all session transcripts
+(`curation.session_source_types`, default `CONVERSATION`) carries an
+**episode reading**: `session_bound` or `standing`, with the stamp of the
+prompt that wrote it. The extractor writes it for new claims. For claims
+already stored, `particles episode` reads them, several claims of one
+transcript per model call, each beside its source passage:
+
+1. `particles episode --dry-run` prints the backlog and the reader calls it
+   needs, and calls no model. On the author's store (2026-11-08) the default
+   scope, the sides of the newest collection's pair cards, was 6,521 claims
+   in 866 calls.
+2. `particles episode --limit 0` reads the whole backlog. It is a paid run:
+   price it from the dry run's call count before starting. It commits as it
+   goes, so an interrupted run resumes where it stopped.
+3. `particles episode --sheet sheet.jsonl` writes the labelling sheet: for
+   each stratum and stamp combination, a sample of the pair cards a reading
+   would fold, each with both claims, their passages and an empty `label`.
+   Label each line `nothing` (nothing to decide) or `something` (a side worth
+   keeping as a standing fact).
+
+Nothing is withheld from the queue yet. Each curation build and consolidation
+run counts, in shadow, how many pair cards would fold into one card per
+session, and `particles curate` prints the count. An entry the labels admit
+goes in `curation.episode.admitted` once its bar is met.
+`particles particle show` prints a claim's reading and its stamp.
 
 ## Reindex
 

@@ -178,6 +178,28 @@ api:  # [engine]
   # in-process and never hit this. The PARTICLES_API_RATE_LIMIT_PER_MINUTE env
   # var overrides it. Default 60.
   rate_limit_per_minute: 60
+  # A second, separate per-key-principal allowance for the agent writes that
+  # make no model call: POST /particles/retract, /particles/link,
+  # /particles/unlink, /particles/tag, /particles/untag and /memory/useful
+  # (security review 2026-10-26-1, R6). Every key spends from it, an operator
+  # key included, and a keyless client spends per address as above. It does
+  # not share tokens with rate_limit_per_minute, so a burst of tags or links
+  # never uses up the allowance a deposit or a query needs. 0 disables it.
+  # Default 300.
+  write_rate_limit_per_minute: 300
+  # The unclaimed snapshots one agent key's principal may hold waiting for
+  # extraction. The extraction a deposit queues runs later, in
+  # consolidation pass 1, outside the request limit above, so a deposit made
+  # with an agent key that is not one of the owner's harvesters is refused
+  # with 429 once its principal holds this many. Operator and harvester keys
+  # are never refused. Pass 1 drains each principal at
+  # consolidation.max_pending_per_metered_principal a run. 0 turns it off.
+  max_pending_extractions_per_principal: 50
+  # Build each served store's candidate cache, and run one confidence-ranked
+  # retrieval, in the background at start, so the first
+  # MEMORY.md render after a start is served warm. A request that arrives
+  # during the build waits for it rather than building a second copy.
+  warm_up_on_start: true
   # Require a key (any role, a reader key included) on READ routes too, not
   # just writes (security review F2). Keys gate the write verbs only; by
   # default the read surface (/particles, /corpus, /subjects, /quality,
@@ -264,6 +286,13 @@ engine:  # [engine]
   # http://127.0.0.1. Set true to send it anyway, with a warning, on a network
   # you trust end to end.
   allow_plaintext_token: false
+  # Settings this client and its engine set differently on purpose.
+  # On a thin client `particles hook doctor` compares the settings the engine
+  # applies for you (extraction, consolidation, query, llm, ...) with this
+  # file's, and warns on each difference; a path listed here (and every setting
+  # under it) is counted instead. `*` matches one segment.
+  # tuning_drift_ignore: ["consolidation.max_pending_entries"]
+  tuning_drift_ignore: []
 
 # OpenTelemetry observability. Off by default. Turning it on ALSO
 # requires the optional runtime: `pip install particles[otel]` (the base install
@@ -330,6 +359,20 @@ mcp:  # [engine]
   # token per assertion it lists (each observation, relation or deleted entity),
   # and a call listing more than the cap is refused. 0 = off.
   rate_limit_per_minute: 60
+  # the query tool's result. compact = slim hits (id, content,
+  # effective_confidence, a readable source line, valid_from, contest markers),
+  # null and empty keys dropped; summary = the older slim shape; full = the whole
+  # QueryResponse. A call's own `detail` argument wins.
+  query_detail: compact
+  # Under compact: cited = compose a grounded answer and list only the hits it
+  # cites (the top query_hits when it cites nothing); ranked = list the top
+  # query_hits under an ungrounded answer. `ranked` is revert.
+  # Today's output for every client: query_detail: full.
+  query_list: cited
+  # Most hits a compact query result lists (summary and full list them all).
+  # The answer still reads all of top_k; the response's hits_omitted says how
+  # many it read that the list leaves out.
+  query_hits: 10
   write:
     # Allowlist of store handles writable over MCP. EMPTY = no MCP writes at all.
     # A listed store must reconcile in 'multi' (see reconciliation.per_store).
@@ -364,6 +407,13 @@ mcp:  # [engine]
     # Max beliefs rendered per digest (top-N by effective confidence); the footer
     # discloses truncation. 0 = no cap.
     digest_max_beliefs: 200
+    # claims retired automatically since the last session are listed
+    # under the digest header, one line per source with a restore command. At
+    # most this many source lines, newest first; the header counts them all.
+    digest_max_retirements: 5
+    # Look-back when no earlier render is on record, and the window of
+    # `particles particle restore --from-entry`.
+    digest_retirement_window_days: 7
   memory_compat:
     # Reference memory-server compatibility façade, served by
     # `particles memory serve` — the drop-in swap for
@@ -397,6 +447,21 @@ mcp:  # [engine]
 # Claude Code hook integration. `particles init claude-code`
 # installs a SessionStart digest-push hook and a SessionEnd harvest hook;
 # these knobs tune the `particles hook …` verbs those entries run.
+# Codex integration: local macOS stores; independent from Claude's read policy.
+codex:  # [engine]
+  home_dir: "~/.codex"  # CODEX_HOME overrides this bootstrap location.
+  identity_lock_path: "~/.particles/project-identity.lock"
+  state_dir: "~/.particles/codex"
+  digest_max_bytes: 9000  # Complete UTF-8 lines only; exposure remains unknown.
+  hook_deadline_seconds: 10
+  observer_scope: project  # project | store; never controls source tagging.
+  harvest:
+    enabled: true
+    allow_remote: false   # Explicit consent to send distilled conversations to the pinned engine.
+    catchup_limit: 5
+    worker_deadline_seconds: 60
+    max_rollout_bytes: 67108864  # Oversized rollouts quarantine, never truncate.
+
 claude_code:  # [engine]
   # Per-machine state directory (hook log; the projection's manifest
   # and render snapshot). `~` expands to your home directory.
@@ -443,7 +508,8 @@ claude_code:  # [engine]
     max_extract_entries_per_session: 3
     # How many recent transcripts the catch-up sweep re-checks after the
     # current session (covers SIGKILL / crashes / an unreachable store at a
-    # prior session end). 0 disables the sweep.
+    # prior session end), drawn from every transcript directory of the
+    # session's project, its linked worktrees' included. 0 disables the sweep.
     catchup_limit: 5
     # Record an ABSENT record for each previously harvested memory file a
     # completed walk of the memory directory no longer finds, so a deleted
@@ -455,6 +521,10 @@ claude_code:  # [engine]
     # Above this fraction of a directory's previously harvested memory files
     # (and at least five), the walk records no absence and reports it.
     max_absent_fraction: 0.25
+    # The SessionEnd hook only hands the session to a detached worker, which
+    # harvests it and re-renders MEMORY.md. This bounds the
+    # worker's harvest of one session, and each render it runs, in seconds.
+    worker_deadline_seconds: 120
 
 # Agent-memory product surface — the MEMORY.md projection.
 # Namespace shared with the claude_code hook integration above:
@@ -1343,6 +1413,10 @@ reconciliation:  # [engine]
     # still needs the contradiction probe too. false restores the pre-1.187.0
     # gate on every pair.
     same_slot_admits: true
+    # claims one source entry may retire as updates in any rolling
+    # 24 hours, across every route. A pair past it is held for review instead,
+    # and the run record counts it as capped.
+    max_retirements_per_entry: 5
 
 # Content age decay — effective_confidence multiplier based on publication age..
 # Omit a source type entirely to disable decay for it.
@@ -1402,51 +1476,37 @@ utility:  # [engine]
     # reinforcement adds only λ·ln 2 ≈ 0.69λ, so no single popular belief runs
     # away with the head (what `cap` used to buy with a hard clamp).
     #
-    # The 0.015 default is EMPIRICALLY CALIBRATED,
-    # re-centred and re-measured post-dedup across several passes,
-    # not derived — swept against a 27,048-belief dogfood store. The
-    # admissible band is a property of the SURFACE, not the store: a larger
-    # rendered head has more room to expose duplicate clusters, so the three
-    # head sizes this SDK renders disagree — projection top_k=60 -> 0.011 and
-    # up, max_lines=120 -> 0.006 and up, digest digest_max_beliefs=200 ->
-    # 0.004 and up.
+    # The 0.065 default is EMPIRICALLY CALIBRATED, not derived, and has been
+    # re-measured several times.
+    # The latest measurement (2026-11-08, a backup of the dogfood store:
+    # 61,007 ACTIVE beliefs, 1,062 use events over 185 sessions in the 30-day
+    # window) is the first on use credited only when a belief was shown and
+    # applied. It judges λ by the rank-lift monitor's criterion:
+    # the head holds at least 3/4 of the beliefs
+    # applied outside it in 2+ sessions (the floor) and keeps at least 1/4 of
+    # its slots for beliefs with no use yet (the ceiling). Bands: projection
+    # top_k=60 -> 0.038 to 0.111; max_lines=120 and digest_max_beliefs=200 ->
+    # 0.038 to at least 0.12 (the monitor grid's edge). The old 0.015 held none
+    # of the 13 off-head-used beliefs in any head. 0.065 is the log-midpoint of
+    # the intersection, about 1.7x inside each edge; it holds all 13, leaves
+    # 47% of the 60 slots to unused beliefs, and every head slot stays
+    # distinct (duplicates bound nothing up to λ = 0.6).
     #
-    # Note what those bands DO NOT have: an upper edge. Every prior calibration
-    # here was squeezed between a floor (the target must reach the
-    # head) and a duplicate-cluster CEILING, and 0.011 was the log-midpoint of
-    # the resulting 0.0075-0.0165 intersection. subject-agnostic
-    # merge drained the clusters that set that ceiling, so the largest in-head
-    # duplicate cluster is now 2 at EVERY λ up to 0.6 and the log-midpoint rule
-    # no longer yields a finite answer.
-    #
-    # So the selection rule is now margin above the binding FLOOR: 0.015 sits
-    # 1.36x above the N=60 floor of 0.011 (at 0.010 the target falls
-    # to rank 61, outside the head), keeps all 60 N=60 head slots distinct and
-    # 120/120 at N=120, and holds the target at rank 24 rather than 48.
-    #
-    # What bounds λ from ABOVE now is the owner lens, not duplicates:
-    # its ω floor TRACKS λ. Measured here — λ 0.011/0.015/0.020/0.025/0.030 ->
-    # ω floor 0.018/0.024/0.032/0.040/0.048 — so λ >= 0.025 puts a shipped
-    # ω = 0.04 on or outside its own floor, and λ = 0.030 empties the viewer
-    # cohort out of the N=60 head entirely. Raising λ further is a JOINT λ/ω
-    # re-calibration, not a one-line change to this value.
+    # Two couplings move with λ. An owner lens at ω = 0.04 sits on its
+    # owner-share ceiling here and at 0.015 alike; re-check ω with
+    # `particles memory sweep-owner-lift` if you set one. explicit_weight below
+    # was sized against a far smaller λ: one press now buys 0.065 * ln 26,
+    # about 0.21 of lift.
     #
     # Calibrate against your own store rather than porting this number:
-    #     particles memory sweep-rank-lift --target <id> --head 60 --head 200
+    #     particles memory sweep-rank-lift --off-head-cohort --head 60 --head 200
     #     particles memory sweep-owner-lift --head 60      # then check ω
-    # It is deliberately NOT auto-fitted — nothing labels which
-    # belief *should* hold a head slot.
-    #
-    # If the sweep's CEILING is what binds for you, the fix is deduplication,
-    # not a smaller λ — but check your dedup pass can REACH the clusters that
-    # set it. On this store it could not at first: merge cut
-    # near-duplicate mass from 16.0% to 3.1% of ACTIVE and the ceiling still
-    # FELL, because the clusters setting it were 21 BYTE-IDENTICAL copies each
-    # with 1/21 and 0/21 subject links while the finder iterated Subjects.
-    # The grouping was made subject-agnostic and the ceiling
-    # then left the measurable range altogether — the payoff predicted,
-    # one dedup pass later than it expected.
-    rank_lift: 0.015
+    # It is deliberately NOT auto-fitted: nothing labels which
+    # belief *should* hold a head slot. The nightly rank-lift monitor
+    # reports when the value leaves its band. If a duplicate-cluster
+    # ceiling is what binds for you, the fix is deduplication, not
+    # a smaller λ.
+    rank_lift: 0.065
   # The transcript-mining pass that produces per-belief utility evidence.
   mining:
     enabled: true
@@ -1567,7 +1627,7 @@ observer_scope:  # [engine]
   # one of these and NO project key is "unattributed": visible store-wide and to
   # no project, never global, so a stamping gap fails closed. A keyless entry
   # without one (a hand deposit, a web page, ~/.claude/CLAUDE.md) is global.
-  harness_tags: ["claude-code"]
+  harness_tags: ["claude-code", "codex"]
 
 # Read-side confidence-modulation operator policy.
 confidence:  # [client]
@@ -1860,7 +1920,9 @@ github:  # [client]
   gist_synthesize_commenter_particles: false
 
 query:  # [engine]
-  # Default number of particles returned per query.
+  # Default number of particles a query retrieves (and the answer reads), for
+  # the MCP query tool and the CLI's --top-k. REST keeps its request schema's
+  # default of 40 and does not read this.
   default_top_k: 40
   # Default minimum effective_confidence for query results.
   default_min_confidence: 0.0
@@ -1880,13 +1942,12 @@ query:  # [engine]
   # score at sort time only (its reported effective_confidence is untouched).
   # 1.0 disables the demotion (pre-0132 behaviour).
   narrative_rank_weight: 0.6
-  # Truncation-warning heuristic: the response warns that top_k may be too
-  # low when the combined-score gap between the last rendered result and the
-  # first excluded one is below truncation_min_gap, OR when more than
-  # truncation_near_count excluded particles scored within
-  # truncation_near_margin of the cutoff.
-  truncation_min_gap: 0.05
-  truncation_near_margin: 0.15
+  # Truncation warning: top_k cut a plateau. It fires when the last result
+  # scores within truncation_plateau_drop (a fraction) of the first, and more
+  # than truncation_near_count excluded particles score as well. A tail near
+  # the cutoff is always dense in a store of any size, so only a head that has
+  # not fallen away from its first hit says the cut is arbitrary.
+  truncation_plateau_drop: 0.10
   truncation_near_count: 5
   # when the max raw cosine similarity over the rendered top-k falls
   # below this floor, the semantic query answers deterministically that the
@@ -1895,6 +1956,22 @@ query:  # [engine]
   # embedding profile (all-MiniLM-L6-v2) — re-examine on a different profile.
   # 0.0 disables the gate.
   relevance_floor: 0.25
+  # weight of the exact identifier-token addend. A question's
+  # identifier tokens are its tokens that contain a digit and are at least
+  # exact_token_min_length characters long ("Is RFC 9110 obsolete?" yields 9110).
+  # A belief whose text contains a share X of them gains weight * X on its
+  # rank score, so beliefs naming the record the question names reach the
+  # answer even when the sentence encoder ranks them low. Ordering only; the
+  # reported confidence and the relevance floor are unchanged. 0.0 (the
+  # default) is off: measured on one store, where 0.1 was chosen, so measure on
+  # yours first. A common number (a year, "2026") lifts every belief stating
+  # it. It does not reach a record named without its number ("the
+  # split-package ADR"), an identifier shorter than the minimum, or a belief
+  # with no embedding.
+  exact_token_weight: 0.0
+  # Shortest digit-bearing token that counts as an identifier, so "top 40" or
+  # "run #3" lifts nothing. Set 2 if your records carry two-digit numbers.
+  exact_token_min_length: 3
   # Output budget for the NL answer call (moved here from
   # extraction.query_max_tokens). This is a TOTAL output allowance on the
   # wire, not a response-length cap: an extended-thinking model spends its
@@ -1914,6 +1991,12 @@ query:  # [engine]
   # are shown with the answer, and nothing is dropped or stored. A request's
   # `grounded` field (CLI --grounded / --ungrounded) overrides this per call.
   grounded_answers: false
+  # Date each particle the answer step is shown (when the claim began to hold,
+  # else its source's date), and treat the most recently dated of two
+  # conflicting values as current. Without dates the answer sides with
+  # whichever value more particles repeat. A prompt with no dated particle is
+  # unchanged.
+  answer_dates: true
   # Keep each store's ACTIVE candidates (their particles and decoded
   # embeddings) in memory between reads in a long-running process (the MCP
   # server, the API, a reindex or consolidation run), re-reading only the rows
@@ -2037,6 +2120,19 @@ wiki:  # [engine]
   # the Obsidian narrative notes use. Suppressed automatically when
   # the run is narrowed with `--subjects` (narratives are subject-less).
   emit_narrative_notes: true
+  # your own first-attempt synthesis prompt, replacing the built-in
+  # encyclopedic one for the wiki, Obsidian and Logseq articles and for
+  # projection sections that are not `flowing`. Optional placeholders:
+  # {framing}, {direction}, {allowed_ids}; write a literal brace as {{ or }}.
+  # Keep the citation rule (every claim cited as `[^p-xxxxxxxx]`, no footnote
+  # definitions): an uncited article fails the citation check and is retried
+  # with the built-in strict prompt. Changing the template changes the
+  # synthesis cache key, so every cached article is regenerated once.
+  # Unset (the default) keeps the built-in prompt.
+  # prompt_template: |
+  #   {framing}You are writing one short, approachable article about a single
+  #   subject, based ONLY on the particle list in the user message. Cite every
+  #   claim with a footnote `[^p-xxxxxxxx]` using the particle's id prefix. ...
 
 # Logseq exporter. Everything else it needs comes from
 # `exporter_common` (min_particle_confidence / synthesis_min_particles) and
@@ -2246,6 +2342,12 @@ curation:  # [engine]
   # hide — preserves recall against a wrong clear). 1.0 disables the demotion;
   # PARAPHRASE / UNSURE / absent verdicts are never demoted.
   duplicate_distinct_demotion: 0.1
+  # withhold a duplicate candidate pair whose two claims each name a
+  # digit-bearing identifier the other lacks (1.114.1 against 1.114.2, PR 284
+  # against PR 288). Writes nothing; the queue shows how many it withheld.
+  # false carries every candidate pair again at the next build.
+  identifier_cross:
+    enabled: true
   # Projection manifests: paths to documentation-projection manifests
   # (operations.projection) whose selected particles get projection_blocking
   # leverage — a belief feeding a generated doc is worth tending first. Empty
@@ -2278,6 +2380,45 @@ curation:  # [engine]
   # `particles quality` read the gesture log and the retained collections.
   # `curate --precision --since DATE` overrides it for one run.
   precision_window_days: 30
+  # Suggested subjects on the assign-subject form. The form lists the
+  # subjects the belief names in its text first, then the subjects its nearest
+  # linked beliefs carry, before the operator types anything. Read only.
+  subject_suggestions:
+    # How many of the most similar ACTIVE beliefs that carry a subject are read.
+    neighbours: 20
+    # A neighbour subject is offered only when at least this many of those
+    # beliefs carry it. 1 also offers one-off subjects, such as a single PR.
+    min_support: 2
+    # Suggestions returned when a request names no limit (clamped to 20).
+    limit: 5
+  # claims that report only their session's moment. The episode
+  # question ("is this claim true only of the moment its session reports?") is
+  # asked only of a claim every source of which is one of these types.
+  session_source_types:
+    - CONVERSATION
+  episode:
+    # Admitted (stratum, stamp combination) entries, written
+    # "<stratum>:<stamp>[+<stamp>]" with the distinct stamps a card's members
+    # were read under, each naming its prompt digest and the model that served
+    # it, e.g. "one_entry:regen.episode@<digest>~anthropic:claude-sonnet-5-5"
+    # (`particles episode --sheet` prints each entry's key). An entry is
+    # added only after the owner's labelled sheet clears the bar.
+    admitted: []
+    # `particles episode`: max reader calls per minute (0 disables the delay),
+    # max claims per run (0 means the whole backlog; the pass commits as it
+    # goes), and how often it commits.
+    rate_limit_per_minute: 60
+    batch_limit: 500
+    commit_interval: 25
+    # Claims of one source entry read in one call, and the characters of each
+    # claim's source passage shown beside it.
+    claims_per_call: 10
+    passage_chars: 1200
+    # Pairs per stratum and stamp combination on a labelling sheet.
+    sheet_size: 60
+    # Thinking tokens per reader call in the `--dry-run` price estimate (an
+    # upper bound; the run's own usage line reports what was billed).
+    estimate_thinking_tokens: 1500
   # Weights for the additive leverage score.
   leverage_weights:
     dependency_count: 1.0
@@ -2444,6 +2585,10 @@ reindex:  # [engine]
   # Claim pairs per equivalence-judge call.
   estimate_judge_batch_pairs: 25
 consolidation:  # [engine]
+  # Explicit scheduled Keychain context, bound to store/provider/endpoint; never a key.
+  credential_profile: null
+  # Declared loopback extraction routes with no authentication. Remove local for an auth gateway.
+  keyless_extraction_providers: ["local"]
   # --if-due threshold (hours): skip when the last successful run is younger.
   # 20 = daily scheduling with headroom for clock drift, so a laptop that was
   # asleep at the scheduled time can safely retry hourly.
@@ -2451,13 +2596,29 @@ consolidation:  # [engine]
   # Pass 1 (extract PENDING snapshots, oldest first) on/off. LLM-priced.
   extract_pending: true
   # Pass 1 per-run cap; a capped run discloses the remainder and the next run
-  # continues (level-triggered — the corpus is the state).
+  # continues (level-triggered — the corpus is the state). Under
+  # extract_budget_usd it is the per-run ceiling on snapshots across rounds,
+  # so raise it with the budget.
   max_pending_entries: 20
+  # Pass 1's share per agent key: at most this many snapshots a
+  # run from any one principal whose agent key is not a harvester's, in every
+  # class, whatever max_pending_entries and extract_budget_usd are. Slots it
+  # leaves unused stay unused, so raising the cap or the budget never raises
+  # what an agent key extracts; `particles extract --all-pending` drains a
+  # metered backlog on purpose. The rest wait for the next run, counted as
+  # pending_deferred_metered. 0 admits none of them.
+  max_pending_per_metered_principal: 5
   # Pass 1 priority class: entries carrying any of these tags
   # (rule files, Claude Code memory files) take the cap's slots first, so a
   # file edited during the day is extracted that night. The cap is unchanged;
   # transcripts fill what remains. [] restores plain longest-owed order.
   priority_tags: [rule-file, memory-file]
+  # Pass 1 order for transcripts: CONVERSATION entries outside the
+  # priority class are read least-tried, then newest session first, each
+  # session's snapshots oldest first, ahead of the other sources. Where a night
+  # reads fewer than arrive, the oldest transcripts wait; the report names the
+  # oldest one. false restores longest-owed order.
+  transcripts_newest_first: true
   # Pass 1 pooled batching: run the capped set as concurrent
   # per-snapshot tasks whose LLM requests merge into one Message
   # Batches job at 50% price (batch mechanics reuse the llm.batch.* knobs;
@@ -2556,6 +2717,14 @@ consolidation:  # [engine]
     # reading rejects is withdrawn; a record left with none closes as
     # `withdrawn` without a review. The rest are re-read on a later night.
     max_rereadings_per_run: 25
+  # The embed pass: a belief written while the embedding encoder
+  # could not load is stored with no vector, and no search reaches it. Each run
+  # embeds those beliefs locally (no LLM call) and pairs them against the store
+  # through the run's delta scope. Skipped, with the reason, when no encoder loads.
+  embed:
+    # ACTIVE beliefs filled per run, oldest first; the rest wait for the next
+    # run. Kept small so filled beliefs do not crowd the capped probes. 0 = off.
+    max_per_run: 500
   # Re-anchoring: when an update retires a state claim ("the user
   # lives in Delhi"), a claim from the same passage that relied on it ("the
   # restaurant is a ten-minute walk from the user's flat") is replaced by a
@@ -2597,6 +2766,19 @@ consolidation:  # [engine]
   # passes always run. `memory consolidate --dry-run` prints the per-pass
   # estimates. null (the default) is unbounded.
   budget_usd: null
+  # Pass 1's own nightly budget, US$ at list price with the batch
+  # discount. Pass 1 then reads in rounds until it is spent: round 1 at each
+  # snapshot's worst case (every planned call at extraction.max_tokens), later
+  # rounds at the estimate corrected by tonight's measured spend for that kind
+  # of source. Under budget_usd too, the smaller applies. Ignored on an
+  # unpriced extraction route. null (the default) keeps one round of
+  # max_pending_entries. Example: 4.0, with max_pending_entries: 200.
+  extract_budget_usd: null
+  # Most rounds a budgeted pass 1 runs (each is one batch turnaround).
+  extract_max_rounds: 6
+  # Share of batch_wait.budget_seconds a budgeted pass 1 may use before it
+  # starts no new round, so the later passes keep the batch price.
+  extract_batch_wait_share: 0.5
   # The census, pass 3: the contradiction and duplicate sweep whose cards are
   # the curation queue (`particles curate`, GET /curation). It is report-only,
   # so it cannot move retrieval, and it is the cycle's largest LLM cost: on the
@@ -2775,10 +2957,13 @@ benchmark_memory:  # [engine]
   #   chars_per_token_by_model:
   #     claude-sonnet-5: 2.92
   #     claude-haiku-4-5: 4.0
-  # One entry ships and stays unless an entry here names the same key (ADR
+  # Five entries ship and stay unless an entry here names the same key (ADR
   # 0317): claude-sonnet-5-5 at 2.98, the 4.0 divided by its measured 1.3437x
-  # the tokens of claude-sonnet-4-6 (token-counting endpoint, 2026-10-13). The
-  # scalar stays 4.0, so every model without an entry keeps its factor.
+  # the tokens of claude-sonnet-4-6 (token-counting endpoint, 2026-10-13), and
+  # claude-haiku-5-5, claude-opus-5-5, claude-fable-5-1 and claude-sonnet-5 at
+  # the same 2.98, since each counts the same tokens for the same text
+  # (2026-10-22 and 2026-11-05). The scalar stays 4.0, so every model without
+  # an entry keeps its factor.
   chars_per_token: 4.0
   chars_per_token_by_model: {}
   # The batch discount --pooled / --batch-qa apply is llm.batch_discount
@@ -2813,6 +2998,22 @@ benchmark_rot:  # [engine]
   estimate_probe_output_tokens: 200
   # Ask before spending above this many projected LLM calls (--yes skips).
   confirm_call_threshold: 100
+  # The door arm (`particles benchmark rot door`): other memories
+  # through the same world. The arms manifest (keep it outside any repository
+  # while results are internal), the competitor build cache, and the reports.
+  door_manifest: ~/.particles/benchmark/rot/arms.toml
+  door_cache_dir: ~/.particles/benchmark/rot/compare/cache
+  door_runs_dir: ~/.particles/benchmark/rot/compare
+  # Size of the answer the Particles door generates per probe (for --estimate).
+  estimate_answer_input_tokens: 6000
+  estimate_answer_output_tokens: 400
+  # The answer stage (`door read`): reader calls at once, and the
+  # assumptions its estimate discloses. A door not built yet is priced at
+  # estimate_reader_door_chars, the largest door measured.
+  reader_concurrency: 4
+  estimate_reader_chars_per_token: 3.5
+  estimate_reader_output_tokens: 80
+  estimate_reader_door_chars: 66000
 
 # Relevance-floor benchmark — the error rates of the query relevance floor on
 # real questions (`particles benchmark relevance-floor`). Run knobs and cost
@@ -2838,7 +3039,9 @@ benchmark_relevance_floor:  # [engine]
   # Seed of the `--limit` sample (stratified by source).
   sample_seed: 0
   # Version of the reference-free grounded-and-useful judge prompt.
-  judge_protocol: 1
+  # 1 labels a responder refusal unanswerable unjudged; 2 also judges whether
+  # the top-k a refusal withheld answers the question.
+  judge_protocol: 2
   # Concurrent questions in the judged stage.
   concurrency: 4
   # Transient answer/judge failures: retries, then exclusion as `infra`.
@@ -2851,6 +3054,9 @@ benchmark_relevance_floor:  # [engine]
   estimate_judge_prompt_overhead_tokens: 350
   estimate_judge_output_tokens: 20
   # Ask before spending above this many projected LLM calls (--yes skips).
+  # A live run also needs a spend ceiling on its command line: --max-usd when
+  # a model is priced, --max-calls or --no-ceiling when one is not. There is
+  # deliberately no default here.
   confirm_call_threshold: 50
 
 # Model-prior leakage benchmark — the share of query-answer sentences the
@@ -2894,10 +3100,16 @@ benchmark_leakage:  # [engine]
   estimate_answer_prompt_overhead_tokens: 700
   estimate_answer_output_tokens: 500
   estimate_particle_tokens: 45
+  # Judge calls are one a sentence. 8 fitted the first run; answers over a
+  # richer context ran about 15. `--calibrate-from <report.json>` replaces it
+  # with a saved run's measured figure.
   estimate_sentences_per_answer: 8.0
   estimate_judge_prompt_overhead_tokens: 600
   estimate_judge_output_tokens: 120
   # Ask before spending above this many projected LLM calls (--yes skips).
+  # A live run also needs a spend ceiling on its command line: --max-usd when
+  # a model is priced, --max-calls or --no-ceiling when one is not. There is
+  # deliberately no default here.
   confirm_call_threshold: 50
 
 # The trip-versus-move case and the update-gate pair sets:
@@ -2977,6 +3189,15 @@ refetch_floors:  # [engine]
   GITHUB_REPO: 3600
   GITHUB_GIST: 3600
   GITHUB_PAGES: 3600
+
+# This installation's host id. Each file:// corpus entry records
+# the host whose filesystem its path names, and the local refresh reads only
+# this host's entries, so an engine serving a client on another machine never
+# reads a same-named path from its own disk. The file holds a random id beside
+# the operating system's machine identifier; carried to another machine, it is
+# not believed there and a new id is minted. Must be an absolute path.
+host:  # [client]
+  id_file: ~/.particles/host-id
 
 # Local-source refresh — change detection for deposited file://
 # entries, so a rule file edited on disk stops silently contradicting the

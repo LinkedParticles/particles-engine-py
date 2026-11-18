@@ -96,7 +96,8 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from particles.api import _keys
 from particles.api._keys import Role
 from particles.config import get_config
-from particles.corpus.harvest_marks import HARVEST_DEPOSITORS
+from particles.corpus.harvest_marks import HARNESS_SOURCES, HARVEST_DEPOSITORS
+from particles.corpus.metering import bind_metered_principal
 from particles.secrets import get_particles_api_key
 from particles.store.event_store import bind_http_actor
 
@@ -396,6 +397,7 @@ class Capability(StrEnum):
     ATTRIBUTE_OTHERS = "attribute_others"
     #: Put the reserved memory-harvest tags on one's own deposits.
     HARVEST_MARKS = "harvest_marks"
+    CODEX_CAPTURE = "codex_capture"
 
 
 #: The closed role table. A later permission model replaces this table, and only
@@ -403,7 +405,8 @@ class Capability(StrEnum):
 _ROLE_CAPABILITIES: dict[Role, frozenset[Capability]] = {
     Role.READER: frozenset({Capability.READ}),
     Role.AGENT: frozenset({Capability.READ, Capability.AGENT_WRITE}),
-    Role.OPERATOR: frozenset(Capability),
+    Role.OPERATOR: frozenset(Capability) - {Capability.CODEX_CAPTURE},
+    Role.CODEX_CAPTURE: frozenset({Capability.CODEX_CAPTURE}),
 }
 
 
@@ -424,6 +427,12 @@ class Principal:
     #: every other principal and on a harvester key that records none.
     memory_roots: tuple[str, ...] | None = None
     archive_roots: tuple[str, ...] | None = None
+    #: A harvester key's client host id: the origin its
+    #: ``file://`` deposits record. ``None`` on every other principal.
+    host_id: str | None = None
+    #: A harvester key's rule roots and global rule roots.
+    rule_roots: tuple[str, ...] | None = None
+    global_rule_roots: tuple[str, ...] | None = None
 
     def can(self, capability: Capability) -> bool:
         if capability in _ROLE_CAPABILITIES[self.role]:
@@ -444,9 +453,12 @@ LEGACY_KEY_ID = "env"
 
 def _legacy_principal() -> Principal:
     """``PARTICLES_API_KEY`` is an operator key for the operator principal."""
-    return Principal(
-        id=get_config().curation.operator_identity, role=Role.OPERATOR, key_id=LEGACY_KEY_ID
-    )
+    identity = get_config().curation.operator_identity
+    if identity == HARNESS_SOURCES["codex"].depositor:
+        raise HTTPException(
+            status_code=503, detail="The operator identity is reserved for Codex capture."
+        )
+    return Principal(id=identity, role=Role.OPERATOR, key_id=LEGACY_KEY_ID)
 
 
 #: The principal the current request's gate resolved; ``None`` for an
@@ -462,8 +474,26 @@ def current_principal() -> Principal | None:
     return _current_principal.get()
 
 
+def metered_principal(principal: Principal | None) -> str | None:
+    """The principal a key's deposits are metered against.
+
+    An agent key's that is not a harvester's: the keys whose model calls the
+    request bucket already meters. ``None`` for an operator key, a harvester
+    key, a reader key (which cannot deposit) and a keyless engine's anonymous
+    caller.
+    """
+    if principal is None or principal.role is not Role.AGENT:
+        return None
+    return None if _keys.is_harvester(principal.role, principal.id) else principal.id
+
+
 def _bind_principal(principal: Principal | None) -> None:
     _current_principal.set(principal)
+    # Every gate binds the deposit meter with the principal, so every deposit
+    # the request makes is counted against its cap, whichever route or
+    # operation reaches the deposit seam (security review of
+    # PR 1479, S1).
+    bind_metered_principal(metered_principal(principal))
     if principal is None:
         bind_http_actor(None, None)
     else:
@@ -507,6 +537,9 @@ def _resolve_principal(creds: HTTPAuthorizationCredentials | None) -> Principal:
                 project=record.project,
                 memory_roots=record.memory_roots,
                 archive_roots=record.archive_roots,
+                host_id=record.host_id,
+                rule_roots=record.rule_roots,
+                global_rule_roots=record.global_rule_roots,
             )
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API key")
 
@@ -514,19 +547,18 @@ def _resolve_principal(creds: HTTPAuthorizationCredentials | None) -> Principal:
 async def request_holds_a_key(
     creds: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
 ) -> bool:
-    """Whether the request's bearer authenticates a principal. Never refuses.
+    """Whether the request authenticates a read-capable principal. Never refuses.
 
-    For an ungated route that shows more to a caller holding a key (``/health``'s
+    For an ungated route that shows more to a reader (``/health``'s
     daemon block; security review 2026-10-28-2, AA50). An unusable key file
     counts as no key here rather than a 503, so the liveness probe still answers.
     """
     if creds is None:
         return False
     try:
-        _resolve_principal(creds)
+        return _resolve_principal(creds).can(Capability.READ)
     except HTTPException:
         return False
-    return True
 
 
 def _role_refusal(principal: Principal, action: str, needs: str) -> HTTPException:
@@ -782,12 +814,12 @@ def _verify_read_key(
     key a cross-site browser read is refused unless it carries the bearer. The
     three highest-value reads (``/query``, ``/events``, ``/digest``) take the
     unconditional :data:`AUTH_GATE` instead, so they are gated by the bearer
-    regardless of this flag. Every role may read. Without the
+    regardless of this flag. They require a read-capable key. Without the
     flag, a bearer that does not resolve is ignored, as before, and the read is
     served unauthenticated.
     """
     if get_config().api.require_auth_for_reads:
-        return _verify_key(request, creds)
+        return _read_principal(request, _verify_key(request, creds))
     if engine_is_keyless():
         _bound_dev_key_request(request)
         return None
@@ -796,9 +828,12 @@ def _verify_read_key(
         raise HTTPException(status_code=refusal[0], detail=refusal[1])
     if creds is not None:
         try:
-            return _resolve_principal(creds)
+            principal = _resolve_principal(creds)
         except HTTPException:
             pass
+        else:
+            if principal.can(Capability.READ):
+                return principal
     # An unauthenticated read on a keyed engine: only the cross-site refusal applies.
     _refuse_cross_site(request)
     return None
@@ -811,7 +846,22 @@ async def _read_gate(
     _bind_principal(_verify_read_key(request, creds))
 
 
+def _read_principal(request: Request, principal: Principal | None) -> Principal | None:
+    if principal is not None and not principal.can(Capability.READ):
+        raise _role_refusal(
+            principal, f"call {request.method} {request.url.path}", "a read-capable key"
+        )
+    return principal
+
+
 async def _auth_gate(
+    request: Request,
+    creds: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+) -> None:
+    _bind_principal(_read_principal(request, _verify_key(request, creds)))
+
+
+async def _identity_gate(
     request: Request,
     creds: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
 ) -> None:
@@ -826,6 +876,45 @@ async def _agent_gate(
     _bind_principal(_verify_write_key(request, creds))
 
 
+def _allows_codex_route(principal: Principal, *, text_deposit: bool) -> bool:
+    return principal.can(Capability.CODEX_CAPTURE) or (
+        text_deposit and principal.can(Capability.AGENT_WRITE)
+    )
+
+
+def _codex_route_refusal(
+    request: Request, principal: Principal, *, text_deposit: bool
+) -> HTTPException:
+    needs = "an agent, operator or Codex capture key" if text_deposit else "a Codex capture key"
+    return _role_refusal(principal, f"call {request.method} {request.url.path}", needs)
+
+
+async def _text_deposit_gate(
+    request: Request,
+    creds: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+) -> None:
+    if engine_is_keyless():
+        _bound_dev_key_request(request)
+        _refuse_keyless_write()
+    principal = _verify_key(request, creds)
+    assert principal is not None
+    if not _allows_codex_route(principal, text_deposit=True):
+        raise _codex_route_refusal(request, principal, text_deposit=True)
+    _bind_principal(principal)
+
+
+async def _codex_proof_gate(
+    request: Request,
+    creds: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
+) -> None:
+    principal = _verify_key(request, creds)
+    if principal is None:
+        raise HTTPException(status_code=401, detail="A Codex capture key is required.")
+    if not _allows_codex_route(principal, text_deposit=False):
+        raise _codex_route_refusal(request, principal, text_deposit=False)
+    _bind_principal(principal)
+
+
 async def _operator_gate(
     request: Request,
     creds: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
@@ -834,7 +923,7 @@ async def _operator_gate(
     _bind_principal(_verify_operator_key(request, creds))
 
 
-#: The four route gates in decorator form (``dependencies=[AGENT_GATE]``).
+#: The route gates in decorator form (``dependencies=[AGENT_GATE]``).
 #: FastAPI resolves a path operation's ``dependencies`` before its parameter
 #: dependencies, so the gate refuses before any session or store lock is taken
 #: (security review 2026-10-25, Q12). Each gate is async so the principal it
@@ -845,12 +934,23 @@ async def _operator_gate(
 #: write gate.
 READ_GATE = Depends(_read_gate)
 AUTH_GATE = Depends(_auth_gate)
+IDENTITY_GATE = Depends(_identity_gate)
+TEXT_DEPOSIT_GATE = Depends(_text_deposit_gate)
+CODEX_PROOF_GATE = Depends(_codex_proof_gate)
 AGENT_GATE = Depends(_agent_gate)
 OPERATOR_GATE = Depends(_operator_gate)
 
 #: The gate functions, by which :func:`pre_body_refusal`'s caller finds a route's gate.
 GATE_DEPENDENCIES: frozenset[object] = frozenset(
-    {_read_gate, _auth_gate, _agent_gate, _operator_gate}
+    {
+        _read_gate,
+        _auth_gate,
+        _identity_gate,
+        _agent_gate,
+        _operator_gate,
+        _text_deposit_gate,
+        _codex_proof_gate,
+    }
 )
 
 #: The capability each write gate asks for, and how its refusal names it.
@@ -877,8 +977,10 @@ def pre_body_refusal(request: Request, gate: object) -> tuple[int, str] | None:
         reason = _cross_site_reason(request)
         if reason is not None:
             return status.HTTP_403_FORBIDDEN, _cross_site_refusal(reason)
-        if gate in _WRITE_GATE_NEEDS:
+        if gate in _WRITE_GATE_NEEDS or gate is _text_deposit_gate:
             return status.HTTP_503_SERVICE_UNAVAILABLE, KEYLESS_WRITE_REFUSAL
+        if gate is _codex_proof_gate:
+            return status.HTTP_401_UNAUTHORIZED, "A Codex capture key is required."
         return None
     creds = _bearer_from_header(request)
     bearer_gated = gate is not _read_gate or get_config().api.require_auth_for_reads
@@ -890,10 +992,22 @@ def pre_body_refusal(request: Request, gate: object) -> tuple[int, str] | None:
             return exc.status_code, str(exc.detail)
     if creds is not None:
         request.scope[_SCOPE_PRINCIPAL] = principal
+    if gate is _read_gate and not bearer_gated and principal and not principal.can(Capability.READ):
+        principal = None  # same anonymous and cross-site bounds as an open read with no key
     if principal is None:
         # An open read with no key: the read gate's cross-site refusal.
         reason = _cross_site_reason(request)
         return None if reason is None else (status.HTTP_403_FORBIDDEN, _cross_site_refusal(reason))
+    if gate in {_read_gate, _auth_gate} and not principal.can(Capability.READ):
+        refusal = _role_refusal(
+            principal, f"call {request.method} {request.url.path}", "a read-capable key"
+        )
+        return refusal.status_code, str(refusal.detail)
+    if gate in {_text_deposit_gate, _codex_proof_gate}:
+        text_deposit = gate is _text_deposit_gate
+        if not _allows_codex_route(principal, text_deposit=text_deposit):
+            refusal = _codex_route_refusal(request, principal, text_deposit=text_deposit)
+            return refusal.status_code, str(refusal.detail)
     needs = _WRITE_GATE_NEEDS.get(gate)
     if needs is not None and not principal.can(needs[0]):
         refusal = _role_refusal(principal, f"call {request.method} {request.url.path}", needs[1])
@@ -1275,6 +1389,17 @@ def enforce_key_material_on_startup() -> None:
                 "init claude-code` prints the directories) and revoke this one",
                 record.key_id,
                 record.principal,
+                record.principal,
+            )
+        if _keys.is_harvester(record.role, record.principal) and record.host_id is None:
+            # Without the client's host id the engine can stamp no origin on the
+            # key's file:// deposits, so it refuses them.
+            log.warning(
+                "engine key %s (%s) records no client host id, so its memory-file and "
+                "archive deposits are refused; mint it again with --host-id (on the client, "
+                "with engine.base_url set, `particles init claude-code` prints the command) "
+                "and revoke this one",
+                record.key_id,
                 record.principal,
             )
         if _keys.unacknowledged_reserved(record):

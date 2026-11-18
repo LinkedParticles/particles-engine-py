@@ -15,11 +15,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import importlib.util
 import json
 import os
 import pwd
 import re
 import sys
+import traceback
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -176,7 +178,7 @@ def cached_particles_stay_unchanged() -> Generator[None, None, None]:
 
 # The engine's bearer-token pair: the key the server expects, and the
 # token an HTTP client sends to it.
-_ENGINE_BEARER_VARS = ("PARTICLES_API_KEY", "PARTICLES_ENGINE_TOKEN")
+_ENGINE_BEARER_VARS = ("PARTICLES_API_KEY", "PARTICLES_ENGINE_TOKEN", "PARTICLES_ENGINE_TOKEN_FILE")
 
 
 @pytest.fixture(autouse=True)
@@ -199,6 +201,11 @@ def no_engine_bearer(no_env_leak: None, monkeypatch: pytest.MonkeyPatch) -> None
     """
     for name in _ENGINE_BEARER_VARS:
         monkeypatch.delenv(name, raising=False)
+    # A token file's value is held for the process; a test that
+    # reads one must not hand it to the next.
+    from particles.secrets import _forget_engine_token_files
+
+    _forget_engine_token_files()
 
 
 class _NoWaitLimiter:
@@ -245,12 +252,37 @@ def no_live_wikidata(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyP
 #: The real ``~/.claude/projects`` of the account running the suite, taken from
 #: the password database rather than ``$HOME``: a test that swapped ``HOME``
 #: and still reached the real directory is exactly the case to catch.
-_REAL_CLAUDE_PROJECTS = os.path.join(pwd.getpwuid(os.getuid()).pw_dir, ".claude", "projects")
+_REAL_HOME = pwd.getpwuid(os.getuid()).pw_dir
+_REAL_CLAUDE_PROJECTS = os.path.join(_REAL_HOME, ".claude", "projects")
 _WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_TRUNC
 _PATH_EVENTS = {"os.mkdir": 1, "os.remove": 1, "os.rmdir": 1, "os.truncate": 1}
 _PAIR_EVENTS = {"os.rename", "os.symlink", "os.link"}
 #: Writes refused during the running test; ``None`` while no test is running.
 _claude_projects_writes: list[str] | None = None
+#: The account's installed Claude Code harness configuration: the user settings
+#: (the hook commands and their ``env`` pins) and the user-scope MCP
+#: registration. What a test reads there depends on the account running the
+#: suite, so a test that reads either passes on one machine and fails on the
+#: next (``tests/test_engine_keys.py`` failed on the owner's laptop once its
+#: hooks pinned engine token files). Each is held by its name and by where it
+#: resolves, so a reader that resolved a linked ``~/.claude`` is caught too,
+#: without resolving every path the suite opens.
+_REAL_CLAUDE_CONFIG = frozenset(
+    form
+    for path in (
+        os.path.join(_REAL_HOME, ".claude", "settings.json"),
+        os.path.join(_REAL_HOME, ".claude.json"),
+    )
+    for form in (path, os.path.realpath(path))
+)
+#: Where the SDK and this suite live, so a refusal names the reader that opened the file.
+_SDK_DIRS = tuple(
+    os.path.join(location, "")
+    for location in (importlib.util.find_spec("particles").submodule_search_locations or [])  # type: ignore[union-attr]
+)
+_TESTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "")
+#: Reads of those files refused during the running test; ``None`` while no test runs.
+_claude_config_reads: list[str] | None = None
 
 
 def _under_real_claude_projects(path: object) -> bool:
@@ -260,12 +292,37 @@ def _under_real_claude_projects(path: object) -> bool:
     return absolute == _REAL_CLAUDE_PROJECTS or absolute.startswith(_REAL_CLAUDE_PROJECTS + os.sep)
 
 
+def _opener() -> str:
+    """The innermost SDK frame on the stack (``file:line in function``), else the test's own.
+
+    The stack is walked without reading source lines: ``linecache`` would open
+    a file per frame from inside the audit hook.
+    """
+    frames = traceback.StackSummary.extract(traceback.walk_stack(None), lookup_lines=False)
+    for roots in (_SDK_DIRS, (_TESTS_DIR,)):
+        for frame in frames:  # innermost first
+            if frame.filename.startswith(roots) and not frame.filename.endswith("conftest.py"):
+                return f"{os.path.basename(frame.filename)}:{frame.lineno} in {frame.name}"
+    return "unknown caller"
+
+
 def _claude_projects_audit_hook(event: str, args: tuple[object, ...]) -> None:
     """Refuse any write under the real ``~/.claude/projects`` while a test runs.
+
+    It also refuses opening the real ``~/.claude/settings.json`` or
+    ``~/.claude.json`` at all (``no_real_claude_config_reads``).
 
     ``open`` covers ``io.open`` and ``os.open`` (both pass the OS flags);
     ``os.rename`` covers ``os.replace`` and so the projection's atomic write.
     """
+    if event == "open" and _claude_config_reads is not None:
+        target = args[0]
+        if (
+            isinstance(target, (str, bytes, os.PathLike))
+            and os.path.abspath(os.fsdecode(target)) in _REAL_CLAUDE_CONFIG
+        ):
+            _claude_config_reads.append(f"{os.fsdecode(target)} ({_opener()})")
+            raise PermissionError(f"test opened the real Claude Code configuration: {target!r}")
     if _claude_projects_writes is None:
         return
     if event == "open":
@@ -571,6 +628,35 @@ def no_real_claude_projects_writes() -> Generator[None, None, None]:
     if refused:
         pytest.fail(
             "wrote under the real ~/.claude/projects (refused): " + "; ".join(refused),
+            pytrace=False,
+        )
+
+
+@pytest.fixture(autouse=True)
+def no_real_claude_config_reads() -> Generator[None, None, None]:
+    """Fail any test that opens the real ``~/.claude/settings.json`` or ``~/.claude.json``.
+
+    Those files hold the installed hooks and MCP registration of the account
+    running the suite, so a test that reads them asserts on that account: the
+    doctor's ``engine:`` tests passed in CI and failed on the owner's laptop
+    once its hooks pinned engine token files, and every commit there failed
+    the gate. The open is refused (``PermissionError`` from the audit hook,
+    which the readers meet as an unreadable file), and the test fails at
+    teardown naming the path, because those readers degrade quietly. A test
+    that reads the harness configuration builds a fake ``HOME`` under
+    ``tmp_path`` (``tests/_claude_projects.isolate_claude_code``). Integration
+    tests are not exempt.
+    """
+    global _claude_config_reads
+    _claude_config_reads = []
+    try:
+        yield
+    finally:
+        refused, _claude_config_reads = _claude_config_reads, None
+    if refused:
+        pytest.fail(
+            "opened the real Claude Code configuration (refused): "
+            + "; ".join(sorted(set(refused))),
             pytrace=False,
         )
 

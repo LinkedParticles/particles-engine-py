@@ -125,3 +125,68 @@ class TestFinding:
         found = [f for f in report.findings if f.finding_type == "OPEN_INCONSISTENCY"]
         assert [f.particle_id for f in found] == [record.id]
         assert report.summary.get("OPEN_INCONSISTENCY") == 1
+
+
+class TestRetiredValueFinding:
+    """A retired-value record says what it holds, not "Open conflict"."""
+
+    @staticmethod
+    def _pair(b_content: str = "The port is 7000.") -> tuple[Particle, Particle]:
+        a = _claim("The port is 7000.").model_copy(
+            update={"status": Status.RETRACTED, "status_reason": StatusReason.EXPLICIT_RETRACTION}
+        )
+        return a, _claim(b_content, Status.PROVENANCE_STALE)
+
+    def test_an_identical_restatement_is_named_once(self) -> None:
+        from particles.core.conflict_resolution import RETIRED_VALUE_KEY
+        from particles.operations.lint.open_inconsistency import build_finding
+
+        a, b = self._pair()
+        record = _record(a.id, b.id, properties={RETIRED_VALUE_KEY: "EXPLICIT_RETRACTION"})
+        finding = build_finding(record, {a.id: a, b.id: b})
+
+        assert finding.detail == (
+            "Restated after retraction: “The port is 7000.” [RETRACTED / EXPLICIT_RETRACTION] "
+            "was retracted, and a later source states it again "
+            "[PROVENANCE_STALE / CONFLICT_PENDING], held for review"
+        )
+        assert finding.recommended_action is not None
+        assert "Keep the retraction:" in finding.recommended_action
+        assert "Restore the claim:" in finding.recommended_action
+        assert "--action PREFER_A" in finding.recommended_action
+        assert "--action PREFER_B" in finding.recommended_action
+
+    def test_a_reworded_restatement_is_quoted(self) -> None:
+        from particles.core.conflict_resolution import RETIRED_VALUE_KEY
+        from particles.operations.lint.open_inconsistency import build_finding
+
+        a, b = self._pair("The port is 7000")
+        record = _record(a.id, b.id, properties={RETIRED_VALUE_KEY: "EXPLICIT_RETRACTION"})
+        detail = build_finding(record, {a.id: a, b.id: b}).detail
+        assert "a later source restates it as “The port is 7000” [PROVENANCE_STALE" in detail
+
+    def test_an_ordinary_record_keeps_the_conflict_wording(self) -> None:
+        from particles.operations.lint.open_inconsistency import build_finding
+
+        a, b = _claim("The port is 7000."), _claim("The port is 7001.")
+        finding = build_finding(_record(a.id, b.id), {a.id: a, b.id: b})
+        assert finding.detail == "Open conflict: “The port is 7000.” vs “The port is 7001.”"
+        assert finding.conflict_note == ""
+        assert finding.recommended_action == (
+            f"Resolve it: particles curate apply resolve inconsistency:{finding.particle_id} "
+            f"--action PREFER_A|PREFER_B|BOTH_VALID|DISCARD (or particles review "
+            f"{finding.particle_id})"
+        )
+
+
+def test_the_conflict_note_is_the_detail_without_the_quoted_sides() -> None:
+    # A surface that draws both sides shows only the note, so
+    # the examination line rides in it as well as at the end of the detail.
+    from particles.operations.lint.open_inconsistency import build_finding
+
+    a, b, c = _claim("The port is 7000."), _claim("The port is 7001."), _claim("Port 7002.")
+    examination = {"partner_reason": "SUPERSEDED_BY_UPDATE", "blocking_ids": [c.id]}
+    finding = build_finding(_record(a.id, b.id), {a.id: a, b.id: b, c.id: c}, examination)
+    note = "Claim A was retired by update; the held claim B is still contradicted by “Port 7002.”."
+    assert finding.conflict_note == note
+    assert finding.detail.endswith(f"”. {note}")

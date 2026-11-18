@@ -30,6 +30,7 @@ from .render import render_report
 from .runner import (
     LeakageError,
     LeakageEstimate,
+    SentenceMeasure,
     build_report,
     build_selection,
     check_distinct_judge,
@@ -38,10 +39,12 @@ from .runner import (
     grounded_units,
     judge_prompt,
     measure_question,
+    measured_sentences_per_answer,
     render_estimate,
     resolved_models,
     rubric,
     run_leakage,
+    stop_calls,
 )
 from .schema import (
     LeakageReport,
@@ -59,6 +62,7 @@ __all__ = [
     "QueryLeakage",
     "RunSelection",
     "SentenceCounts",
+    "SentenceMeasure",
     "SentenceResult",
     "SentenceVerdict",
     "aggregate",
@@ -73,6 +77,7 @@ __all__ = [
     "labelled_rate",
     "mean_answer_fraction",
     "measure_question",
+    "measured_sentences_per_answer",
     "refusal_rate",
     "render_estimate",
     "render_report",
@@ -81,6 +86,7 @@ __all__ = [
     "run_leakage",
     "sentence_counts",
     "split_sentences",
+    "stop_calls",
     "unsupported_rate_by_source",
     "unsupported_sentence_rate",
 ]

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from particles.benchmark.rot.generator import (
     GENERATOR_VERSION,
+    PROFILES,
     SLOTS,
     check_value_invariants,
     generate_world,
@@ -68,6 +69,7 @@ from particles.benchmark.rot.scoring import (
 __all__ = [
     "ARMS",
     "GENERATOR_VERSION",
+    "PROFILES",
     "SCORER_VERSION",
     "SLOTS",
     "HitClass",

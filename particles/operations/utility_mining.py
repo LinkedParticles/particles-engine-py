@@ -64,6 +64,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from particles.config import get_config
 from particles.core.schema import Particle
 from particles.core.status import Status
+from particles.corpus.harvest_marks import HARNESS_SOURCES
 from particles.db import session_scope
 from particles.embeddings import cosine_similarity
 from particles.llm.fencing import data_fence_instruction, fence, make_nonce
@@ -76,8 +77,9 @@ from particles.operations.utility_exposure import (
     SessionFrame,
     session_frame,
 )
-from particles.store.candidate_cache import load_active_candidates
+from particles.store.candidate_cache import load_candidate_vectors
 from particles.store.particle_store import (
+    get_active_particles_by_ids,
     get_particles_by_status,
 )
 from particles.store.utility_store import record_utility_events
@@ -334,7 +336,9 @@ async def _prefilter_behavioural_candidates(
         return unmatched[:limit], excluded, False
     summary = head_and_tail(action_lines)
     action_vec = model.encode([summary], convert_to_numpy=True, normalize_embeddings=True)[0]
-    vec_by_id = {p.id: vec for p, vec in await load_active_candidates(session)}
+    # Only the candidates' own vectors, read through the cache so a mine over
+    # many sessions decodes each once.
+    vec_by_id = await load_candidate_vectors(session, [p.id for p in unmatched])
     ranked = sorted(
         unmatched,
         key=lambda p: cosine_similarity(action_vec, vec_by_id[p.id]) if p.id in vec_by_id else -1.0,
@@ -655,6 +659,11 @@ async def record_session_mine(
     Writes, so a caller that serializes writers calls it inside
     the store's write lock. A group whose reply is ``None`` cost
     nothing usable, so it neither credits nor counts as a call.
+
+    A mine in which no group was answered records nothing: no ruling, no
+    change, so the session keeps the credit an earlier mine gave it.
+    That covers a missing key, a provider error, a failed batch, a
+    budget skip, and a run with the judge off, which plans no group at all.
     """
     events: dict[str, str] = {}
     calls = 0
@@ -666,7 +675,8 @@ async def record_session_mine(
         _credit_matched(group.beliefs, reply, applied)
         for pid in applied:
             events.setdefault(pid, group.basis)
-    await record_utility_events(session, mine.session_id, events)
+    if calls:
+        await record_utility_events(session, mine.session_id, events)
     return MiningResult(
         literal=sum(1 for basis in events.values() if basis == "literal"),
         behavioural=sum(1 for basis in events.values() if basis == "behavioural"),
@@ -726,7 +736,7 @@ async def shown_beliefs(
     *,
     session_id: str,
     transcript: str,
-    actives: Sequence[Particle],
+    actives: Sequence[Particle] | None,
     entry_tags: Sequence[str] = (),
     first_captured_at: datetime | None = None,
     started_at: datetime | None = None,
@@ -737,7 +747,8 @@ async def shown_beliefs(
     Exposure is read as of the session's start (:func:`session_frame`); the
     pool keeps only beliefs still ACTIVE now, since utility ranks the beliefs
     a reader can still be served. A session with no start time at all is read
-    as of now.
+    as of now. ``actives`` is the ACTIVE set a caller mining many sessions has
+    already loaded; ``None`` reads only the shown beliefs from the store.
     """
     frame = await session_frame(
         session,
@@ -753,6 +764,10 @@ async def shown_beliefs(
     )
     exposure = await reader.exposure(session, frame, extract_action_lines(transcript))
     shown = exposure.shown
+    if actives is None:
+        # One session's pool is a few hundred beliefs: read those, not the
+        # whole ACTIVE set, in the order that set would list them.
+        return await get_active_particles_by_ids(session, shown), exposure
     return [p for p in actives if p.id in shown], exposure
 
 
@@ -774,7 +789,6 @@ async def mine_session_from_transcript(
     from particles.corpus.store import get_entry_by_uri, list_snapshots_for_entry
 
     async with session_scope(store) as session:
-        actives = await get_particles_by_status(session, Status.ACTIVE)
         entry = await get_entry_by_uri(session, f"{_SESSION_URI_PREFIX}{session_id}")
         first_captured: datetime | None = None
         if entry is not None:
@@ -788,7 +802,7 @@ async def mine_session_from_transcript(
             reader,
             session_id=session_id,
             transcript=transcript,
-            actives=actives,
+            actives=None,
             entry_tags=entry.tags if entry is not None else (),
             first_captured_at=first_captured,
             started_at=started_at,
@@ -799,8 +813,8 @@ async def mine_session_from_transcript(
     return result
 
 
-_SESSION_URI_PREFIX = "claude-code://session/"
-_SESSION_URI_RE = re.compile(r"claude-code://session/(.+)$")
+_SESSION_URI_PREFIX = HARNESS_SOURCES["claude-code"].session_prefix
+_SESSION_URI_RE = re.compile(re.escape(_SESSION_URI_PREFIX) + r"(.+)$")
 
 
 def session_id_from_uri(uri_r: str | None) -> str | None:
@@ -844,6 +858,12 @@ async def harvested_sessions(
     sessions: list[HarvestedSession] = []
     skipped = 0
     for read, entry in enumerate(entries, start=1):
+        # Codex delivery is unknown until a delivery-receipt decision. Do not
+        # reconstruct exposure from today's digest or mine its conversations.
+        if (entry.uri_r or "").startswith(
+            HARNESS_SOURCES["codex"].scheme + "://"
+        ) or entry.deposited_by == HARNESS_SOURCES["codex"].depositor:
+            continue
         if on_read is not None:
             on_read(read, len(entries))
         snapshots = [

@@ -86,6 +86,22 @@ def terminal_field(text: object) -> str:
     return s.replace("\n", "\\n") if "\n" in s else s
 
 
+def clip(text: str, width: int) -> str:
+    """``text`` cut to at most ``width`` characters at a word boundary, ending in "…".
+
+    A bare ``text[:width]`` cut "2026-10-27" to "2026-1", which read as a third
+    value on a line comparing two. A text with no space in its back half is
+    cut at ``width`` all the same, so a long token cannot stretch the line.
+    """
+    if len(text) <= width:
+        return text
+    cut = text[: width - 1]
+    space = cut.rfind(" ")
+    if not text[width - 1].isspace() and space >= width // 2:
+        cut = cut[:space]
+    return cut.rstrip(" ,;:") + "…"
+
+
 def indented(text: str, indent: str) -> str:
     """``text`` with ``indent`` before every line, so a stored line break stays inside its field.
 

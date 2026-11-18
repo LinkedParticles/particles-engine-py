@@ -15,8 +15,10 @@ from __future__ import annotations
 from particles.api.cli._claude_code import artifact_relative_path, claude_project_slug
 from particles.core.artifact_fold import (
     FileSubject,
+    Fold,
     FoldRule,
     ModuleCandidate,
+    Refusal,
     RefusalReason,
     artifact_ref_name,
     artifact_ref_project,
@@ -201,6 +203,143 @@ class TestModuleRule:
         )
         [refusal] = plan.refusals
         assert refusal.reason is RefusalReason.SEVERAL_NAMESPACES
+
+
+class TestPlanRecords:
+    """Every field of a fold or a refusal, since the apply step reads them all.
+
+    The apply step skips a fold whose source or target Subject it cannot find,
+    so a fold naming no id would do nothing and say nothing.
+    """
+
+    def test_an_absolute_fold_names_both_subjects(self) -> None:
+        abs_path = "/repo/particles/config.py"
+        plan = plan_artifact_fold(
+            _files("particles/config.py", abs_path),
+            relative_paths={f"s-{abs_path}": "particles/config.py"},
+            repo_files=None,
+        )
+        assert plan.folds == [
+            Fold(
+                source_id=f"s-{abs_path}",
+                source_name=abs_path,
+                target_id="s-particles/config.py",
+                target_path="particles/config.py",
+                rule=FoldRule.ABSOLUTE,
+            )
+        ]
+
+    def test_a_suffix_fold_names_both_subjects(self) -> None:
+        plan = plan_artifact_fold(
+            _files("scripts/pdr_lint.py", "pdr_lint.py"), relative_paths={}, repo_files=REPO
+        )
+        assert plan.folds == [
+            Fold(
+                source_id="s-pdr_lint.py",
+                source_name="pdr_lint.py",
+                target_id="s-scripts/pdr_lint.py",
+                target_path="scripts/pdr_lint.py",
+                rule=FoldRule.SUFFIX,
+            )
+        ]
+
+    def test_an_absolute_refusal_names_its_subject(self) -> None:
+        plan = plan_artifact_fold(
+            _files("/repo/.mcp.json"),
+            relative_paths={"s-/repo/.mcp.json": ".mcp.json"},
+            repo_files=None,
+        )
+        assert plan.refusals == [
+            Refusal(
+                "s-/repo/.mcp.json",
+                "/repo/.mcp.json",
+                FoldRule.ABSOLUTE,
+                RefusalReason.NO_PATH_SUBJECT,
+            )
+        ]
+
+    def test_a_suffix_refusal_names_its_subject(self) -> None:
+        plan = plan_artifact_fold(_files(*ROOTED, "config.py"), relative_paths={}, repo_files=REPO)
+        assert plan.refusals == [
+            Refusal("s-config.py", "config.py", FoldRule.SUFFIX, RefusalReason.AMBIGUOUS)
+        ]
+
+    def test_a_module_refusal_names_its_subject(self) -> None:
+        plan = plan_artifact_fold(
+            _files(*ROOTED),
+            relative_paths={},
+            repo_files=REPO,
+            modules=[_module("particles.config", refs=True)],
+        )
+        assert plan.refusals == [
+            Refusal(
+                "m-particles.config",
+                "particles.config",
+                FoldRule.MODULE,
+                RefusalReason.SCOPED_OR_CLASSED,
+            )
+        ]
+
+
+class TestCandidatesAfterASkip:
+    """A candidate one rule passes over never stops the rule reading the rest."""
+
+    def test_absolute_paths_after_an_unmapped_and_an_untwinned_one(self) -> None:
+        twinned = "/repo/particles/config.py"
+        plan = plan_artifact_fold(
+            _files("/tmp/x.yaml", "/repo/.mcp.json", "particles/config.py", twinned),
+            relative_paths={
+                "s-/repo/.mcp.json": ".mcp.json",
+                f"s-{twinned}": "particles/config.py",
+            },
+            repo_files=None,
+        )
+        assert [f.source_name for f in plan.folds] == [twinned]
+        assert [r.name for r in plan.refusals] == ["/repo/.mcp.json"]
+
+    def test_module_names_after_a_word_and_a_name_naming_no_file(self) -> None:
+        plan = plan_artifact_fold(
+            _files(*ROOTED),
+            relative_paths={},
+            repo_files=REPO,
+            modules=[
+                _module("query"),
+                _module("particles.nowhere"),
+                _module("particles.config"),
+            ],
+        )
+        assert [f.source_name for f in plan.folds] == ["particles.config"]
+
+
+class TestModuleRefusals:
+    def test_a_module_whose_file_has_no_path_subject_is_refused(self) -> None:
+        plan = plan_artifact_fold(
+            _files(*ROOTED),
+            relative_paths={},
+            repo_files=REPO,
+            modules=[_module("particles.api.cli.config")],
+        )
+        assert plan.folds == []
+        assert plan.refusals == [
+            Refusal(
+                "m-particles.api.cli.config",
+                "particles.api.cli.config",
+                FoldRule.MODULE,
+                RefusalReason.NO_PATH_SUBJECT,
+            )
+        ]
+
+    def test_the_extension_test_reads_the_last_segment_of_a_deep_name(self) -> None:
+        plan = plan_artifact_fold(
+            _files(*ROOTED, "particles/store/db.py"),
+            relative_paths={},
+            repo_files=[*REPO, "particles/store/db.py"],
+            modules=[_module("particles.store.db")],
+        )
+        assert plan.folds == []
+        assert [(r.name, r.reason) for r in plan.refusals] == [
+            ("particles.store.db", RefusalReason.FILE_EXTENSION)
+        ]
 
 
 def test_module_files_needs_two_identifiers() -> None:

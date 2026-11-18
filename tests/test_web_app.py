@@ -221,7 +221,9 @@ def test_every_data_href_sink_is_scheme_checked() -> None:
             assert re.search(r"\^https\?:.*\.test\(" + value + r"\)", window), (
                 f"{path.name}:{number + 1} assigns {match.group(1)} to an href unchecked"
             )
-    assert sinks >= 3
+    # The feed draws every store URL through one checked `link()`,
+    # and the graph view's source link is the other sink.
+    assert sinks >= 2
 
 
 def _build_stamp(web: Path) -> str:
@@ -241,6 +243,7 @@ def _build_stamp(web: Path) -> str:
 
     for root in (
         "src",
+        "../curation-core/src",
         "public",
         "package.json",
         "../../artifacts/graph/cytoscape.min.js",
@@ -283,6 +286,11 @@ def test_the_committed_build_stamp_matches_the_build_inputs(tmp_path: Path) -> N
         pytest.skip("the web UI's toolchain is not installed (npm ci in clients/web-ui)")
     copy = tmp_path / "clients" / "web-ui"
     shutil.copytree(web / "src", copy / "src", ignore=shutil.ignore_patterns("openapi.d.ts"))
+    # The web UI is built from the shared curation core too.
+    core = root / "clients" / "curation-core" / "src"
+    shutil.copytree(
+        core, copy.parent / "curation-core" / "src", ignore=shutil.ignore_patterns("openapi.d.ts")
+    )
     shutil.copytree(web / "public", copy / "public")
     shutil.copy(web / "package.json", copy / "package.json")
     (copy / "node_modules").symlink_to(web / "node_modules")

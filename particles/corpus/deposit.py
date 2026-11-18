@@ -32,7 +32,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from particles import egress
 from particles.config import get_config, resolve_store_adjacent_path
 from particles.core import bounded_yaml
-from particles.core.observer_scope import EntryScope, classify_entry, project_keys, project_tag
+from particles.core.observer_scope import (
+    REFERENCE_MARKER,
+    classify_entry,
+    project_keys,
+    project_tag,
+)
 from particles.core.schema import (
     CorpusEntry,
     ExtractionStatus,
@@ -43,12 +48,22 @@ from particles.core.schema import (
     WarcRecordType,
 )
 from particles.corpus.blob_io import BlobRefused, read_blob, write_blob
+from particles.corpus.deposit_role import stamp_entry, stamp_entry_id
 from particles.corpus.harvest_marks import (
+    HARNESS_SOURCES,
     HARVEST_DEPOSITORS,
     REFRESH_MASKED_TAGS,
+    RULE_FILE_TAG,
     strip_reserved_tags,
 )
 from particles.corpus.local_read import read_local_file, within
+from particles.corpus.metering import PendingExtractionsFull, meter_deposit
+from particles.corpus.origin import (
+    claim_named_entry,
+    entry_origin,
+    foreign_origin,
+    stamp_new_entry,
+)
 from particles.corpus.store import (
     CorpusEntryRow,
     SnapshotRow,
@@ -63,7 +78,7 @@ from particles.corpus.store import (
 from particles.db import _open_sqlite_transaction, write_transaction
 from particles.extraction.general import sniff_image_media_type
 from particles.extraction.rdf import RDF_CONTENT_TYPES, RDF_SUFFIXES
-from particles.http import get_capped, particles_client
+from particles.http import get_capped, particles_client, withhold_service_credentials
 from particles.observability import traced
 from particles.url_safety import is_network_uri
 
@@ -132,7 +147,7 @@ def _in_write_unit(fn: Callable[_P, Awaitable[_R]]) -> Callable[_P, Awaitable[_R
 _SHA256_HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
-def blob_path(content_hash: str) -> Path:
+def blob_path(content_hash: str, *, blob_dir: Path | None = None) -> Path:
     """Resolved on-disk location for a content-addressed blob.
 
     ``<blob_dir>/<hh>/<hash>``, where ``blob_dir`` is resolved store-adjacent
@@ -140,6 +155,9 @@ def blob_path(content_hash: str) -> Path:
     writer here and the readers that audit it — ``blob_health`` and
     ``blob_fsck`` must look exactly where extraction will look, not at a second
     guess at the same rule.
+
+    ``blob_dir``, when given, replaces the configured directory: the audit of a
+    store copy (``db backup``) looks in the copy's own blob directory.
 
     Raises:
         ValueError: If ``content_hash`` is not a 64-char lowercase hex digest.
@@ -151,7 +169,8 @@ def blob_path(content_hash: str) -> Path:
     # Store-adjacent: a relative blob_dir anchors to the store, not to cwd—
     # otherwise an absolute DATABASE_URL plus the relative default
     # scatters blobs across whichever directory each process ran in.
-    blob_dir = resolve_store_adjacent_path(get_config().storage.blob_dir)
+    if blob_dir is None:
+        blob_dir = resolve_store_adjacent_path(get_config().storage.blob_dir)
     return blob_dir / content_hash[:2] / content_hash
 
 
@@ -1527,8 +1546,9 @@ async def deposit_url(
 
     ``out_follow_refused`` (optional): receives each primary URL the follow
     did not deposit because another principal's entry holds it under
-    :func:`own_entries_only_for`, so the depositing caller can tell a refused
-    follow from a made one (security review 2026-10-28-1, O80).
+    :func:`own_entries_only_for`, or because the depositing key's pending
+    extraction is full, so the depositing caller can tell a
+    refused follow from a made one (security review 2026-10-28-1, O80).
 
     ``out_unchanged`` (optional): receives ``True`` when the generic
     fetch path found the entry's latest snapshot already holding these bytes and
@@ -1574,6 +1594,10 @@ async def deposit_url(
         for importer in importers:
             if importer.accepts_url(url):
                 log.debug("deposit_url: matched %s", type(importer).__name__)
+                if importer_route_kind(importer) == "statement":
+                    # An importer of the operator's own writing:
+                    # its entries are standing memory, never reference.
+                    tags = [tag for tag in tags or [] if tag != REFERENCE_MARKER]
                 entry_id, snapshot_id = await importer.deposit(
                     session, url, deposited_by, tags or []
                 )
@@ -1635,6 +1659,18 @@ async def deposit_url(
     )
     await _reconcile_mentions_for_deposit(session, url=url, entry_id=entry_id)
     return entry_id, snapshot_id
+
+
+def importer_route_kind(importer: Any) -> str:
+    """``"statement"`` or ``"document"``: what kind of route an importer is.
+
+    An importer declares ``ROUTE_KIND = "statement"`` when it brings in the
+    operator's own writing, whose entries stay global; one that declares
+    nothing brings in material read, and a deposit through it that names no
+    project is marked ``scope:reference`` by the route that called it.
+    """
+    kind = getattr(importer, "ROUTE_KIND", "document")
+    return "statement" if kind == "statement" else "document"
 
 
 @contextlib.asynccontextmanager
@@ -1740,20 +1776,24 @@ async def _maybe_follow_primary_url(
     log.info("Following primary URL of %s: %s", entry_id[:8], target_url)
     try:
         # Hardcode depth-1: the recursive call cannot itself trigger
-        # further follows.
-        async with _follow_unit(session):
-            target_entry_id, target_snap_id = await deposit_url(
-                session,
-                target_url,
-                deposited_by=deposited_by,
-                tags=tags,
-                follow_post_links=False,
-                follow_comment_links=False,
-            )
-    except ForeignEntryRefused as exc:
+        # further follows. The source's author chose the
+        # target, so it is fetched without the operator's service credentials
+        # (security review 2026-11-17-1, RA1).
+        with withhold_service_credentials("a followed link"):
+            async with _follow_unit(session):
+                target_entry_id, target_snap_id = await deposit_url(
+                    session,
+                    target_url,
+                    deposited_by=deposited_by,
+                    tags=tags,
+                    follow_post_links=False,
+                    follow_comment_links=False,
+                )
+    except (ForeignEntryRefused, PendingExtractionsFull) as exc:
         # A confinement refusal, not a fetch failure: the target is another
-        # principal's entry, and nothing the nested deposit wrote survives
-        # (security review 2026-10-27-1, G59, G73).
+        # principal's entry (security review 2026-10-27-1, G59, G73), or the
+        # depositing key's pending extraction is full. Nothing
+        # the nested deposit wrote survives.
         log.warning(
             "Follow refused for %s (via %s): %s Primary deposit unaffected.",
             target_url,
@@ -1948,6 +1988,9 @@ async def deposit_text_versioned(
             await _release_capture_uri(session, existing, deposited_by=deposited_by)
             existing = None
     if existing is not None:
+        # Before anything is reconciled onto it: another host's file is never
+        # written, and an entry with no origin takes this deposit's.
+        await claim_named_entry(session, existing.entry_id, uri_r)
         await _reconcile_fetch_policy(session, existing, fetch_policy)
         await _reconcile_project_keys(session, existing, tags)
         if fetch_policy is FetchPolicy.LAZY:
@@ -1999,7 +2042,7 @@ def _keyed_deposit_onto_global_entry(existing: CorpusEntry, tags: list[str] | No
     if not project_keys(tags):
         return False
     harness_tags = get_config().observer_scope.harness_tags
-    return classify_entry(existing.tags, harness_tags) is EntryScope.GLOBAL
+    return classify_entry(existing.tags, harness_tags).everywhere
 
 
 def _foreign_capture_entry(existing: CorpusEntry, *, deposited_by: str) -> bool:
@@ -2059,7 +2102,7 @@ def _refuse_foreign_entry(existing: CorpusEntry, uri_r: str | None) -> None:
     :func:`own_entries_only_for` it does nothing.
     """
     confined_to = _own_entries_depositor.get()
-    if confined_to is not None and existing.deposited_by not in _owners_of(confined_to):
+    if confined_to is not None and not _owns(confined_to, existing):
         raise ForeignEntryRefused(
             f"{uri_r} is held by an entry {existing.deposited_by!r} deposited; this key "
             f"deposits as {confined_to!r} and may not write another principal's entry. "
@@ -2091,6 +2134,7 @@ def _foreign_local_entry(
     deposited_by: str,
     source_type: str,
     untrusted_caller: bool,
+    origin: str | None = None,
 ) -> bool:
     """Whether a content-hash match onto ``existing`` must not be joined (security review P19, P21).
 
@@ -2101,10 +2145,14 @@ def _foreign_local_entry(
     ``deposited_by`` is a free string (``untrusted_caller``, the HTTP upload
     route) may not join a ``LAZY`` one, which the engine re-reads from its own
     disk, or retype one, even under a matching name.
+
+    Nor does a deposit join a ``file://`` entry of another host (``origin``,
+    the entry's stored origin): two hosts' byte-identical files
+    are two sources.
     """
     if not (existing.uri_r or "").startswith("file://"):
         return False
-    if existing.deposited_by != deposited_by:
+    if existing.deposited_by != deposited_by or foreign_origin(origin):
         return True
     return untrusted_caller and (
         existing.fetch_policy is FetchPolicy.LAZY or existing.source_type != source_type
@@ -2136,7 +2184,8 @@ async def _reconcile_project_keys(
     if not incoming:
         return
     harness_tags = get_config().observer_scope.harness_tags
-    if classify_entry(existing.tags, harness_tags) is EntryScope.GLOBAL:
+    # A reference entry is global on every question surface.
+    if classify_entry(existing.tags, harness_tags).everywhere:
         return
     missing = sorted(incoming - project_keys(existing.tags))
     if not missing:
@@ -2284,16 +2333,45 @@ def own_entries_only_for(depositor: str) -> Iterator[None]:
     The two harvester depositors count as one owner: the first-run audit
     deposits a memory file and the SessionEnd harvest later enrols the same
     entry, which keeps ``audit`` as its depositor.
+
+    A confined principal chose what its deposit fetches, so the scope also
+    withholds the operator's service credentials (``GITHUB_API_KEY``,
+    ``NUMISTA_API_KEY``): the deposit reads only what the principal could read
+    without them (security review 2026-11-17-1, RA1).
     """
     token = _own_entries_depositor.set(depositor)
     try:
-        yield
+        with withhold_service_credentials(f"a deposit confined to {depositor!r}"):
+            yield
     finally:
         _own_entries_depositor.reset(token)
 
 
 def _owners_of(depositor: str) -> frozenset[str]:
     return HARVEST_DEPOSITORS if depositor in HARVEST_DEPOSITORS else frozenset({depositor})
+
+
+#: The local rule-file intake's depositors (``rules sync``, ``init claude-code``),
+#: whose rule-file entries a harvester's push continues.
+_RULE_INTAKE_DEPOSITORS = frozenset({"rule-sync", "init"})
+
+
+def _owns(depositor: str, existing: CorpusEntry) -> bool:
+    """Whether a confined deposit by ``depositor`` may write ``existing`` (rule 3).
+
+    The harvester depositors count as one owner, and for a ``rule-file`` entry
+    also count the local intake that first deposited it: a client's push of
+    its rule files continues the entries its own `rules sync` made before the
+    store moved. The route has already checked that the path
+    lies under the key's rule roots.
+    """
+    if existing.deposited_by in _owners_of(depositor):
+        return True
+    return (
+        depositor in HARVEST_DEPOSITORS
+        and existing.deposited_by in _RULE_INTAKE_DEPOSITORS
+        and RULE_FILE_TAG in (existing.tags or [])
+    )
 
 
 @_in_write_unit
@@ -2379,6 +2457,10 @@ async def write_entry_and_snapshot(
             # deposits it, in either order (security review 2026-10-25-2, R13).
             await _release_capture_uri(session, existing, deposited_by=deposited_by)
             existing = None
+        if existing is not None:
+            # Another host's file is never written; an unstamped one is adopted
+            # (§5.2).
+            await claim_named_entry(session, existing.entry_id, uri_r)
     if _own_entries_depositor.get() is not None:
         own_entries_only = True
     if existing is None and not _identified_by_uri_alone(
@@ -2395,7 +2477,10 @@ async def write_entry_and_snapshot(
                 # in (security review 2026-10-26-1, W35, Q32).
                 existing = None
         else:
-            existing = await get_entry_by_content_hash(session, content_hash)
+            # A generic deposit cannot reuse a Codex session as its source.
+            existing = await get_entry_by_content_hash(
+                session, content_hash, exclude_depositor=HARNESS_SOURCES["codex"].depositor
+            )
         if existing is not None and _keyed_deposit_onto_global_entry(existing, tags):
             # A project's deposit must not ride an operator's global entry into
             # view for every project just because the bytes match:
@@ -2407,6 +2492,7 @@ async def write_entry_and_snapshot(
                 deposited_by=deposited_by,
                 source_type=source_type,
                 untrusted_caller=untrusted_caller,
+                origin=await entry_origin(session, existing.entry_id),
             )
             or _foreign_capture_entry(existing, deposited_by=deposited_by)
         ):
@@ -2439,6 +2525,10 @@ async def write_entry_and_snapshot(
             if out_unchanged is not None:
                 out_unchanged.append(True)
             return existing.entry_id, reused
+    # a metered agent key's deposit that stores a new snapshot is
+    # counted against its cap here, inside the write unit, and its own
+    # unmarked entry is marked; a deduplicated deposit returned above.
+    metered_principal = await meter_deposit(session, existing.entry_id if existing else None)
     if out_unchanged is not None:
         out_unchanged.append(False)
 
@@ -2463,6 +2553,8 @@ async def write_entry_and_snapshot(
     if existing:
         snap_row.entry_id = existing.entry_id
         session.add(snap_row)
+        # An agent route's new snapshot makes the entry an agent's.
+        await stamp_entry_id(session, existing.entry_id)
         # If the new source_type is more specific than the existing one, update it.
         # This handles re-depositing a WEB_PAGE URL as WIKIDATA_API after the
         # domain-aware extractor is added. A confined deposit keeps the type, as
@@ -2500,6 +2592,9 @@ async def write_entry_and_snapshot(
             tags=tags,
         )
         entry_row = CorpusEntryRow.from_model(entry)
+        stamp_new_entry(entry_row)
+        stamp_entry(entry_row)
+        entry_row.metered_principal = metered_principal
         snap_row.entry_id = entry.entry_id
         session.add(entry_row)
         session.add(snap_row)

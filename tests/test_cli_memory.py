@@ -35,6 +35,19 @@ runner = CliRunner()
 NOW = datetime.now(UTC)
 
 
+@pytest.fixture(autouse=True)
+def _no_installed_hooks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An empty ``HOME``: ``memory consolidate`` reads the installed hooks.
+
+    The projection renders a memory directory only for the store its hooks name
+    (``_claude_code.projection_refusal``), which it reads from
+    ``~/.claude/settings.json``; the real one is the account's, not the test's.
+    """
+    home = tmp_path / "home"
+    (home / ".claude" / "projects").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+
+
 def _report(**kwargs: object) -> ConsolidationReport:
     defaults: dict[str, object] = {
         "store": "default",

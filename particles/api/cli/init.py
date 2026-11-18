@@ -21,15 +21,16 @@ import logging
 import os
 import re
 import shlex
-import shutil
 import stat
 import subprocess
 import sys
+from contextlib import ExitStack
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import typer
 
+from particles.api.cli import _thin_client as thin
 from particles.api.cli import app, run
 from particles.api.cli._claude_code import (
     MEMORY_REGION,
@@ -39,28 +40,34 @@ from particles.api.cli._claude_code import (
     build_hook_commands,
     claude_project_slug,
     command_env_pins,
+    default_hand_off,
     default_memory_manifest_text,
     disable_memory_store_text,
     enable_memory_store_text,
+    enable_write_store_text,
     enclosing_work_tree,
     foreign_config_pin,
     fresh_config_text,
     kept_database_url,
+    local_harvest_roots,
     make_private_dir,
     memory_manifest_path,
     merge_particles_hook_entries,
     minimal_config_text,
     particles_hook_commands,
     particles_mcp_registrations,
+    pinned_config_engine_url,
     pinned_default_dsn,
     plan_mcp_registration,
     render_settings_json,
     repository_root,
     rule_file_project_key,
+    set_engine_base_url_text,
     state_dir,
     strip_particles_hook_entries,
     write_private_text,
 )
+from particles.api.cli._thin_client import HOOKS, MCP
 from particles.config import (
     environment_database_url,
     environment_engine_url,
@@ -71,7 +78,7 @@ from particles.config import (
     user_config_path,
 )
 from particles.corpus.fetch import store_file_judgement
-from particles.url_safety import pinned_subprocess_env, url_without_userinfo
+from particles.url_safety import trusted_path, trusted_which, url_without_userinfo
 
 log = logging.getLogger(__name__)
 
@@ -155,6 +162,32 @@ def init_claude_code_cmd(
             "tools but not the guidance is the gap these close."
         ),
     ),
+    engine: str | None = typer.Option(
+        None,
+        "--engine",
+        help=(
+            "Install a thin client of the engine at this URL: write engine.base_url into "
+            "the pinned config, provision no local store, and give the hooks and the MCP "
+            "server their keys through token files. A config that already names "
+            "engine.base_url installs a thin client without this flag."
+        ),
+    ),
+    hooks_token_file: Path | None = typer.Option(
+        None,
+        "--hooks-token-file",
+        help=(
+            "Thin client: pin this existing file (absolute, mode 0600, one line) as the "
+            "hooks' engine key instead of asking for the key."
+        ),
+    ),
+    mcp_token_file: Path | None = typer.Option(
+        None,
+        "--mcp-token-file",
+        help=(
+            "Thin client: pin this existing file (absolute, mode 0600, one line) as the "
+            "MCP server's engine key instead of asking for the key."
+        ),
+    ),
     json_output: bool = typer.Option(
         False,
         "--json",
@@ -185,26 +218,56 @@ def init_claude_code_cmd(
     try:
         # Refuse a relative pin before anything is written (security review R10).
         _config_yaml_path()
-        if remove:
-            result = _remove(settings_path, dry_run=dry_run, explicit_config=config is not None)
-            if install_skills_files:
-                result["skills_removed"] = _remove_skills(project=project, dry_run=dry_run)
-        else:
-            result = _install(
-                settings_path,
-                store_flag=store,
-                dry_run=dry_run,
-                command_override=command,
-                # --json is non-interactive by construction; the audit is a prompt.
-                no_audit=no_audit or json_output,
-                install_skills_files=install_skills_files,
-                explicit_config=config is not None,
-            )
-            if json_output and not no_audit and not dry_run:
-                result["next_steps"].append(
-                    "Run `particles audit <memory-dir>` for the first-run memory audit "
-                    "(skipped: --json is non-interactive)."
+        from particles.api.cli._hook_state import (
+            advisory_lock,
+            installer_lock_path,
+            installer_lock_refusal,
+        )
+
+        # Asked in a dry run too, which skips the lock: the preview must not
+        # pass what the real run refuses.
+        lock_refusal = installer_lock_refusal()
+        if lock_refusal is not None:
+            _refuse_lock(lock_refusal, json_output=json_output)
+        with ExitStack() as held:
+            try:
+                acquired = dry_run or held.enter_context(advisory_lock(installer_lock_path()))
+            except (OSError, ValueError) as exc:
+                # The lock's own refusal, when its directory changed after the check.
+                _refuse_lock(str(exc), json_output=json_output)
+            if not acquired:
+                typer.echo(
+                    "Another harness installer is running; retry when it completes.", err=True
                 )
+                raise typer.Exit(1)
+            if remove:
+                result = _remove(settings_path, dry_run=dry_run, explicit_config=config is not None)
+                if install_skills_files:
+                    result["skills_removed"] = _remove_skills(project=project, dry_run=dry_run)
+            else:
+                result = _install(
+                    settings_path,
+                    store_flag=store,
+                    dry_run=dry_run,
+                    command_override=command,
+                    # --json is non-interactive by construction; the audit is a prompt.
+                    no_audit=no_audit or json_output,
+                    install_skills_files=install_skills_files,
+                    explicit_config=config is not None,
+                    engine_flag=engine,
+                    token_flags={HOOKS: hooks_token_file, MCP: mcp_token_file},
+                    interactive=not json_output and sys.stdin.isatty(),
+                )
+                if (
+                    json_output
+                    and not no_audit
+                    and not dry_run
+                    and result.get("mode") != "thin-client"
+                ):
+                    result["next_steps"].append(
+                        "Run `particles audit <memory-dir>` for the first-run memory audit "
+                        "(skipped: --json is non-interactive)."
+                    )
     except ConfigEditError as exc:
         typer.echo(f"Error editing config.yaml: {exc}", err=True)
         typer.echo(
@@ -225,6 +288,16 @@ def init_claude_code_cmd(
             reset_config()
     if json_output:
         typer.echo(json.dumps(result, indent=2, sort_keys=True))
+
+
+def _refuse_lock(reason: str, *, json_output: bool) -> NoReturn:
+    """Stop before anything is written because the installer lock is refused."""
+    message = f"the installer cannot take its lock: {reason}. Nothing was written."
+    if json_output:
+        typer.echo(json.dumps({"adapter": "claude-code", "status": "conflict", "error": message}))
+    else:
+        typer.echo(f"Error: {message}", err=True)
+    raise typer.Exit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -566,7 +639,7 @@ def _default_command_base() -> str:
     sibling = Path(sys.executable).with_name("particles")
     if sibling.exists():
         return str(sibling.resolve())
-    which = _trusted_which("particles")
+    which = trusted_which("particles")
     if which:
         return str(Path(which).resolve())
     typer.echo(
@@ -637,14 +710,9 @@ def _mcp_registration_env(handle: str, hook_env: dict[str, str]) -> dict[str, st
     talks to the pinned config's engine and never to one the environment
     Claude Code starts it with names (security review E2, 2026-10-26-1 W32).
     """
-    env = dict(hook_env)
-    if "DATABASE_URL" in env:
-        return env
-    default = pinned_default_dsn({"PARTICLES_CONFIG": env["PARTICLES_CONFIG"]})
-    if absolutize_sqlite_dsn(default) != default:
-        dsn = _store_dsn(handle) or _default_store_dsn(handle)
-        env["DATABASE_URL"] = absolutize_sqlite_dsn(dsn)
-    return env
+    from particles.api.cli._harness_pins import mcp_registration_env
+
+    return mcp_registration_env(hook_env, _store_dsn(handle) or _default_store_dsn(handle))
 
 
 def _note_inherited_engine_url(result: dict[str, Any], config_path: Path) -> None:
@@ -667,37 +735,6 @@ def _note_inherited_engine_url(result: dict[str, Any], config_path: Path) -> Non
     )
     result["next_steps"].append(message)
     typer.echo(f"Note: {message}", err=True)
-
-
-def _note_harvest_key_command(result: dict[str, Any]) -> None:
-    """Print the ``keys create`` command that mints this client's hook key.
-
-    It goes to stderr and into the result's next steps, so a run with or
-    without ``--json`` shows it.
-
-    With ``engine.base_url`` set the hooks harvest over HTTP, and the engine
-    accepts a memory or archive file only under the client directories the
-    hook key records. ``keys create`` runs on the engine's host, which cannot
-    see this client's directories, so the install names them, resolved as the
-    harvest resolves the paths it sends.
-    """
-    if not get_config().engine.base_url:
-        return
-    from particles.api.cli._claude_code import local_harvest_roots
-
-    memory, archive = local_harvest_roots()
-    flags = " ".join(
-        [f"--memory-root {shlex.quote(root)}" for root in memory]
-        + [f"--archive-root {shlex.quote(root)}" for root in archive]
-    )
-    result["next_steps"].append(
-        "On the engine's host, mint the hooks their key with `particles engine keys create "
-        f"--role agent --principal claude-code-hook --reserved-principal {flags}`, then give "
-        "it to the hooks as PARTICLES_ENGINE_TOKEN. The engine refuses this client's memory "
-        "and archive files under a hook key that records other directories."
-    )
-    # A run without --json shows it too (security review 2026-10-30-1, AB21).
-    typer.echo(f"Note: {result['next_steps'][-1]}", err=True)
 
 
 def _note_config_origin(
@@ -856,6 +893,9 @@ def _install(
     no_audit: bool,
     install_skills_files: bool = True,
     explicit_config: bool = False,
+    engine_flag: str | None = None,
+    token_flags: dict[str, Path | None] | None = None,
+    interactive: bool = False,
 ) -> dict[str, Any]:
     """Install the integration; return the machine-readable result.
 
@@ -865,6 +905,23 @@ def _install(
     ``next_steps`` — what is left for the human to decide or approve.
     """
     settings = _load_settings(settings_path)
+    flags = token_flags or {}
+    # Thin when the pinned file names an engine; an inherited
+    # PARTICLES_ENGINE_BASE_URL never selects it (the hooks pin that empty).
+    pinned_engine = pinned_config_engine_url(_config_yaml_path())
+    if engine_flag is not None or pinned_engine or any(flags.values()):
+        return _install_thin(
+            settings_path,
+            settings,
+            store_flag=store_flag,
+            dry_run=dry_run,
+            command_override=command_override,
+            install_skills_files=install_skills_files,
+            explicit_config=explicit_config,
+            engine_flag=engine_flag,
+            token_flags=flags,
+            interactive=interactive,
+        )
     handle = _resolve_store_handle(store_flag)
     result: dict[str, Any] = {
         "adapter": "claude-code",
@@ -883,14 +940,13 @@ def _install(
     command_base = command_override or _default_command_base()
     hook_env = _hook_command_env(handle, config_path)
     _note_inherited_engine_url(result, config_path)
-    _note_harvest_key_command(result)
     _note_config_origin(result, config_path, explicit_config=explicit_config)
     _note_store_origin(result, hook_env, config_path)
     # Re-running strips every Particles-owned entry first, so this also drops
     # the Stop entry an install made while agent extraction (
     # deprecated) was on.
     merged = merge_particles_hook_entries(
-        settings, build_hook_commands(command_base, handle, hook_env)
+        settings, build_hook_commands(command_base, handle, hook_env, default_hand_off())
     )
     _note_explicit_store_scope(result, config_path)
     rendered = render_settings_json(merged)
@@ -1019,25 +1075,300 @@ def _install(
     return result
 
 
+def _thin_store_handle(store_flag: str | None) -> str:
+    """The thin install's store: the flag, the single enabled store, else ``default``.
+
+    The handle names a store on the engine, so a thin install never auto-creates
+    ``memory``; ``default`` is the container's only store.
+    """
+    if store_flag:
+        return store_flag
+    enabled = get_config().mcp.write.enabled_stores
+    if len(enabled) == 1:
+        return enabled[0]
+    if not enabled:
+        return "default"
+    typer.echo(
+        "Error: several stores are write-enabled "
+        f"({', '.join(enabled)}); pass --store <handle> to name the engine's memory store.",
+        err=True,
+    )
+    raise typer.Exit(1)
+
+
+def _thin_fail(message: str) -> NoReturn:
+    """Stop a thin install before it writes anything, naming the fix."""
+    typer.echo(f"Error: {message}", err=True)
+    raise typer.Exit(1)
+
+
+def _install_thin(
+    settings_path: Path,
+    settings: dict[str, Any],
+    *,
+    store_flag: str | None,
+    dry_run: bool,
+    command_override: str | None,
+    install_skills_files: bool,
+    explicit_config: bool,
+    engine_flag: str | None,
+    token_flags: dict[str, Path | None],
+    interactive: bool,
+) -> dict[str, Any]:
+    """Install a thin client of a remote engine.
+
+    Pins the engine in the pinned config (never in the commands), provisions no
+    local store, pins one checked token file per client, and reports in
+    ``not_done`` the steps a thin client cannot take. Everything that can fail
+    is judged before the first write.
+    """
+    import getpass
+
+    project_scope = _is_project_scope(settings_path)
+    config_path = _config_yaml_path()
+    cfg = get_config()
+    # The engine is the pinned file's, never one this process's environment
+    # names (security review 2026-10-26-1, W27).
+    old_url = pinned_config_engine_url(config_path)
+    raw_url = engine_flag if engine_flag is not None else (old_url or "")
+    if not raw_url:
+        _thin_fail("--hooks-token-file and --mcp-token-file need an engine: pass --engine URL.")
+    try:
+        url = thin.validate_engine_url(raw_url, allow_plaintext=cfg.engine.allow_plaintext_token)
+    except thin.ThinClientError as exc:
+        _thin_fail(str(exc))
+    handle = _thin_store_handle(store_flag)
+
+    # The config edit: the engine (with --engine) and the store's write tools.
+    existing_text = config_path.read_text(encoding="utf-8") if config_path.exists() else None
+    text = existing_text if existing_text is not None else minimal_config_text()
+    if engine_flag is not None:
+        text = set_engine_base_url_text(text, url)
+    text = enable_write_store_text(text, handle)
+    new_config_text = text if text != existing_text else None
+
+    # A wrapper install's hook entries are not ours to replace.
+    wrappers = thin.wrapper_hook_entries(settings)
+    if wrappers:
+        listed = "\n  ".join(_shown_command(command) for command in wrappers)
+        _thin_fail(
+            f"{settings_path} runs the Particles hooks through a wrapper the installer does "
+            f"not own:\n  {listed}\nDelete those entries and re-run; the wrapper's key moves "
+            "to a token file with --hooks-token-file, or at this install's prompt.",
+        )
+
+    # The token files (§5): judged, and prompted for, before any write.
+    clients = [HOOKS] if project_scope else [HOOKS, MCP]
+    plans = {client: thin.plan_token(client, token_flags.get(client)) for client in clients}
+    entered: dict[str, str] = {}
+    blocked: list[str] = []
+    for client, plan in plans.items():
+        if plan.state == "refused":
+            _thin_fail(f"the {client} token file {plan.path}: {plan.refusal}")
+        if plan.state != "missing":
+            continue
+        if plan.given:
+            _thin_fail(f"--{client}-token-file {plan.path}: no such file.")
+        if dry_run or not interactive:
+            plan.state = (
+                "missing (would prompt)"
+                if dry_run and interactive
+                else ("missing (blocked: non-interactive)")
+            )
+            if not dry_run:
+                blocked.append(
+                    f"{client} token file missing: {plan.path}; re-run interactively to enter "
+                    f"the key, or pass --{client}-token-file with a file that holds it"
+                )
+            continue
+        value = getpass.getpass(f"Engine key for the {client} (input hidden; empty skips): ")
+        value = value.strip()
+        if not value:
+            plan.state = "missing (skipped at the prompt)"
+            blocked.append(f"{client} token file missing: {plan.path}")
+            continue
+        if any(c.isspace() or ord(c) < 32 for c in value):
+            _thin_fail(f"the {client} key holds whitespace or a control character.")
+        refusal = thin.key_refusal(client, value)
+        if refusal is not None:
+            _thin_fail(f"the {client} key: {refusal}")
+        entered[client] = value
+        plan.state = "entered"
+
+    command_base = command_override or _default_command_base()
+    base_env = {
+        "PARTICLES_CONFIG": str(config_path.resolve()),
+        "PARTICLES_ENGINE_BASE_URL": "",
+        "PARTICLES_ENGINE_TOKEN": "",
+    }
+    hook_env = {**base_env, "PARTICLES_ENGINE_TOKEN_FILE": str(plans[HOOKS].path)}
+    mcp_env = (
+        {**base_env, "PARTICLES_ENGINE_TOKEN_FILE": str(plans[MCP].path)} if MCP in plans else {}
+    )
+    merged = merge_particles_hook_entries(
+        settings, build_hook_commands(command_base, handle, hook_env, default_hand_off())
+    )
+    rendered = render_settings_json(merged)
+    memory_roots, archive_roots = local_harvest_roots()
+    keys_create = thin.keys_create_commands(
+        cfg.mcp.write.asserter_identity, memory_roots, archive_roots
+    )
+    not_done = thin.not_done_entries(rule_sources=cfg.rule_sources.enabled)
+    result: dict[str, Any] = {
+        "adapter": "claude-code",
+        "action": "install",
+        "mode": "thin-client",
+        "dry_run": dry_run,
+        "scope": "project" if project_scope else "user",
+        "store": handle,
+        "settings_path": str(settings_path),
+        "engine": {
+            "base_url": _shown_url(url),
+            "previous_base_url": _shown_url(old_url) if old_url and old_url != url else None,
+            "local_store": None,
+        },
+        "token_files": {client: plan.shown() for client, plan in plans.items()},
+        "not_done": not_done,
+        "blocked": blocked,
+        "created": {},
+        "next_steps": [],
+    }
+    for client, plan in plans.items():
+        if plan.state not in ("present", "entered"):
+            result["next_steps"].append(
+                f"On the engine's host, mint the {client} key with `{keys_create[client]}`."
+            )
+    if not cfg.claude_code.harvest.allow_remote:
+        result["next_steps"].append(
+            "The SessionEnd harvest is off for a remote engine until you set "
+            f"claude_code.harvest.allow_remote: true in {config_path}; shipping session "
+            "transcripts to another machine is your choice."
+        )
+    _note_config_origin(result, config_path, explicit_config=explicit_config)
+
+    if dry_run:
+        _say(f"--dry-run: thin client of {_shown_url(url)}, store '{handle}' on the engine.")
+        _say("  No local store, no blob directory, no DATABASE_URL.")
+        if new_config_text is not None:
+            _say(f"--dry-run: would write {config_path}:")
+            _say(new_config_text)
+        _say(f"--dry-run: would write {settings_path} (values it does not write hidden):")
+        _say(_shown_settings_json(merged))
+        if MCP in plans:
+            _register_mcp_server(
+                result,
+                executable=command_base,
+                env=mcp_env,
+                dry_run=True,
+                replace_config_pin=explicit_config,
+                thin=True,
+            )
+        for client, plan in plans.items():
+            _say(f"--dry-run: {client} token file {plan.path}: {plan.state}")
+        _say("--dry-run: not done on a thin client:")
+        for entry in not_done:
+            _say(f"  {entry['step']}: {entry['consequence']}")
+        for step in result["next_steps"]:
+            _say(f"--dry-run: next: {step}")
+        result["hooks"] = _hook_command_map(merged)
+        return result
+
+    # The engine check, with the keys themselves and against the engine being
+    # installed, before anything is written.
+    tokens = dict(entered)
+    for client, plan in plans.items():
+        if plan.state == "present":
+            tokens[client] = thin.read_token(plan)
+    if tokens:
+        probe = thin.probe_engine(
+            tokens,
+            base_url=url,
+            store=handle,
+            asserter_identity=cfg.mcp.write.asserter_identity,
+            harvest_roots=(memory_roots, archive_roots),
+        )
+        result["engine"]["verified"] = probe.verified
+        if probe.note is not None:
+            result["engine"]["note"] = probe.note
+            _say(f"Engine not verified: {probe.note}.")
+        if probe.refusals:
+            for client, refusal in probe.refusals.items():
+                typer.echo(f"Error: {client}: {refusal}.", err=True)
+            typer.echo("Nothing was written; mint the right key and re-run.", err=True)
+            raise typer.Exit(1)
+        result["next_steps"].extend(probe.warnings)
+    else:
+        result["engine"]["verified"] = False
+
+    if new_config_text is not None:
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(new_config_text, encoding="utf-8")
+        reset_config()
+        _say(f"Wrote {config_path} (engine.base_url and the store's write tools).")
+    result["config_path"] = str(config_path)
+
+    # Enrol the keys entered at the prompt, then keep the directory out of backups.
+    written = thin.written_files(thin.read_state())
+    for client, value in entered.items():
+        thin.enrol_token(plans[client].path, value)
+        plans[client].state = "present"
+        entry = {"path": str(plans[client].path), "settings": str(settings_path)}
+        if entry not in written:
+            written.append(entry)
+        _say(f"Wrote the {client} key to {plans[client].path} (mode 0600).")
+    result["token_files"] = {client: plan.shown() for client, plan in plans.items()}
+    make_private_dir(thin.token_dir())
+    note = thin.exclude_from_backups(thin.token_dir())
+    result["created"]["backup_exclusion"] = note is None
+    if note is not None:
+        result["next_steps"].append(note)
+
+    # The client's own files: the state directory, the projection and the settings.
+    state_path = state_dir()
+    make_private_dir(state_path)
+    state_path.chmod(0o700)
+    result["created"]["state_dir"] = str(state_path)
+    project_root = repository_root(Path.cwd()) if project_scope else None
+    project_memory_dir = (
+        Path.home() / ".claude" / "projects" / claude_project_slug(project_root) / "memory"
+        if project_root is not None
+        else None
+    )
+    if get_config().agent_memory.projection.enabled:
+        _provision_projection(project_memory_dir)
+    _make_settings_directory(settings_path)
+    _write_settings(settings_path, rendered)
+    _say(
+        f"Installed the Claude Code hooks into {settings_path} as a thin client of "
+        f"{_shown_url(url)} (store: {handle})."
+    )
+    result["hooks"] = _hook_command_map(merged)
+    if install_skills_files:
+        result["created"]["skills"] = [str(p) for p in _install_skills(project=project_scope)]
+    if MCP in plans:
+        _register_mcp_server(
+            result,
+            executable=command_base,
+            env=mcp_env,
+            dry_run=False,
+            replace_config_pin=explicit_config,
+            thin=True,
+        )
+    thin.write_state({"token_files_written": written, "engine": _shown_url(url)})
+
+    _say("Not done on a thin client:")
+    for entry in not_done:
+        _say(f"  {entry['step']}: {entry['consequence']}")
+    for item in blocked:
+        _say(f"Blocked: {item}")
+    for step in result["next_steps"]:
+        typer.echo(f"Note: {step}", err=True)
+    return result
+
+
 #: Where `init` records the MCP registration change it made, so `--remove` reverts
 #: exactly that and nothing it did not do.
 _MCP_STATE = "mcp-registration.json"
-
-
-def _trusted_which(name: str) -> str | None:
-    """``shutil.which(name)`` over the ``PATH`` entries no other user may write.
-
-    An empty or relative entry would find a program in the working directory,
-    which may be a clone, and the install runs ``claude`` and pins the
-    ``particles`` it finds into every hook (security review 2026-10-28-1, O61).
-    The entries kept are the ones a pinned ``curl`` or ``git`` fetch keeps.
-    """
-    return shutil.which(name, path=_trusted_path())
-
-
-def _trusted_path() -> str:
-    """The inherited ``PATH`` cut to the entries no other user may write."""
-    return pinned_subprocess_env(os.environ).get("PATH", "")
 
 
 def _claude_mcp(argv: list[str]) -> bool:
@@ -1050,10 +1381,10 @@ def _claude_mcp(argv: list[str]) -> bool:
     ``node`` through ``PATH``, which an untrusted entry would answer from the
     working directory (security review 2026-10-28-2, AA10).
     """
-    exe = _trusted_which("claude")
+    exe = trusted_which("claude")
     if exe is None:
         return False
-    env = {**os.environ, "PATH": _trusted_path()}
+    env = {**os.environ, "PATH": trusted_path()}
     try:
         done = subprocess.run([exe, *argv], capture_output=True, text=True, timeout=60, env=env)
     except (OSError, subprocess.SubprocessError):
@@ -1068,6 +1399,7 @@ def _register_mcp_server(
     env: dict[str, str],
     dry_run: bool,
     replace_config_pin: bool = False,
+    thin: bool = False,
 ) -> None:
     """Register (or bind) the user-scope Particles MCP server: ``mcp serve --project-observer cwd``.
 
@@ -1089,7 +1421,11 @@ def _register_mcp_server(
         )
         _say(f"The MCP server keeps its own config pin ({foreign}).")
     plan = plan_mcp_registration(
-        existing, executable=executable, env=env, replace_config_pin=replace_config_pin
+        existing,
+        executable=executable,
+        env=env,
+        replace_config_pin=replace_config_pin,
+        thin=thin,
     )
     kept = kept_database_url(existing, env, None if plan is None else plan[0])
     if kept is not None:
@@ -1171,7 +1507,7 @@ _SHOWN_ENV_KEYS = frozenset({"PARTICLES_CONFIG", "DATABASE_URL", "PARTICLES_ENGI
 
 def _shown_env_value(key: str, value: str) -> str:
     """``value`` as a printed command or note may show it (security review 2026-10-28-1, O27)."""
-    if key == "PARTICLES_CONFIG" or not value:
+    if key in ("PARTICLES_CONFIG", "PARTICLES_ENGINE_TOKEN_FILE") or not value:
         return value
     if key in _SHOWN_ENV_KEYS:
         return _shown_url(value)
@@ -1918,6 +2254,7 @@ def _remove(settings_path: Path, *, dry_run: bool, explicit_config: bool = False
             if new_text != config_path.read_text(encoding="utf-8"):
                 revert_config_text = new_text
 
+    _remove_token_files(result, dry_run=dry_run, settings_path=settings_path)
     if dry_run:
         if installed:
             _say(f"--dry-run: would write {settings_path} (values it does not write hidden):")
@@ -1963,6 +2300,46 @@ def _remove(settings_path: Path, *, dry_run: bool, explicit_config: bool = False
         f"State directory {state_dir()} kept (hook log history); delete it manually."
     )
     return result
+
+
+def _remove_token_files(result: dict[str, Any], *, dry_run: bool, settings_path: Path) -> None:
+    """Delete the token files this install wrote, and name each key's revoke.
+
+    Only the files recorded for this settings file are removed, and a file
+    another install (the user scope, or another project) also recorded is
+    kept for it. A file the install did not write (one named with
+    ``--hooks-token-file``) was never recorded. Deleting a file does not revoke
+    its key, so each removal prints the ``keys revoke`` command for the
+    engine's host.
+    """
+    from particles.secrets import EngineTokenFileError, check_engine_token_file
+
+    state = thin.read_state()
+    entries = thin.written_files(state)
+    mine = [e for e in entries if e.get("settings") == str(settings_path)]
+    rest = [e for e in entries if e.get("settings") != str(settings_path)]
+    shared = {e["path"] for e in rest}
+    written = [e["path"] for e in mine if e["path"] not in shared]
+    result["token_files_removed"] = written
+    for path in written:
+        try:
+            revoke = thin.revoke_command(check_engine_token_file(path))
+        except EngineTokenFileError:
+            revoke = None
+        if dry_run:
+            _say(f"--dry-run: would delete the token file {path}")
+        else:
+            Path(path).unlink(missing_ok=True)
+            _say(f"Deleted the token file {path}.")
+        result["next_steps"].append(
+            f"Deleting {path} does not revoke its key"
+            + (f": on the engine's host, run `{revoke}`." if revoke else ".")
+        )
+    if not dry_run:
+        if rest:
+            thin.write_state({**state, "token_files_written": rest})
+        else:
+            thin.forget_state()
 
 
 def _hook_config_pin_trusted(pinned: str, settings_path: Path, *, explicit_config: bool) -> bool:

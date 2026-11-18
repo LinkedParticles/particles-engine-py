@@ -19,6 +19,7 @@ from particles.core.schema import (
     Particle,
     ProvenanceRef,
     ProvenanceRefType,
+    RelationCreatedBy,
     UncertaintyNature,
     UnmergeGroup,
     UnmergeSkipReason,
@@ -181,3 +182,14 @@ def test_missing_survivor_reports_none() -> None:
     assert isinstance(out, UnmergeGroup)
     assert out.survivor_status is None
     assert out.restored_ids == ["a"]
+
+
+def test_the_merge_basis_names_the_tag_a_revert_withdraws() -> None:
+    by_id = {"s1": _p("s1"), "a": _merged("a")}
+    exact = plan_unmerge_group(_event({"survivor": "s1", "superseded": ["a"]}), by_id)
+    reread = plan_unmerge_group(
+        _event({"survivor": "s1", "superseded": ["a"], "basis": "reread_judged"}), by_id
+    )
+    assert isinstance(exact, UnmergeGroup) and isinstance(reread, UnmergeGroup)
+    assert exact.relation_tag is RelationCreatedBy.EXACT_DUPLICATE
+    assert reread.relation_tag is RelationCreatedBy.REREAD_DUPLICATE

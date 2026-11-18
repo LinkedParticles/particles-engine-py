@@ -27,6 +27,7 @@ import particles.corpus.refusals  # noqa: F401
 import particles.corpus.rule_roots  # noqa: F401
 import particles.corpus.store  # noqa: F401
 import particles.store.change_journal  # noqa: F401
+import particles.store.codex_capture_store  # noqa: F401
 import particles.store.curation_snapshot_store  # noqa: F401
 import particles.store.event_store  # noqa: F401
 import particles.store.extractor_store  # noqa: F401
@@ -36,6 +37,7 @@ import particles.store.particle_store  # noqa: F401
 import particles.store.probe_verdict_store  # noqa: F401
 import particles.store.relation_store  # noqa: F401
 import particles.store.session_exposure_store  # noqa: F401
+import particles.store.subject_provisional  # noqa: F401
 import particles.store.subject_store  # noqa: F401
 import particles.store.synthesis_cache_store  # noqa: F401
 import particles.store.taxonomy_store  # noqa: F401

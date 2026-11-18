@@ -1,0 +1,3 @@
+node_modules/
+# Generated from ../../artifacts/openapi.json by `npm run gen-api`; not committed.
+src/openapi.d.ts

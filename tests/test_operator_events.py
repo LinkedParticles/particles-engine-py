@@ -582,13 +582,40 @@ class TestLinksConsumer:
         assert OperatorEventType.RELATION_REMOVED in types
 
     @pytest.mark.asyncio
-    async def test_llm_judge_link_logs_nothing(self, db_session: AsyncSession) -> None:
-        # auto-suggest (LLM_JUDGE) is not an operator decision.
+    async def test_llm_judge_link_logs_its_verdict(self, db_session: AsyncSession) -> None:
+        # RA3: a link a model verdict writes pools the pair at query time, so
+        # it is logged with the rung that decided it and the run that applied it.
         from particles.core.schema import RelationCreatedBy, RelationType
         from particles.store.relation_store import create_relation
 
         await create_relation(
-            db_session, "p-a", "p-b", RelationType.CO_EVIDENTIAL, RelationCreatedBy.LLM_JUDGE
+            db_session,
+            "p-a",
+            "p-b",
+            RelationType.CO_EVIDENTIAL,
+            RelationCreatedBy.LLM_JUDGE,
+            actor="links-suggest",
+            decided_by="duplicate_judge@abc",
+            run_id="run-1",
+        )
+        await db_session.commit()
+        (event,) = await list_events(db_session, event_type=OperatorEventType.RELATION_ADDED)
+        assert event.actor == "links-suggest"
+        assert event.payload is not None
+        assert event.payload["created_by"] == "LLM_JUDGE"
+        assert event.payload["decided_by"] == "duplicate_judge@abc"
+        assert event.payload["run_id"] == "run-1"
+
+    @pytest.mark.asyncio
+    async def test_exact_duplicate_link_leaves_the_event_to_its_caller(
+        self, db_session: AsyncSession
+    ) -> None:
+        # `links dedup --apply` writes one DUPLICATES_MERGED event per group.
+        from particles.core.schema import RelationCreatedBy, RelationType
+        from particles.store.relation_store import create_relation
+
+        await create_relation(
+            db_session, "p-a", "p-b", RelationType.CO_EVIDENTIAL, RelationCreatedBy.EXACT_DUPLICATE
         )
         await db_session.commit()
         assert await list_events(db_session, event_type=OperatorEventType.RELATION_ADDED) == []

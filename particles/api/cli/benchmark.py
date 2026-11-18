@@ -17,14 +17,19 @@ gating and rendering only; every measurement decision lives in the harness.
 from __future__ import annotations
 
 import sys
+from collections.abc import Sequence
 from datetime import datetime
 from enum import StrEnum
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
 
 from particles.api.cli import app, run
 from particles.api.cli._progress import confirm
+
+if TYPE_CHECKING:
+    from particles.benchmark.ceiling import Role, StoppedAtCeiling
 
 benchmark_app = typer.Typer(
     help="Whole-pipeline system benchmarks, distinct from the "
@@ -720,6 +725,11 @@ class _RotArm(StrEnum):
     live = "live"
 
 
+class _RotProfile(StrEnum):
+    full = "full"
+    quick = "quick"
+
+
 class _ObserverArm(StrEnum):
     lines = "lines"
     chunked = "chunked"
@@ -828,6 +838,13 @@ def benchmark_rot_cmd(  # noqa: PLR0913 — CLI option list is the API
     days: int | None = typer.Option(
         None, "--days", min=30, help="Simulated world length (default: benchmark_rot.days)."
     ),
+    profile: _RotProfile = typer.Option(
+        _RotProfile.full,
+        "--profile",
+        help="World size: full (twelve attributes, six checkpoints) or quick (six "
+        "attributes, three checkpoints, sparse filler; about a quarter of the "
+        "sessions).",
+    ),
     top_k: int | None = typer.Option(
         None, "--top-k", min=1, help="Probe top-k (default: benchmark_rot.top_k)."
     ),
@@ -900,6 +917,7 @@ def benchmark_rot_cmd(  # noqa: PLR0913 — CLI option list is the API
             arm=arm.value,
             seeds=list(seed) if seed else None,
             days=days,
+            profile=profile.value,
             top_k=top_k,
             trust_policy=trust_policy,
             estimate_only=estimate,
@@ -931,8 +949,10 @@ async def _benchmark_rot(  # noqa: PLR0913 — mirrors the CLI options
     attribute: str | None = None,
     real_pairs: bool = True,
     rulings: Path | None = None,
+    profile: str = "full",
 ) -> None:
     from particles.benchmark.rot import (
+        PROFILES,
         RotArmError,
         estimate_rot_run,
         render_estimate,
@@ -945,7 +965,8 @@ async def _benchmark_rot(  # noqa: PLR0913 — mirrors the CLI options
     cfg = get_config().benchmark_rot
     effective_seeds = seeds or list(cfg.seeds)
     effective_days = days if days is not None else cfg.days
-    checkpoints = [c for c in cfg.checkpoints if c <= effective_days]
+    default_cps = cfg.checkpoints if profile == "full" else PROFILES[profile].checkpoints
+    checkpoints = [c for c in default_cps if c <= effective_days]
     # the operator's demotion rulings, scored apart from the worlds.
     rulings_file = (rulings or rulings_path()) if real_pairs else None
     if rulings_file is not None and not rulings_file.exists():
@@ -961,6 +982,7 @@ async def _benchmark_rot(  # noqa: PLR0913 — mirrors the CLI options
         days=effective_days,
         checkpoints=checkpoints,
         real_pairs=rulings_file,
+        profile=profile,
     )
     typer.echo(render_estimate(est), err=True)
     if estimate_only:
@@ -998,6 +1020,7 @@ async def _benchmark_rot(  # noqa: PLR0913 — mirrors the CLI options
             attribute=attribute,
             progress=_progress_line,
             real_pairs=rulings_file,
+            profile=profile,
         )
     except RotArmError as exc:
         typer.echo(f"Error: {exc}", err=True)
@@ -1072,6 +1095,39 @@ floor_app = typer.Typer(
     invoke_without_command=True,
 )
 benchmark_app.add_typer(floor_app, name="relevance-floor")
+
+
+def _refuse_without_stops(
+    roles: Sequence[Role],
+    *,
+    max_usd: float | None,
+    max_calls: int | None,
+    no_ceiling: bool,
+) -> None:
+    """Exit 2, before any call, unless the run carries the stops its roles need."""
+    from particles.benchmark.ceiling import stop_refusal
+
+    if max_usd is not None and max_usd <= 0:
+        typer.echo("Error: --max-usd must be above zero. Nothing was spent.", err=True)
+        raise typer.Exit(2)
+    refusal = stop_refusal(roles, max_usd=max_usd, max_calls=max_calls, no_ceiling=no_ceiling)
+    if refusal is not None:
+        typer.echo(
+            f"Error: {refusal} Run --estimate for the projection. Nothing was spent.", err=True
+        )
+        raise typer.Exit(2)
+
+
+def _echo_stopped(stopped: StoppedAtCeiling | None) -> None:
+    """Say on stderr, after the spend block, that the run stopped at its ceiling."""
+    if stopped is None:
+        return
+    typer.echo(
+        f"Stopped at the spend ceiling: {stopped.unstarted} question(s) never started and "
+        f"{stopped.interrupted} were interrupted and discarded. The report is marked "
+        "INCOMPLETE; re-run with a higher ceiling to finish it.",
+        err=True,
+    )
 
 
 def _refuse_inside_repository(path: Path, *, what: str, allow: bool) -> None:
@@ -1245,6 +1301,27 @@ def benchmark_floor_cmd(  # noqa: PLR0913 — CLI option list is the API
     yes: bool = typer.Option(
         False, "--yes", "-y", help="Skip the confirmation above the call threshold."
     ),
+    max_usd: float | None = typer.Option(
+        None,
+        "--max-usd",
+        help="Stop the run once its priced roles have spent this many US$ at list "
+        "price (llm.price_per_mtok, not your account balance). Calls in flight "
+        "finish, and a re-run with a higher ceiling resumes. Required when a role is "
+        "priced; there is no default.",
+    ),
+    max_calls: int | None = typer.Option(
+        None,
+        "--max-calls",
+        min=1,
+        help="Stop the run once its unpriced roles have made this many billed calls. "
+        "Required when a role has no llm.price_per_mtok entry, unless --no-ceiling.",
+    ),
+    no_ceiling: bool = typer.Option(
+        False,
+        "--no-ceiling",
+        help="Run an unpriced role (a local model that costs nothing to call) with no "
+        "call count. Never lifts the --max-usd a priced role needs.",
+    ),
     output: Path | None = typer.Option(
         None, "--output", "-o", help="Write the rendered report to this path as well."
     ),
@@ -1298,6 +1375,9 @@ def benchmark_floor_cmd(  # noqa: PLR0913 — CLI option list is the API
             checkpoint=checkpoint,
             allow_in_repo=allow_in_repo,
             replay_from=replay_from,
+            max_usd=max_usd,
+            max_calls=max_calls,
+            no_ceiling=no_ceiling,
         )
     )
 
@@ -1316,9 +1396,18 @@ async def _benchmark_floor(  # noqa: PLR0913 — mirrors the CLI options
     checkpoint: Path | None,
     allow_in_repo: bool,
     replay_from: Path | None = None,
+    max_usd: float | None = None,
+    max_calls: int | None = None,
+    no_ceiling: bool = False,
 ) -> None:
     from pydantic import ValidationError
 
+    from particles.benchmark.ceiling import (
+        SpendCeiling,
+        configured_roles,
+        render_stop_terms,
+        worst_case_usd,
+    )
     from particles.benchmark.relevance_floor import (
         RelevanceFloorError,
         RelevanceFloorReport,
@@ -1332,9 +1421,12 @@ async def _benchmark_floor(  # noqa: PLR0913 — mirrors the CLI options
         reuse_replay,
         run_judged,
         sample_questions,
+        stop_calls,
     )
+    from particles.benchmark.spend import ROLE_PURPOSES, RunSpend, measure_spend, render_spend
     from particles.config import get_config
     from particles.db import DEFAULT_STORE
+    from particles.llm.usage import track_usage
 
     cfg = get_config().benchmark_relevance_floor
     heldout_path = (heldout or Path(cfg.heldout_path)).expanduser()
@@ -1350,6 +1442,10 @@ async def _benchmark_floor(  # noqa: PLR0913 — mirrors the CLI options
         raise typer.Exit(1)
     if output is not None and output_format is _Format.json:
         _refuse_inside_repository(output, what="the JSON report", allow=allow_in_repo)
+    roles = configured_roles(ROLE_PURPOSES)
+    if judge and not estimate_only:
+        # Before the free replay, which is slow on a large store.
+        _refuse_without_stops(roles, max_usd=max_usd, max_calls=max_calls, no_ceiling=no_ceiling)
 
     questions = sample_questions(load_heldout(heldout_path), limit, cfg.sample_seed)
     if not questions:
@@ -1358,6 +1454,8 @@ async def _benchmark_floor(  # noqa: PLR0913 — mirrors the CLI options
     handle = store or DEFAULT_STORE
     depth = top_k if top_k is not None else cfg.top_k
 
+    spend: RunSpend | None = None
+    stopped: StoppedAtCeiling | None = None
     try:
         selection = await build_selection(
             questions,
@@ -1385,9 +1483,27 @@ async def _benchmark_floor(  # noqa: PLR0913 — mirrors the CLI options
         if judge:
             est = estimate_judged_stage(results)
             typer.echo(render_estimate(est), err=True)
+            in_flight, projected = stop_calls(est, roles)
             if estimate_only:
+                worst = worst_case_usd(projected)
+                if worst is not None:
+                    typer.echo(
+                        f"  · output worst case, every projected call at its max_tokens: "
+                        f"~US${worst:,.2f}",
+                        err=True,
+                    )
                 typer.echo("--estimate: no LLM call was made.", err=True)
             else:
+                typer.echo(
+                    render_stop_terms(
+                        roles,
+                        max_usd=max_usd,
+                        max_calls=max_calls,
+                        in_flight=in_flight,
+                        worst_case_usd=worst_case_usd(projected),
+                    ),
+                    err=True,
+                )
                 if est.llm_calls > cfg.confirm_call_threshold and not yes:
                     if not sys.stdin.isatty():
                         typer.echo(
@@ -1404,20 +1520,36 @@ async def _benchmark_floor(  # noqa: PLR0913 — mirrors the CLI options
                         raise typer.Exit(1)
                 _refuse_without_key(purposes=("query_response", "benchmark"))
                 scoreable = {r.question_id for r in results if r.max_similarity is not None}
-                results = await run_judged(
-                    [q for q in questions if q.question_id in scoreable],
-                    store=handle,
-                    selection=selection,
-                    checkpoint_path=(
-                        checkpoint or heldout_path.with_name("judged-checkpoint.jsonl")
-                    ).expanduser(),
-                    progress=_progress_line,
-                ) + [r for r in results if r.max_similarity is None]
+                restored: list[str] = []
+                # Measured usage, printed beside the estimate and
+                # kept in the report.
+                with track_usage() as usage:
+                    ceiling = SpendCeiling(usage, max_usd=max_usd, max_calls=max_calls)
+                    try:
+                        judged = await run_judged(
+                            [q for q in questions if q.question_id in scoreable],
+                            store=handle,
+                            selection=selection,
+                            checkpoint_path=(
+                                checkpoint or heldout_path.with_name("judged-checkpoint.jsonl")
+                            ).expanduser(),
+                            progress=_progress_line,
+                            restored_out=restored,
+                            ceiling=ceiling,
+                        )
+                    finally:
+                        spend = measure_spend(
+                            est, usage.snapshot(), restored_questions=len(restored)
+                        )
+                        typer.echo(render_spend(spend), err=True)
+                stopped = ceiling.report
+                _echo_stopped(stopped)
+                results = judged + [r for r in results if r.max_similarity is None]
     except RelevanceFloorError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from exc
 
-    report = build_report(selection, results)
+    report = build_report(selection, results, spend=spend, stopped=stopped)
     rendered = (
         report.model_dump_json(indent=2) if output_format is _Format.json else render_report(report)
     )
@@ -1467,6 +1599,27 @@ def benchmark_leakage_cmd(  # noqa: PLR0913 — CLI option list is the API
     yes: bool = typer.Option(
         False, "--yes", "-y", help="Skip the confirmation above the call threshold."
     ),
+    max_usd: float | None = typer.Option(
+        None,
+        "--max-usd",
+        help="Stop the run once its priced roles have spent this many US$ at list "
+        "price (llm.price_per_mtok, not your account balance). Calls in flight "
+        "finish, and a re-run with a higher ceiling resumes. Required when a role is "
+        "priced; there is no default.",
+    ),
+    max_calls: int | None = typer.Option(
+        None,
+        "--max-calls",
+        min=1,
+        help="Stop the run once its unpriced roles have made this many billed calls. "
+        "Required when a role has no llm.price_per_mtok entry, unless --no-ceiling.",
+    ),
+    no_ceiling: bool = typer.Option(
+        False,
+        "--no-ceiling",
+        help="Run an unpriced role (a local model that costs nothing to call) with no "
+        "call count. Never lifts the --max-usd a priced role needs.",
+    ),
     per_question: bool | None = typer.Option(
         None,
         "--per-question/--aggregate-only",
@@ -1498,6 +1651,15 @@ def benchmark_leakage_cmd(  # noqa: PLR0913 — CLI option list is the API
         "judged against the ids they cite, and the labels are reported beside the "
         "silent unsupported count. Default: query.grounded_answers.",
     ),
+    calibrate_from: Path | None = typer.Option(
+        None,
+        "--calibrate-from",
+        exists=True,
+        dir_okay=False,
+        help="A saved leakage JSON report whose judged answers set the projection's "
+        "sentences per answer, and so its judge calls (default: "
+        "benchmark_leakage.estimate_sentences_per_answer, stated as assumed).",
+    ),
 ) -> None:
     """Measure how much of each query answer the retrieved particles do not support.
 
@@ -1522,6 +1684,10 @@ def benchmark_leakage_cmd(  # noqa: PLR0913 — CLI option list is the API
             checkpoint=checkpoint,
             allow_in_repo=allow_in_repo,
             grounded=grounded,
+            calibrate_from=calibrate_from,
+            max_usd=max_usd,
+            max_calls=max_calls,
+            no_ceiling=no_ceiling,
         )
     )
 
@@ -1541,16 +1707,32 @@ async def _benchmark_leakage(  # noqa: PLR0913 — mirrors the CLI options
     checkpoint: Path | None,
     allow_in_repo: bool,
     grounded: bool | None = None,
+    calibrate_from: Path | None = None,
+    max_usd: float | None = None,
+    max_calls: int | None = None,
+    no_ceiling: bool = False,
 ) -> None:
+    from pydantic import ValidationError
+
+    from particles.benchmark.ceiling import (
+        SpendCeiling,
+        configured_roles,
+        render_stop_terms,
+        worst_case_usd,
+    )
     from particles.benchmark.leakage import (
         LeakageError,
+        LeakageReport,
+        SentenceMeasure,
         build_report,
         build_selection,
         check_distinct_judge,
         estimate_run,
+        measured_sentences_per_answer,
         render_estimate,
         render_report,
         run_leakage,
+        stop_calls,
     )
     from particles.benchmark.relevance_floor import (
         HeldOutQuestion,
@@ -1559,8 +1741,10 @@ async def _benchmark_leakage(  # noqa: PLR0913 — mirrors the CLI options
         question_id,
         sample_questions,
     )
+    from particles.benchmark.spend import ROLE_PURPOSES, RunSpend, measure_spend, render_spend
     from particles.config import get_config
     from particles.db import DEFAULT_STORE
+    from particles.llm.usage import track_usage
 
     cfg = get_config().benchmark_leakage
     ad_hoc = bool(questions)
@@ -1598,13 +1782,50 @@ async def _benchmark_leakage(  # noqa: PLR0913 — mirrors the CLI options
     handle = store or DEFAULT_STORE
     depth = top_k if top_k is not None else cfg.top_k
 
+    sentences: SentenceMeasure | None = None
+    if calibrate_from is not None:
+        try:
+            saved = LeakageReport.model_validate_json(calibrate_from.read_text())
+        except ValidationError as exc:
+            typer.echo(f"Error: {calibrate_from} is not a leakage report: {exc}", err=True)
+            raise typer.Exit(1) from exc
+        sentences = measured_sentences_per_answer(saved, source=calibrate_from.name)
+        if sentences is None:
+            typer.echo(
+                f"Error: {calibrate_from} judged no answer, so it measures no sentence count.",
+                err=True,
+            )
+            raise typer.Exit(1)
+
+    spend: RunSpend | None = None
+    stopped: StoppedAtCeiling | None = None
     try:
         check_distinct_judge()
-        est = estimate_run(held, top_k=depth)
+        est = estimate_run(held, top_k=depth, sentences=sentences)
         typer.echo(render_estimate(est), err=True)
+        roles = configured_roles(ROLE_PURPOSES)
+        in_flight, projected = stop_calls(est, roles)
         if estimate_only:
+            worst = worst_case_usd(projected)
+            if worst is not None:
+                typer.echo(
+                    f"  · output worst case, every projected call at its max_tokens: "
+                    f"~US${worst:,.2f}",
+                    err=True,
+                )
             typer.echo("--estimate: no LLM call was made.", err=True)
             return
+        _refuse_without_stops(roles, max_usd=max_usd, max_calls=max_calls, no_ceiling=no_ceiling)
+        typer.echo(
+            render_stop_terms(
+                roles,
+                max_usd=max_usd,
+                max_calls=max_calls,
+                in_flight=in_flight,
+                worst_case_usd=worst_case_usd(projected),
+            ),
+            err=True,
+        )
         if est.llm_calls > cfg.confirm_call_threshold and not yes:
             if not sys.stdin.isatty():
                 typer.echo(
@@ -1627,18 +1848,32 @@ async def _benchmark_leakage(  # noqa: PLR0913 — mirrors the CLI options
             sample_limit=limit,
             grounded=grounded,
         )
-        results = await run_leakage(
-            held,
-            store=handle,
-            selection=selection,
-            checkpoint_path=checkpoint_path,
-            progress=_progress_line,
-        )
+        restored: list[str] = []
+        # Measured usage: what the providers reported for this run,
+        # printed beside the estimate and kept in the report, so every run
+        # calibrates the next one's projection.
+        with track_usage() as usage:
+            ceiling = SpendCeiling(usage, max_usd=max_usd, max_calls=max_calls)
+            try:
+                results = await run_leakage(
+                    held,
+                    store=handle,
+                    selection=selection,
+                    checkpoint_path=checkpoint_path,
+                    progress=_progress_line,
+                    restored_out=restored,
+                    ceiling=ceiling,
+                )
+            finally:
+                spend = measure_spend(est, usage.snapshot(), restored_questions=len(restored))
+                typer.echo(render_spend(spend), err=True)
+        stopped = ceiling.report
+        _echo_stopped(stopped)
     except LeakageError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(1) from exc
 
-    report = build_report(selection, results)
+    report = build_report(selection, results, spend=spend, stopped=stopped)
     rendered = (
         report.model_dump_json(indent=2)
         if output_format is _Format.json

@@ -17,17 +17,30 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from sqlalchemy import ColumnElement, DateTime, String, Text, delete, insert, or_, select
+from sqlalchemy import (
+    ColumnElement,
+    DateTime,
+    String,
+    Text,
+    case,
+    delete,
+    func,
+    insert,
+    or_,
+    select,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
 from particles.config import get_config
 from particles.core.artifact_fold import ARTIFACT_REF_NAMESPACE, artifact_ref_project
+from particles.core.provisional import ProvisionalMark
 from particles.core.schema import ContributorRef, ExternalRef, Subject
 from particles.db import Base
 from particles.sql_safety import LIKE_ESCAPE, escape_like_pattern
 from particles.store import subject_cache
 from particles.store.event_store import EventRefKind, OperatorEventType, record_event
+from particles.store.subject_provisional import SubjectProvisionalRow, drop_marks, marks_for
 
 log = logging.getLogger(__name__)
 
@@ -348,6 +361,12 @@ async def lookup_subject(session: AsyncSession, ref: str) -> Subject | None:
     name_rows: list[tuple[SubjectRow, str]] = [(r, "name") for r in by_canonical.scalars()]
     if not name_rows:
         name_rows = [(r, "alias") for r in await _rows_with_alias(session, ref)]
+    if len(name_rows) > 1:
+        # A confirmed Subject answers before a provisional one of the same name,
+        # so a held pair is not refused as ambiguous.
+        marks = await marks_for(session, [r.id for r, _ in name_rows])
+        confirmed_rows = [(r, how) for r, how in name_rows if r.id not in marks]
+        name_rows = confirmed_rows or name_rows
     for r, how in name_rows:
         pool.setdefault(r.id, (r, how))
 
@@ -433,13 +452,93 @@ def persona_alias_guard(
     return (cfg.persona_canonical_name,)
 
 
+_Marked = tuple["SubjectRow", SubjectProvisionalRow | None]
+
+
+async def _marked_canonical(session: AsyncSession, name: str) -> list[_Marked]:
+    """Subjects whose canonical name is ``name``, earliest first, each with its mark row.
+
+    The mark is outer-joined, so reading it costs no second query.
+    """
+    # This is an *exact* lookup, so we compare with case-insensitive equality
+    # (func.lower(col) == name_lower), NOT ilike(name): ilike treats '%' and '_'
+    # in the (untrusted, LLM-extracted) name as wildcards, so a poisoned name
+    # like 'Acme_Inc' or '%' would match an unrelated pre-existing subject and
+    # silently mis-attribute the claim (security finding F4 — subject-graph
+    # poisoning).
+    result = await session.execute(
+        select(SubjectRow, SubjectProvisionalRow)
+        .outerjoin(SubjectProvisionalRow, SubjectProvisionalRow.subject_id == SubjectRow.id)
+        .where(func.lower(SubjectRow.canonical_name) == name.lower())
+        .order_by(SubjectRow.created_at, SubjectRow.id)
+    )
+    return [(row, mark) for row, mark in result.tuples()]
+
+
+async def _marked_aliases(
+    session: AsyncSession, name: str, skip_lower: Collection[str]
+) -> list[_Marked]:
+    """Subjects holding ``name`` as an alias through the index, earliest first, with marks.
+
+    A Subject whose canonical name is in ``skip_lower`` does not answer by alias.
+    """
+    result = await session.execute(
+        select(SubjectRow, SubjectProvisionalRow)
+        .join(SubjectAliasRow, SubjectAliasRow.subject_id == SubjectRow.id)
+        .outerjoin(SubjectProvisionalRow, SubjectProvisionalRow.subject_id == SubjectRow.id)
+        .where(SubjectAliasRow.alias_key == alias_key(name))
+        .order_by(SubjectRow.created_at, SubjectRow.id)
+    )
+    return [
+        (row, mark) for row, mark in result.tuples() if row.canonical_name.lower() not in skip_lower
+    ]
+
+
+async def find_name_candidates(
+    session: AsyncSession,
+    name: str,
+    *,
+    skip_aliases_of: Collection[str] = (),
+    stop_at_confirmed: bool = False,
+) -> list[tuple[Subject, ProvisionalMark | None]]:
+    """The Subjects that hold ``name``, in lookup order, with their provisional marks.
+
+    Canonical names first, then aliases through the index, each tier
+    earliest first; ``skip_aliases_of`` is :func:`find_by_name`'s. A confirmed
+    Subject's mark is ``None``. The resolver chooses among them by who is
+    resolving (:func:`particles.core.provisional.choose_local`),
+    and passes ``stop_at_confirmed``: a confirmed canonical match answers every
+    resolution, so the alias tier is not read then.
+    """
+    skip_lower = {c.lower() for c in skip_aliases_of}
+    rows = await _marked_canonical(session, name)
+    if not (stop_at_confirmed and any(mark is None for _, mark in rows)):
+        seen = {row.id for row, _ in rows}
+        rows.extend(
+            (row, mark)
+            for row, mark in await _marked_aliases(session, name, skip_lower)
+            if row.id not in seen
+        )
+    return [(row.to_model(), mark.to_mark() if mark else None) for row, mark in rows]
+
+
 async def find_by_name(
-    session: AsyncSession, name: str, *, skip_aliases_of: Collection[str] = ()
+    session: AsyncSession,
+    name: str,
+    *,
+    skip_aliases_of: Collection[str] = (),
+    confirmed_only: bool = False,
 ) -> Subject | None:
     """Case-insensitive lookup against canonical_name and aliases.
 
     Used by the subject resolver during extraction to avoid creating duplicate
     subjects for the same real-world entity.
+
+    A confirmed Subject wins over a provisional one: canonical
+    names before aliases, earliest first, among confirmed Subjects, and a
+    provisional Subject only when no confirmed one holds the name. A lookup
+    that binds a claim for anyone but an agent principal passes
+    ``confirmed_only`` (an import), or goes through the resolver.
 
     Args:
         session: Active SQLAlchemy session.
@@ -449,48 +548,40 @@ async def find_by_name(
             consulted. A path that binds a particle to the result passes
             :func:`persona_alias_guard` here; a lookup that binds nothing
             leaves it empty.
+        confirmed_only: Never return a provisional Subject.
     """
-    from sqlalchemy import func
-
-    name_lower = name.lower()
-    skip_lower = {c.lower() for c in skip_aliases_of}
-
-    # Exact canonical_name match first (fast path). This is an *exact* lookup, so
-    # we compare with case-insensitive equality (func.lower(col) == name_lower),
-    # NOT ilike(name): ilike treats '%' and '_' in the (untrusted, LLM-extracted)
-    # name as wildcards, so a poisoned name like 'Acme_Inc' or '%' would match an
-    # unrelated pre-existing subject and silently mis-attribute the claim
-    # (security finding F4 — subject-graph poisoning). A shared canonical_name is
-    # still a *valid* state — distinct real-world entities can collide on a
-    # surface name (e.g. "Prometheus" the monitoring software vs the Greek Titan),
-    # and the resolver may also leave true duplicates behind. Either way this must
-    # never crash extraction, so we pick deterministically (earliest-created)
-    # rather than using scalar_one_or_none(), which raises MultipleResultsFound
-    # and aborts the whole snapshot. A duplicate is logged so an operator can merge.
-    result = await session.execute(
-        select(SubjectRow)
-        .where(func.lower(SubjectRow.canonical_name) == name_lower)
-        .order_by(SubjectRow.created_at, SubjectRow.id)
-    )
-    rows = result.scalars().all()
-    if rows:
-        if len(rows) > 1:
+    # A shared canonical_name is a *valid* state — distinct real-world entities
+    # can collide on a surface name (e.g. "Prometheus" the monitoring software
+    # vs the Greek Titan), and the resolver may also leave true duplicates
+    # behind. Either way this must never crash extraction, so we pick
+    # deterministically (earliest-created) rather than using
+    # scalar_one_or_none(), which raises MultipleResultsFound and aborts the
+    # whole snapshot. A duplicate is logged so an operator can merge.
+    rows = await _marked_canonical(session, name)
+    confirmed = [row for row, mark in rows if mark is None]
+    if confirmed:
+        if len(confirmed) > 1:
             log.warning(
                 "Multiple subjects share canonical_name %r: %s; resolving to "
                 "earliest (%s). Merge or disambiguate to silence this warning.",
                 name,
-                [r.id for r in rows],
-                rows[0].id,
+                [r.id for r in confirmed],
+                confirmed[0].id,
             )
-        return rows[0].to_model()
+        return confirmed[0].to_model()
+    provisional = [row for row, _ in rows]
 
     # Aliases through the index. Two Subjects sharing an alias
     # resolve to the earliest, the canonical tier's tie-break.
-    for row in await _rows_with_alias(session, name):
-        if row.canonical_name.lower() in skip_lower:
-            continue
-        return row.to_model()
-    return None
+    skip_lower = {c.lower() for c in skip_aliases_of}
+    aliased = await _marked_aliases(session, name, skip_lower)
+    for row, mark in aliased:
+        if mark is None:
+            return row.to_model()
+    if confirmed_only:
+        return None
+    provisional.extend(row for row, _ in aliased)
+    return provisional[0].to_model() if provisional else None
 
 
 async def find_by_external_ref(
@@ -1005,6 +1096,7 @@ async def merge_subjects_many(
         if source_row is not None:
             await session.delete(source_row)
     await drop_aliases(session, source_set)
+    await drop_marks(session, source_set)
     await session.flush()
 
     await record_event(
@@ -1178,6 +1270,7 @@ async def delete_subject(
     deleted = row.to_model()
     await session.delete(row)
     await drop_aliases(session, [row.id])
+    await drop_marks(session, [row.id])
     await session.flush()
 
     await record_event(
@@ -1434,6 +1527,7 @@ async def search_subjects(
     *,
     limit: int | None = None,
     offset: int = 0,
+    order: Literal["name", "relevance"] = "name",
 ) -> list[Subject]:
     """Case-insensitive substring search over canonical names and aliases.
 
@@ -1447,8 +1541,15 @@ async def search_subjects(
             ``limit`` to drive pagination — a generic substring like
             "the" can match thousands of subjects.
 
-    Results are alphabetically ordered by ``canonical_name`` so paginated
-    callers get stable slices.
+        order: ``name`` (the default) orders the matches alphabetically by
+            ``canonical_name``. ``relevance`` lists an exact name or alias
+            first, then names that begin with the query, then names with a
+            word that begins with it, then the rest, shorter names first: the
+            order a picker wants, where the first few matches are all that is
+            shown.
+
+    Both orders end on the name and the id, so paginated callers get stable
+    slices.
     """
     # Escape user-input LIKE wildcards (security review F7): without this a
     # query of "%" matches every row in an unindexed full scan, and "_" matches
@@ -1461,16 +1562,31 @@ async def search_subjects(
             f"%{escape_like_pattern(alias_key(query))}%", escape=LIKE_ESCAPE
         )
     )
-    stmt = (
-        select(SubjectRow)
-        .where(
-            or_(
-                SubjectRow.canonical_name.ilike(pattern, escape=LIKE_ESCAPE),
-                SubjectRow.id.in_(by_alias),
-            )
+    stmt = select(SubjectRow).where(
+        or_(
+            SubjectRow.canonical_name.ilike(pattern, escape=LIKE_ESCAPE),
+            SubjectRow.id.in_(by_alias),
         )
-        .order_by(SubjectRow.canonical_name)
     )
+    if order == "relevance":
+        lowered = query.lower()
+        escaped = escape_like_pattern(lowered)
+        name = func.lower(SubjectRow.canonical_name)
+        exact_alias = select(SubjectAliasRow.subject_id).where(
+            SubjectAliasRow.alias_key == alias_key(query)
+        )
+        rank = case(
+            (name == lowered, 0),
+            (SubjectRow.id.in_(exact_alias), 0),
+            (name.like(f"{escaped}%", escape=LIKE_ESCAPE), 1),
+            (name.like(f"% {escaped}%", escape=LIKE_ESCAPE), 2),
+            else_=3,
+        )
+        stmt = stmt.order_by(
+            rank, func.length(SubjectRow.canonical_name), SubjectRow.canonical_name, SubjectRow.id
+        )
+    else:
+        stmt = stmt.order_by(SubjectRow.canonical_name, SubjectRow.id)
     if offset:
         stmt = stmt.offset(offset)
     if limit is not None:

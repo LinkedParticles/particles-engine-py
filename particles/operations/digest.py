@@ -22,11 +22,13 @@ here; the terse one-line-per-belief formatting is
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from datetime import datetime
+
+from pydantic import BaseModel, Field, StrictBool
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import get_config
-from particles.core.observer_scope import scope_of_entries, visible
+from particles.core.observer_scope import scope_of_entries, standing
 from particles.core.schema import ContestedBadge, ObserverScopeNote
 from particles.core.status import Status
 from particles.db import session_scope
@@ -36,6 +38,7 @@ from particles.operations.llm_spend import store_llm_spend
 from particles.operations.query.contested import compute_contested_badges
 from particles.operations.query.effective_confidence import score_confidence_and_rank
 from particles.operations.query.observer_scope import filter_visible
+from particles.operations.retirement_notice import retirement_lines
 from particles.render.markdown import DigestEntry, render_digest_located
 from particles.store.particle_store import get_inconsistency_backrefs, get_particles_by_status
 from particles.store.subject_store import list_all_subjects
@@ -56,30 +59,46 @@ class RenderedDigest(BaseModel):
 
     markdown: str
     lines: list[DigestLine] = Field(default_factory=list)
+    observer_engaged: StrictBool | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 async def _refused_in_view(session: AsyncSession, observer_project: str | None) -> int:
     """How many held sources this observer may learn of.
 
-    A count, never a title, and only of sources whose corpus entry is in view
-    for the observer project under the same predicate the beliefs pass, so a
-    session never learns of another project's notes.
+    A count, never a title, and only of sources whose corpus entry the digest
+    would admit under the same predicate the beliefs pass, so a session never
+    learns of another project's notes and a declined reference
+    document is not counted.
     """
     held = await held_snapshots(session)
-    if observer_project is None:
-        return len(held)
     harness_tags = get_config().observer_scope.harness_tags
+    # The digest's own admission rule: a declined reference
+    # document is not counted, since its beliefs would be left out anyway.
     return sum(
-        1 for h in held if visible(scope_of_entries([h.tags], harness_tags), observer_project)
+        1 for h in held if standing(scope_of_entries([h.tags], harness_tags), observer_project)
     )
 
 
-async def build_digest(store: str, observer_project: str | None = None) -> str:
+async def build_digest(
+    store: str, observer_project: str | None = None, retired_since: datetime | None = None
+) -> str:
     """The digest text alone; :func:`build_digest_located` documents the build."""
-    return (await build_digest_located(store, observer_project)).markdown
+    return (await build_digest_located(store, observer_project, retired_since)).markdown
 
 
-async def build_digest_located(store: str, observer_project: str | None = None) -> RenderedDigest:
+class DigestScopeUnavailable(ValueError):
+    """The requested project observer could not be applied."""
+
+
+async def build_digest_located(
+    store: str,
+    observer_project: str | None = None,
+    retired_since: datetime | None = None,
+    *,
+    strict_scope: bool = False,
+) -> RenderedDigest:
     """Render the session-start memory digest for one store.
 
     Returns the text with, for each belief line in order, the belief's id, the
@@ -100,7 +119,17 @@ async def build_digest_located(store: str, observer_project: str | None = None) 
     only beliefs that are global, observed in that project, or widened are
     ranked, and the digest says so in one line. The predicate runs before
     scoring and the cap, so a project's 200 lines are its own. ``None`` is the
-    store-wide digest, unchanged.
+    store-wide digest.
+
+    Either way the digest admits standing memory only: a belief
+    that only reference entries (documents the operator read) put in view is
+    left out, before scoring and the cap, and the header says how many were.
+    A store with no ``scope:reference`` entry renders exactly as before.
+
+    ``retired_since`` opens the window of the automatic-retirement section
+    directly under the header: the observer's previous digest,
+    which the SessionStart hook records. ``None`` looks back
+    ``mcp.recall.digest_retirement_window_days``.
 
     Read fresh on every call — the digest is never cached, so it can never serve
     a stale recall.
@@ -109,9 +138,11 @@ async def build_digest_located(store: str, observer_project: str | None = None) 
     async with session_scope(store) as session:
         actives = await get_particles_by_status(session, Status.ACTIVE)
         observer: ObserverScopeNote | None = None
+        scope = await filter_visible(session, actives, observer_project, standing_only=True)
+        if strict_scope and (observer_project is None or not scope.engaged):
+            raise DigestScopeUnavailable("project_scope_unavailable")
+        actives = [p for p in actives if p.id in scope.visible_ids]
         if observer_project is not None:
-            scope = await filter_visible(session, actives, observer_project)
-            actives = [p for p in actives if p.id in scope.visible_ids]
             observer = scope.note(observer_project)
         total = len(actives)
         # The digest is a projection-path recall surface, so it
@@ -129,6 +160,7 @@ async def build_digest_located(store: str, observer_project: str | None = None) 
         # the store's recorded LLM spend, one closing line.
         spend = await store_llm_spend(session)
         refused = await _refused_in_view(session, observer_project)
+        retired = await retirement_lines(session, observer_project, retired_since)
         subject_names = {s.id: s.canonical_name for s in await list_all_subjects(session)}
 
         # Order by rank score desc; id as a stable tiebreaker so the
@@ -162,10 +194,18 @@ async def build_digest_located(store: str, observer_project: str | None = None) 
         else None
     )
     markdown, offsets = render_digest_located(
-        store, entries, total, observer, spend_line, refused_line
+        store,
+        entries,
+        total,
+        observer,
+        spend_line,
+        refused_line,
+        retired,
+        reference_withheld=scope.reference_withheld,
     )
     return RenderedDigest(
         markdown=markdown,
+        observer_engaged=True if strict_scope else None,
         lines=[
             DigestLine(particle_id=p.id, offset=offset, contested_bases=list(entry.contested_bases))
             for p, entry, offset in zip(ordered, entries, offsets, strict=True)

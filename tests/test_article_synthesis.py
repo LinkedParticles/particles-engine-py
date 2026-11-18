@@ -254,3 +254,108 @@ def test_a_vault_article_header_that_cannot_be_built_reads_as_none(header: str) 
     assert cache._parse_frontmatter(text) is None
     assert cache.split_rendered_article(text)[0] == {}
     assert cache._strip_input_hash_from_frontmatter(text, "input_hash") is None
+
+
+# ---------------------------------------------------------------------------
+# the operator's own first-attempt prompt (wiki.prompt_template)
+# ---------------------------------------------------------------------------
+
+_OPERATOR_TEMPLATE = (
+    "{framing}OPERATOR PROMPT. Cite as [^p-xxxxxxxx]. Allowed: {allowed_ids}.{direction}"
+)
+
+
+def _set_template(monkeypatch: pytest.MonkeyPatch, template: str | None) -> None:
+    from particles.config import get_config
+
+    monkeypatch.setattr(get_config().wiki, "prompt_template", template)
+
+
+def test_an_operator_template_replaces_the_standard_first_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from particles.render.article_synthesis.render import _short_id
+
+    _set_template(monkeypatch, _OPERATOR_TEMPLATE)
+    subject, ps, eff = _subject_and_particles()
+    system, _user = _build_synthesis_prompt(
+        subject=subject, particles=ps, eff=eff, strict=False, direction="Be brief."
+    )
+    assert system.startswith("OPERATOR PROMPT.")
+    assert "encyclopedic article" not in system
+    assert ", ".join(_short_id(p.id) for p in ps) in system
+    assert "Be brief." in system
+    # The data-fence instruction is still the engine's, whatever the template says.
+    nonce = re.search(r'nonce="([0-9a-f]{32})"', _user).group(1)  # type: ignore[union-attr]
+    assert system.endswith(data_fence_instruction(nonce))
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"strict": True},
+        {"strict": False, "flowing": True},
+        {"strict": False, "sequence_mode": True},
+        {"strict": True, "layer_b_misalignments": [{"id": 0, "reason": "r"}]},
+    ],
+)
+def test_the_other_prompts_stay_built_in(
+    monkeypatch: pytest.MonkeyPatch, kwargs: dict[str, Any]
+) -> None:
+    subject, ps, eff = _subject_and_particles()
+    before = _prompt(subject=subject, particles=ps, eff=eff, **kwargs)
+    _set_template(monkeypatch, _OPERATOR_TEMPLATE)
+    assert _prompt(subject=subject, particles=ps, eff=eff, **kwargs) == before
+
+
+def test_no_template_keeps_the_built_in_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    from particles.render.article_synthesis.render import (
+        _SYNTHESIS_PROMPT_STANDARD,
+        standard_synthesis_template,
+    )
+
+    _set_template(monkeypatch, None)
+    assert standard_synthesis_template() is _SYNTHESIS_PROMPT_STANDARD
+
+
+def test_a_set_template_changes_the_cache_key_and_an_unset_one_does_not(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """the same particles under another prompt are another article."""
+    from particles.render.article_synthesis.cache import compute_input_hash
+
+    subject, ps, _eff = _subject_and_particles()
+    _set_template(monkeypatch, None)
+    baseline = compute_input_hash(ps, subject)
+    _set_template(monkeypatch, _OPERATOR_TEMPLATE)
+    first = compute_input_hash(ps, subject)
+    _set_template(monkeypatch, _OPERATOR_TEMPLATE + " Shorter.")
+    second = compute_input_hash(ps, subject)
+    assert len({baseline, first, second}) == 3
+    _set_template(monkeypatch, None)
+    assert compute_input_hash(ps, subject) == baseline
+
+
+@pytest.mark.parametrize(
+    ("template", "fragment"),
+    [
+        ("Write about {subject}.", "placeholder"),
+        ("A lone { brace.", "placeholder"),
+        ("Attribute {direction.text}.", "placeholder"),
+        ("   \n", "empty"),
+    ],
+)
+def test_a_template_format_cannot_fill_is_refused_at_load(template: str, fragment: str) -> None:
+    from pydantic import ValidationError
+
+    from particles.config import WikiConfig
+
+    with pytest.raises(ValidationError, match=fragment):
+        WikiConfig(prompt_template=template)
+
+
+def test_a_template_with_escaped_braces_loads() -> None:
+    from particles.config import WikiConfig
+
+    template = 'Return {{"ok": true}} never; cite {allowed_ids}.'
+    assert WikiConfig(prompt_template=template).prompt_template == template

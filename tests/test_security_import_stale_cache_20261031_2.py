@@ -270,12 +270,12 @@ def test_an_import_does_not_reconcile_a_unit_against_a_claim_retired_during_the_
     )
 
 
-def test_an_imported_retracted_unit_is_not_a_conflict_partner_for_a_later_unit(
+def test_a_set_aside_retracted_unit_is_not_a_conflict_partner_for_a_later_unit(
     tmp_path: Path, stores: Path
 ) -> None:
-    """L10: a unit the import keeps RETRACTED (as the bundle states) is not
-    treated as an ACTIVE claim by a later unit of the same import: the later unit lands
-    ACTIVE, with no INCONSISTENCY naming the retracted unit and no failed import."""
+    """L10: a RETRACTED unit is set aside (D1), so a later unit of the same
+    import lands as if it were absent: ACTIVE, with no INCONSISTENCY, no row for the
+    retracted unit and no failed import."""
     import json
 
     from particles.db import reset_engine, session_scope
@@ -309,8 +309,8 @@ def test_an_imported_retracted_unit_is_not_a_conflict_partner_for_a_later_unit(
         raised = exc
     rows = _rows(stores)
     statuses = {c: s for c, s in rows}
-    assert statuses.get(E_TEXT) == "RETRACTED", rows
+    assert E_TEXT not in statuses, rows
     assert raised is None, f"the import failed midway: {raised!r}; rows {rows}"
     assert statuses.get(C_TEXT) == "ACTIVE" and "INCONSISTENCY" not in {s for _, s in rows}, (
-        f"a later unit was reconciled against the import's own RETRACTED unit: {rows}"
+        f"a later unit was reconciled against the set-aside RETRACTED unit: {rows}"
     )

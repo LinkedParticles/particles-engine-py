@@ -104,6 +104,19 @@ def config_validate_cmd() -> None:
             err=True,
         )
 
+    from particles.operations.extract_budget import extract_budget_warnings
+
+    for warning in extract_budget_warnings():
+        typer.echo(f"Warning: {warning}", err=True)
+    if _cfg.engine.base_url:
+        # these warnings judge this file, which a thin client's
+        # consolidation does not run with.
+        typer.echo(
+            "Note: engine.base_url is set, so consolidation, extraction and queries run on the "
+            "engine with the engine's own config. `particles hook doctor` compares the engine's "
+            "settings with this file's and shows the engine's extraction-budget warnings."
+        )
+
     if errors:
         raise typer.Exit(1)
 
@@ -185,14 +198,26 @@ def _client_token_lines(cfg: Any) -> list[str]:
     Reads local state only; the engine is never asked.
     """
     from particles.api._keys import client_token_warning, role_from_prefix
-    from particles.secrets import get_engine_token_optional, get_particles_api_key
+    from particles.secrets import (
+        EngineTokenFileError,
+        engine_token_file_path,
+        get_engine_token_optional,
+        get_particles_api_key,
+    )
 
-    token = get_engine_token_optional()
-    if not cfg.engine.base_url or token is None:
+    if not cfg.engine.base_url:
         return []
+    try:
+        token = get_engine_token_optional()
+    except EngineTokenFileError as exc:
+        return [f"client token: ✗ {exc}"]
+    if token is None:
+        return []
+    source = engine_token_file_path()
+    prefix = f"client token: from {source}, " if source else "client token: "
     legacy = get_particles_api_key()
     warning = client_token_warning(token, None if legacy == "dev-key" else legacy, agent_side=False)
     if warning is not None:
-        return [f"client token: ⚠ {warning}"]
+        return [f"{prefix}⚠ {warning}"]
     role = role_from_prefix(token)
-    return [f"client token: a per-client {role.value if role else 'unknown'} key"]
+    return [f"{prefix}a per-client {role.value if role else 'unknown'} key"]

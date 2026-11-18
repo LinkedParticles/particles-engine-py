@@ -151,7 +151,7 @@ no new contract surface:
 | dismiss (uncited URL) | `POST /corpus/links/dismiss` |
 | supersede / edit | operator `POST /particles/{id}/supersede`; own-beliefs `POST /particles/supersede` |
 | retract (single belief) | operator `POST /particles/{id}/retract` |
-| assign-subject (NO_SUBJECT card) | `POST /particles/{id}/subjects` |
+| assign-subject (NO_SUBJECT card) | `POST /particles/{id}/subjects`; the sheet lists suggested subjects from `GET /particles/{id}/subject-suggestions` before anything is typed |
 | whole-source retract | `POST /corpus/{id}/retract` |
 | reindex | `POST /reindex` |
 
@@ -178,18 +178,18 @@ clients/web-ui/
   tsconfig.json
   esbuild.config.mjs      bundles src/ + copies public/ + vendored Cytoscape → dist/
   PARITY.md               screen inventory + interaction contract (the spec)
+  test/golden/            golden capture of the curation feed (step 1; --check in CI)
   src/
     main.ts               app entry — shell: nav, routes, global actions
     router.ts             hash routing (#/curate, #/query, #/browse; deep-linkable)
     api.ts                typed HTTP client of the engine (bearer)
-    feed.ts               the swipeable leverage-ranked card stack (curate route)
+    feed.ts               the swipeable card stack: draws the curation core's views
     queryView.ts          the #/query surface
     graphView.ts          the #/browse route: scope picker, seeded landing, as-of scrubber
     graphRender.ts        the shared Cytoscape mount (encodings) used by
                           #/browse and the query page's inline retrieval-set graph
     deposit.ts            global deposit sheet (URL / text / file)
-    sheet.ts              per-card gesture sheet
-    gestures.ts           gesture → endpoint dispatch
+    sheet.ts              draws the core's forms as bottom sheets
     settings.ts           client-side settings/bearer persistence
     settingsView.ts       settings screen (incl. Appearance: system / light / dark)
     theme.ts              the <html data-theme> stamp + token reads for Cytoscape

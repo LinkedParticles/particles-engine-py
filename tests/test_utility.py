@@ -14,6 +14,7 @@ from pydantic import ValidationError
 
 from particles.core.schema import TrustLensUtilityRule
 from particles.core.scoring.utility import (
+    RankLiftBand,
     SweepRow,
     content_dedup_key,
     rank_lift_grid,
@@ -56,6 +57,20 @@ class TestReinforcementScore:
         naive = datetime(2026, 7, 1)  # noqa: DTZ001 — deliberately naive for the test
         assert math.isclose(reinforcement_score(_mined(naive), 30.0, now=_NOW), 1.0, abs_tol=1e-6)
 
+    def test_an_event_under_a_day_old_still_decays(self) -> None:
+        # Only a future timestamp is clamped to age 0; half a half-life is 0.5 ** 0.5.
+        recent = _NOW - timedelta(hours=12)
+        assert math.isclose(
+            reinforcement_score(_mined(recent), 1.0, now=_NOW), math.sqrt(0.5), abs_tol=1e-12
+        )
+
+    def test_a_half_life_under_one_day_is_honoured(self) -> None:
+        assert math.isclose(reinforcement_score(_mined(_NOW), 0.5, now=_NOW), 1.0, abs_tol=1e-12)
+
+    def test_a_zero_half_life_scores_nothing(self) -> None:
+        # The guard returns 0.0 rather than dividing by zero.
+        assert reinforcement_score(_mined(_NOW), 0.0, now=_NOW) == 0.0
+
 
 class TestChannelWeighting:
     """per-event weights, so the two channels are commensurable."""
@@ -73,6 +88,9 @@ class TestChannelWeighting:
 
     def test_non_positive_weight_contributes_nothing(self) -> None:
         assert reinforcement_score([(_NOW, 0.0), (_NOW, -5.0)], 30.0, now=_NOW) == 0.0
+
+    def test_a_zero_weight_event_does_not_hide_the_events_after_it(self) -> None:
+        assert reinforcement_score([(_NOW, 0.0), (_NOW, 1.0)], 30.0, now=_NOW) == 1.0
 
     def test_one_gesture_is_commensurable_with_a_well_used_belief(self) -> None:
         """The whole point of the weight.
@@ -112,6 +130,10 @@ class TestUtilityRankBonus:
         # λ ≥ 0 and R ≥ 0 ⇒ bonus ≥ 0: utility can lift a rank, never lower it.
         for r in (0.0, 0.1, 1.0, 10.0, 1000.0):
             assert utility_rank_bonus(r, 0.02) >= 0.0
+
+    def test_negative_reinforcement_is_no_penalty(self) -> None:
+        # ln(1 + R) is negative for R < 0; the guard must hold either operand alone.
+        assert utility_rank_bonus(-0.5, 0.1) == 0.0
 
     def test_monotone_and_non_saturating(self) -> None:
         """The defect this fixes: count magnitude must survive.
@@ -267,6 +289,21 @@ class TestContentDedupKey:
         assert content_dedup_key("!!!") == ""
 
 
+class TestRankLiftBand:
+    def test_contains_is_a_closed_interval(self) -> None:
+        band = RankLiftBand(low=0.02, high=0.05, contiguous=True)
+        assert band.contains(0.02)
+        assert band.contains(0.05)
+        assert band.contains(0.03)
+        assert not band.contains(0.01)
+        assert not band.contains(0.06)
+
+    def test_an_empty_band_contains_nothing(self) -> None:
+        band = RankLiftBand(low=None, high=None, contiguous=True)
+        assert not band.contains(0.0)
+        assert not band.contains(0.02)
+
+
 class TestRankLiftGrid:
     def test_always_includes_the_zero_baseline(self) -> None:
         # λ=0 is the pre-utility head the whole sweep is read against.
@@ -281,6 +318,12 @@ class TestRankLiftGrid:
     def test_degenerate_inputs_return_baseline_only(self) -> None:
         assert rank_lift_grid(0.0, 10) == (0.0,)
         assert rank_lift_grid(0.1, 0) == (0.0,)
+
+    def test_a_single_step_is_the_maximum_itself(self) -> None:
+        assert rank_lift_grid(0.1, 1) == (0.0, 0.1)
+
+    def test_values_are_rounded_to_six_places(self) -> None:
+        assert rank_lift_grid(0.1, 3)[1] == 0.033333
 
 
 class TestSweepRankLift:
@@ -395,6 +438,20 @@ class TestSweepRankLift:
         assert not bands[3].empty
         assert bands[5].empty
         assert sweep.intersection.empty
+
+    def test_an_empty_intersection_admits_no_configured_value(self) -> None:
+        sweep = sweep_rank_lift(
+            _BAND_FIXTURE,
+            grid=rank_lift_grid(0.5, 50),
+            head_sizes=[3, 5],
+            target_ids=["b"],
+            distinct_ratio=1.0,
+            configured_rank_lift=0.1,
+        )
+        assert sweep.intersection.empty
+        # 0.1 sits in the N = 3 band, so only the empty intersection rejects it.
+        assert dict(sweep.bands)[3].contains(0.1)
+        assert not sweep.configured_admissible
 
     def test_relaxing_the_ratio_recovers_an_intersection(self) -> None:
         # The same store at ≥80% distinct: N=5 becomes satisfiable (4 of 5), and

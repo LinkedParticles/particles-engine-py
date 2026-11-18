@@ -26,6 +26,7 @@ from pydantic import BaseModel
 from typer.testing import CliRunner
 
 from particles.api.cli import app
+from particles.api.cli.benchmark import _benchmark_floor, _Format
 from particles.benchmark.relevance_floor import (
     REFUSAL_PHRASE,
     HeldOutQuestion,
@@ -41,11 +42,14 @@ from particles.benchmark.relevance_floor import (
     harvest_transcripts,
     heldout_fingerprint,
     judge_prompt,
+    judges_refusals,
     load_heldout,
     question_id,
     refusal_curve,
+    refusal_judge_prompt,
     render_report,
     replay_retrieval,
+    responder_refusals,
     reuse_replay,
     run_judged,
     sample_questions,
@@ -68,6 +72,7 @@ from particles.core.schema import (
     UncertaintyNature,
 )
 from particles.llm import CompletionError, override_providers
+from particles.llm.usage import record_usage
 from particles.operations.query.respond import REFUSAL_MARKER
 
 cli = CliRunner()
@@ -127,12 +132,16 @@ class TestHarvest:
         from particles.operations.query.main import _below_floor_answer
 
         note = RelevanceNote(max_similarity=0.09, floor=0.25, below_floor=True)
-        now = _below_floor_answer(QueryRequest(question="q"), note, 3)
-        then = _below_floor_answer(
-            QueryRequest(question="q", as_of=datetime(2026, 1, 1, tzinfo=UTC)), note, 3
-        )
-        assert REFUSAL_PHRASE in now
-        assert REFUSAL_PHRASE in then
+        for withheld in (True, False):
+            now = _below_floor_answer(QueryRequest(question="q"), note, 3, withheld=withheld)
+            then = _below_floor_answer(
+                QueryRequest(question="q", as_of=datetime(2026, 1, 1, tzinfo=UTC)),
+                note,
+                3,
+                withheld=withheld,
+            )
+            assert REFUSAL_PHRASE in now
+            assert REFUSAL_PHRASE in then
 
     def test_cli_query_is_harvested_unless_it_addresses_another_store(self) -> None:
         transcript = "\n".join(
@@ -311,6 +320,33 @@ class TestMetrics:
         (row,) = floor_sweep([_row(0.9, True)], [0.10])
         assert row.unanswerable_passed.value is None
         assert row.refused_were_answerable.value is None
+
+    def test_responder_refusals_both_ways_and_by_source(self) -> None:
+        def row(qid: str, source: QuestionSource, refused: bool | None, ans: bool | None) -> Any:
+            return QuestionResult(
+                question_id=qid,
+                source=source,
+                max_similarity=0.5,
+                responder_refused=refused,
+                answerable=ans,
+            )
+
+        rows = [
+            row("a", QuestionSource.MCP_QUERY, True, True),  # a false refusal
+            row("b", QuestionSource.USER_PROMPT, True, False),  # a right refusal
+            row("c", QuestionSource.USER_PROMPT, False, True),  # answered
+            row("d", QuestionSource.USER_PROMPT, False, False),
+            row("e", QuestionSource.USER_PROMPT, None, None),  # excluded
+        ]
+        resp = responder_refusals(rows)
+        assert (resp.refused.numerator, resp.refused.denominator) == (2, 4)
+        assert (resp.answerable_refused.numerator, resp.answerable_refused.denominator) == (1, 2)
+        assert (
+            resp.refused_were_answerable.numerator,
+            resp.refused_were_answerable.denominator,
+        ) == (1, 2)
+        assert resp.answerable_refused_by_source["mcp_query"].value == 1.0
+        assert resp.refused_were_answerable_by_source["user_prompt"].value == 0.0
 
     def test_quantiles(self) -> None:
         assert similarity_quantiles([]) == {}
@@ -514,6 +550,46 @@ class TestRunner:
         assert judge.calls == 0
         assert result.responder_refused is True
         assert result.answerable is False
+        # the judged stage asks for refused candidates, so the
+        # recorded context keeps meaning what it meant on earlier runs.
+        assert result.context_particle_ids and result.context_chars > 0
+
+    async def test_protocol_2_judges_what_a_refusal_withheld(self, floor_store: None) -> None:
+        # a refusal is no longer taken at its word. The judge reads
+        # the question and the withheld top-k, never the refusal text.
+        answer = _Scripted("answer", f"{REFUSAL_MARKER}\nNothing relevant.")
+        prompts: list[str] = []
+
+        def _verdict(prompt: str) -> str:
+            prompts.append(prompt)
+            # Keyed on the question: both prompts carry the same two beliefs.
+            return "no" if "football" in prompt else "yes"
+
+        judge = _Scripted("judge", _verdict)
+        with override_providers({"query_response": answer, "benchmark": judge}):
+            on, off = await run_judged(
+                [_ON_TOPIC, _OFF_TOPIC], selection=_selection(judge_protocol=2)
+            )
+        assert judge.calls == 2
+        assert all("Nothing relevant" not in p and "Answer:" not in p for p in prompts)
+        assert (on.responder_refused, on.answerable) == (True, True)
+        assert (off.responder_refused, off.answerable) == (True, False)
+        report = build_report(_selection(judge_protocol=2), [on, off])
+        assert report.responder is not None
+        assert (
+            report.responder.refused_were_answerable.numerator,
+            report.responder.refused_were_answerable.denominator,
+        ) == (1, 2)
+        assert report.responder.answerable_refused.value == 1.0
+        # Protocol 1 reports no responder row: it would read zero by construction.
+        assert build_report(_selection(), [on, off]).responder is None
+
+    def test_only_protocol_2_judges_refusals(self) -> None:
+        assert not judges_refusals(1) and judges_refusals(2)
+        with pytest.raises(RelevanceFloorError, match="does not judge refusals"):
+            refusal_judge_prompt("q", ["- p"], protocol=1)
+        system, user = refusal_judge_prompt("Q-TEXT", ["- P-TEXT"], protocol=2)
+        assert "declined" in system and "Q-TEXT" in user and "P-TEXT" in user
 
     async def test_a_failed_call_is_excluded_not_scored_and_not_checkpointed(
         self, floor_store: None, tmp_path: Path
@@ -696,6 +772,10 @@ class TestReport:
         assert "answerable→refused" in rendered
         unjudged = render_report(build_report(_selection(judged=False), rows))
         assert "not run" in unjudged
+        assert "RESPONDER REFUSALS" not in rendered
+        judged_refusals = render_report(build_report(_selection(judge_protocol=2), rows))
+        assert "RESPONDER REFUSALS" in judged_refusals
+        assert "PRIVATE" not in judged_refusals
 
 
 # ---------------------------------------------------------------------------
@@ -802,3 +882,86 @@ class TestCLI:
         bad = cli.invoke(app, ["benchmark", "relevance-floor", "resweep", str(saved)])
         assert bad.exit_code == 1
         assert "not a relevance-floor report" in bad.output
+
+
+# ---------------------------------------------------------------------------
+# Spend: the judged stage's measurement beside its estimate
+# ---------------------------------------------------------------------------
+
+
+class _Metered(_Scripted):
+    """A scripted provider that reports each response's usage, as an adapter does."""
+
+    def __init__(self, name: str, reply: Any, *, input_tokens: int, output_tokens: int) -> None:
+        super().__init__(name, reply)
+        self._input = input_tokens
+        self._output = output_tokens
+
+    async def complete(self, prompt: str, **kwargs: object) -> str:
+        out = await super().complete(prompt, **kwargs)
+        record_usage(self.provider_model, input_tokens=self._input, output_tokens=self._output)
+        return out
+
+
+class TestSpend:
+    async def test_a_judged_run_prints_and_records_its_measured_spend(
+        self,
+        floor_store: None,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-not-used")
+        for name in ("answer", "judge"):
+            get_config().llm.price_per_mtok[f"scripted:{name}"] = TokenPrice(input=2.0, output=10.0)
+        heldout = tmp_path / "heldout.jsonl"
+        write_heldout(heldout, [_ON_TOPIC, _OFF_TOPIC])
+        answer = _Metered("answer", "The default is 0.25.", input_tokens=800, output_tokens=100)
+        judge = _Metered("judge", "yes", input_tokens=900, output_tokens=40)
+        out = tmp_path / "report.json"
+
+        async def _run() -> RelevanceFloorReport:
+            await _benchmark_floor(
+                heldout=heldout,
+                store=None,
+                top_k=5,
+                limit=None,
+                judge=True,
+                estimate_only=False,
+                yes=True,
+                output=out,
+                output_format=_Format.json,
+                checkpoint=None,
+                allow_in_repo=True,
+                max_usd=100.0,
+            )
+            return RelevanceFloorReport.model_validate_json(out.read_text())
+
+        with override_providers({"query_response": answer, "benchmark": judge}):
+            report = await _run()
+            assert (answer.calls, judge.calls) == (2, 2)
+            err = capsys.readouterr().err
+            assert err.index("Judged stage — projected") < err.index("Spend: estimated ~US$")
+            assert "answer  estimated     2 calls" in err
+            assert "measured     2 calls, 2k in / 80 out" in err
+            assert "LLM usage:" in err
+            assert report.spend is not None
+            answer_role, judge_role = report.spend.roles
+            assert (answer_role.measured_calls, answer_role.measured_input_tokens) == (2, 1_600)
+            assert (judge_role.measured_calls, judge_role.measured_output_tokens) == (2, 80)
+            # 1.6k in, 200 out ($0.0052) plus 1.8k in, 80 out ($0.0044), at $2/$10.
+            assert report.spend.measured_cost_usd == pytest.approx(0.0096)
+            assert report.spend.restored_questions == 0
+
+            # A re-run restores both outcomes from the checkpoint: no call, and
+            # the spend block says the estimate counted them anyway.
+            again = await _run()
+        assert (answer.calls, judge.calls) == (2, 2)
+        assert again.spend is not None and again.spend.restored_questions == 2
+        assert [r.measured_calls for r in again.spend.roles] == [0, 0]
+        assert "2 question(s) restored from the checkpoint made no call" in capsys.readouterr().err
+
+    def test_a_replay_only_report_carries_no_spend(self) -> None:
+        report = build_report(_selection(judged=False), [])
+        assert report.spend is None
+        assert RelevanceFloorReport.model_validate_json(report.model_dump_json()).spend is None

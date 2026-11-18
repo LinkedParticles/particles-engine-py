@@ -143,6 +143,11 @@ per million tokens; the harness does not meter actual usage. The report of
 record is [`rot-live-2026-09-19.json`](rot-live-2026-09-19.json), which
 carries the full text of every top-10 hit.
 
+The live column is one run of each world (n=1). One world run five times
+under one configuration spans 32 points of `stale_over_current` (see
+[How wide one live world is](#how-wide-one-live-world-is-2026-11-08)), so a
+single live figure here is an observation with that much room around it.
+
 | Metric | Oracle | Live |
 |---|---|---|
 | `recall_current@k` | 100% | **94.4%** (204/216) |
@@ -229,6 +234,13 @@ less:
 | `stale_over_current` | 67.5% | **25.2%** (31/123) |
 | `stale_retained@k` | 94.3% | **42.3%** (52/123) |
 
+Both columns are one run of each world (n=1), and each world's extraction is
+a separate sample. Seed 42 alone, re-run five times on a later engine, gave
+`stale_over_current` from 20.5% to 52.3%
+([How wide one live world is](#how-wide-one-live-world-is-2026-11-08)). The
+fall from 67.5% to 25.2% is far outside that width; a difference of a few
+points between two such columns is not.
+
 Most of the remaining gap is in *finding* the pair, not in resolving it. The
 rule compares claims about the same subject, and the real extractor does not
 always name the subject the same way. It splits the persona into "User", "the
@@ -280,6 +292,88 @@ configuration showed the same failure once, on a car. It is the coexisting
 facts defect again, in a narrower form: two past values are two facts, and a
 statement about the past does not replace a statement about the present.
 
+## How wide one live world is (2026-11-08)
+
+Every `live` run extracts each session afresh from a model that samples, so
+one world's result is one draw from a distribution. Until these runs no world
+had been run twice under one configuration, and differences between single
+runs had been read as the effects of code changes. This section
+measures the width of that distribution for one world.
+
+Seed 42, the full 90-day world, run five times on engine 1.251.2 with
+compiled defaults except the contradiction check, which ran on
+`claude-haiku-5-5`; extraction and the second slot reading ran on
+`claude-sonnet-5-5`. Trust policy on, top-k 10, scorer v2, real pairs off.
+Runs 1 to 3 started together on 2026-11-08 and runs 4 and 5 on 2026-11-09,
+from the same checkout and configuration, each as a separate process with its
+own store and its own extraction cache; each took about 16 minutes. The world
+fingerprint is identical in all five, so only the model's sampling differs.
+Reports of record: [run 1](rot-live-n3-2026-11-08-run1.json),
+[run 2](rot-live-n3-2026-11-08-run2.json),
+[run 3](rot-live-n3-2026-11-08-run3.json),
+[run 4](rot-live-n5-2026-11-09-run4.json),
+[run 5](rot-live-n5-2026-11-09-run5.json).
+
+| Metric | Run 1 | Run 2 | Run 3 | Run 4 | Run 5 | Mean | s.d. |
+|---|---|---|---|---|---|---|---|
+| `recall_current@k` (of 72) | 72 | 72 | 72 | 72 | 72 | 100% | 0 |
+| `current_first` (of 72) | 46 | 55 | 43 | 51 | 42 | 65.8% | 7.6 pts |
+| `stale_over_current` (of 44) | 22 | 9 | 12 | 17 | 23 | 37.7% | 13.9 pts |
+| `stale_retained@k` (of 44) | 22 | 14 | 16 | 22 | 27 | 45.9% | 11.9 pts |
+| `poison_leak@k`, every channel (of 19) | 0 | 0 | 0 | 0 | 0 | 0% | 0 |
+| `poison_surfaced@k` (of 19) | 10 | 13 | 13 | 13 | 9 | 61.1% | 10.3 pts |
+| claims retired as updates | 15 | 19 | 20 | 12 | 16 | 16.4 | 3.2 |
+
+**One world's `stale_over_current` spans 32 points.** The same code, world
+and models gave 20.5% (run 2) and 52.3% (run 5). Seed 42's earlier single-run
+figures, 31.8% at 1.145.0 and 34.1% on the 1.146.4 replay, both fall inside
+that range. The two later runs widened the range found by the first three
+(20.5% to 50.0%) and moved the mean from 32.6% to 37.7%, a shift of the size
+the spread predicts for a mean of three.
+
+**The spread is per attribute, not per question.** A world asks about a
+changed attribute at every checkpoint after the change, so one update that is
+missed, or caught, counts four or five times. Stale answers ranked first, by
+attribute, of the questions about an attribute that has a superseded value:
+
+| Attribute | Run 1 | Run 2 | Run 3 | Run 4 | Run 5 |
+|---|---|---|---|---|---|
+| team | 5/5 | 5/5 | 5/5 | 4/5 | 5/5 |
+| project | 5/5 | 0/5 | 5/5 | 0/5 | 5/5 |
+| gym | 4/4 | 4/4 | 0/4 | 4/4 | 4/4 |
+| car | 4/5 | 0/5 | 0/5 | 4/5 | 4/5 |
+| phone | 4/4 | 0/4 | 0/4 | 4/4 | 3/4 |
+| language | 0/4 | 0/4 | 2/4 | 0/4 | 2/4 |
+| home city | 0/6 | 0/6 | 0/6 | 1/6 | 0/6 |
+| diet, manager, editor | 0 | 0 | 0 | 0 | 0 |
+
+The team change was missed in all five runs. Five others were caught in some
+runs and missed in others, and each such flip moves the rate by about 10
+points at once. The 44 questions behind the rate are therefore closer to ten
+independent observations than to 44.
+
+**What a live target can resolve.** At a standard deviation of 13.9 points,
+telling a 10-point change in `stale_over_current` apart at two standard errors
+of the difference takes about 16 runs per arm. A standard deviation measured
+from five runs is itself loose: at 95% the true one lies between about 0.6
+and 2.9 times it. A live figure is therefore stated with its n, and a live
+target is met by a mean over n runs read beside its spread, never by one run.
+
+**What held in every run.** Recall of the current value was complete in all
+five. No poisoned value was taken as the user's own in any channel; the
+`tool_turn` channel leaked 0 of 6 in each run (0 of 30 together), so the tool
+output target of at most 10% holds at n=5. Every store also held
+at least one INCONSISTENCY record with a matching claim awaiting review (two
+in runs 1 to 3, one in run 4, four in run 5).
+
+**Measured cost.** The `rot` verb does not meter usage, so each run was
+wrapped in a usage scope. The five cost US$1.17, US$1.22, US$1.17, US$1.14
+and US$1.22 at list price, US$5.92 together, against a projection of US$4.27
+each. The projection assumes 1,500 output tokens per extraction call; the
+runs averaged about 390, and most of the input was read from the prompt
+cache. The "~US$12" projection for the 2026-09-19 live run rests on the same
+assumptions.
+
 ## Real pairs: your own demotion rulings
 
 The worlds above are synthetic. A store also accumulates real labels: each
@@ -314,10 +408,146 @@ The file is read when it exists and skipped silently when it does not. Claim
 texts appear in the report under `benchmark.record_claim_text`, like every
 other hit text.
 
+## Comparing other memories: the door arm
+
+The arms above measure Particles against itself. The door arm puts other
+agent memories on the same world. Each memory is built fresh,
+the world's sessions are written in time order through the memory's own write
+path, and at each checkpoint every question is asked through the memory's
+default door. Only the text that door returns is scored: it is cut into
+segments at line breaks (including line breaks escaped inside JSON strings)
+and sentence ends, and each segment is classified as above. Nothing is
+credited unless the text shows it.
+
+| Family | Metrics |
+|---|---|
+| Currency | `current_in_door`, `current_first`, `recall_current_at_2k`, `recall_current_at_8k` (the current value begins within the first 2,000 or 8,000 characters) |
+| Supersession | `stale_over_current`, `stale_in_door` |
+| Source trust | `poison_first`, `poison_leak`, `poison_surfaced`, per channel |
+| Abstention | `negative_silent` (the door names no value of any attribute), `negative_chars` |
+| Cost and speed | `chars_per_door`, `write_ms` (a write including the memory's own settling), `door_ms`, `build_minutes`, `build_usd` |
+
+Competitor memories run through the adapters of the adebench project,
+unmodified, from a clone pinned to one commit, each in its own process with
+only the environment variables its entry in the arms manifest names.
+Particles runs the same way, as a child process with its own store and
+configuration, behind the MCP `query` tool at its defaults: the door an agent
+receives. Two zero-cost baselines run beside them: `raw-chunks` (the ten
+sessions closest to the question by cosine) and `recent-mentions` (the ten
+most recent lines sharing a word with the question).
+
+Three tiers share one driver and never change a memory's configuration:
+
+| Tier | World | Seeds | Builds |
+|---|---|---|---|
+| `quick` | six attributes, three checkpoints, sparse filler (about a quarter of the sessions) | 42 | one; competitor builds are cached on their pin and the world, so a rerun rebuilds only Particles |
+| `standard` | full | 42, 43, 44 | one per seed |
+| `milestone` | full | three held-out seeds, committed by hash before any build | three per seed for a memory with a model on its write path |
+
+```bash
+uv run particles benchmark rot door run --estimate                        # what a quick run would build and cost
+uv run particles benchmark rot door run --particles-scripted --no-cache   # free plumbing run
+uv run particles benchmark rot door run --tier standard --manifest arms.toml
+uv run particles benchmark rot door rescore report.json -o rescored.json
+uv run particles benchmark rot --profile quick                            # the internal arms on the quick world
+```
+
+A milestone run refuses unless its seeds match the committed freeze record
+and every pinned version still holds (`door seeds`, `door freeze`). The freeze
+also records, for every metric, whether Particles is predicted to beat, trail
+or tie the median competitor; each report prints the prediction beside the
+result. Before the freeze, `door label-sample` and `door label-score` check the
+segmenter and classifier against blind hand labels on other memories' text:
+at least 95% agreement per memory, and at least 90% recall on stale and on
+historical segments.
+
+The development tiers come from seeds Particles was tuned on, so their numbers
+are internal by construction, and every door report says so in its first
+lines. Reports are written outside any repository by default.
+
+### What a reader answers: the answer stage
+
+The door-text tables say what reached the model. They cannot say what a model
+does with it: whether a correct refusal followed by forty hits is read as a
+refusal, or what a long door costs in the unit an agent pays. The answer stage
+asks. One pinned reader model is handed each probe's question, the
+checkpoint's date and the door text exactly as recorded, and answers in one
+sentence, or `NOT IN MEMORY`. The reply is recorded whole and scored without a
+judge: it is cut and classified like a door, then given one verdict by the
+first rule that matches.
+
+| Probe | Verdicts, in order |
+|---|---|
+| unanswerable | `abstain` (exactly `NOT IN MEMORY`), `confabulated` (any value of the world), `miss` |
+| answerable | `poison` (asserted), `hedged` (a stale value beside the current one, not marked as history), `stale`, `current` (history and a sourced poisoned value allowed beside it), `poison` (adopted with its source, no current value), `abstain` (a false abstention), `miss` |
+
+A reply that gives the current value and mentions a poisoned one with its
+source is `current` and counts as a disclosure. A reply whose only answer is
+the poisoned value is a leak whether or not it names the source.
+
+| Metric | Over |
+|---|---|
+| `answer_current`, `answer_false_abstain` | answerable probes |
+| `answer_stale`, `answer_hedged` | probes on attributes with a superseded value |
+| `answer_poison` (asserted and adopted), `answer_poison_disclosed` | probes on poisoned attributes |
+| `answer_abstain` | unanswerable probes |
+| `reader_missed` | answerable probes whose door carried the current value: the reply did not |
+| `reader_tokens_in`, `reader_usd`, `reader_overflow` | every probe |
+
+The answer tables render below the door-text tables, never in their place,
+headed with the reader, the prompt version and its hash. A summary that quotes
+an answer metric quotes its door-text counterpart beside it. Particles' row
+is also read twice more from the same recorded door, once without its composed
+answer (`hits_only`) and once as the answer alone (`answer_only`), so the
+ranking and the answer model can be told apart; those readings compare
+Particles with itself and are never a comparative row. A competitor's door is
+never edited.
+
+The reader is named in the arms manifest; a read refuses without one rather
+than fall back to the operator's default model:
+
+```toml
+[reader]
+provider = "gemini"               # an llm.providers entry, or "anthropic"
+model = "gemini-3-flash-preview"
+temperature = 0.0
+max_tokens = 200
+reasoning_effort = "minimal"      # must match the provider entry's setting
+[reader.sensitivity]              # optional: a free local reader, never a headline
+provider = "local"
+model = "qwen3:14b"
+digest = "sha256:..."
+context_tokens = 32768            # a longer door counts as an overflow, never cut
+```
+
+```bash
+uv run particles benchmark rot door run --estimate                  # the reader's line prints apart from the builds
+uv run particles benchmark rot door read report.json -o read.json   # read a saved report; no memory runs
+uv run particles benchmark rot door read read.json -o again.json --no-cache
+uv run particles benchmark rot door reader-floor read.json again.json   # the reader's own noise
+```
+
+Replies are cached by content beside the builds, under
+`benchmark_rot.door_cache_dir`, so a rerun is free and a competitor's door is
+read once per reader. `door rescore` re-scores recorded replies at no cost. The
+sensitivity reader runs only under the benchmark host's run lock. Before a
+freeze, `door label-replies` and `door label-replies-score` check the reply
+scorer against blind hand labels: per reader, at least 95% agreement over
+replies from at least three memories, and at least 90% recall on `stale`,
+`hedged` and `poison`. The freeze then records the reader, the prompt, the
+scorer versions and a prediction for every answer metric.
+
 ## Reading the numbers
 
 - **The `oracle` arm is not the product.** It is the ceiling a perfect
   extractor would allow. The `live` arm is the product number.
+- **One live run is one sample.** A `live` figure is quoted with the number
+  of runs behind it, and one run of one world has a wide envelope: seed 42
+  spans 32 points of `stale_over_current` over five runs
+  ([How wide one live world is](#how-wide-one-live-world-is-2026-11-08)). A
+  difference between two single live runs is an observation until it is
+  larger than that spread. The `oracle` arm is deterministic, and the
+  `probe` arm scripts extraction and samples only the checks.
 - **Synthetic and small.** One persona, twelve attributes, templated
   sentences. It is a directional probe of three axes, not a leaderboard.
 - **Substring scoring undercounts paraphrase.** A live extraction that drops

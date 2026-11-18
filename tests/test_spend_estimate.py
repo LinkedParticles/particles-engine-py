@@ -241,3 +241,29 @@ class TestExtractionRange:
 
         band = extraction_range([], entries=0)
         assert (band.calls, band.high_usd) == (0, 0.0)
+
+    def test_the_benchmark_band_leaves_the_reconcile_probes_out(self) -> None:
+        """An extraction outside the pipeline never probes."""
+        from particles.operations.audit import ExtractionCall
+        from particles.operations.spend_estimate import extraction_range
+
+        calls = [ExtractionCall(chars=3000)] * 4
+        with_probes = extraction_range(calls, entries=4)
+        without = extraction_range(calls, entries=4, reconcile_probes=False)
+        assert without.low_usd == with_probes.low_usd
+        assert without.high_usd is not None and with_probes.high_usd is not None
+        assert without.high_usd < with_probes.high_usd
+        assert without.wall_seconds < with_probes.wall_seconds
+        assert without.input_tokens == with_probes.input_tokens > 0
+        assert 0 < without.output_tokens_low <= without.output_tokens_high
+        assert "audit.estimate_output_tokens_per_call_base" in without.output_basis
+
+    def test_an_unpriced_probe_model_does_not_unprice_a_probe_free_band(self) -> None:
+        from particles.config import ProviderSelection, get_config
+        from particles.operations.audit import ExtractionCall
+        from particles.operations.spend_estimate import extraction_range
+
+        get_config().llm.semantic_lint = ProviderSelection(provider="anthropic", model="unpriced-x")
+        calls = [ExtractionCall(chars=3000)]
+        assert extraction_range(calls, entries=1).high_usd is None
+        assert extraction_range(calls, entries=1, reconcile_probes=False).high_usd is not None

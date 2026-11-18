@@ -79,7 +79,7 @@ jobs:
       contents: read
     outputs:
       version: ${{ steps.ver.outputs.version }}
-      cutoff: ${{ steps.ver.outputs.cutoff }}
+      cutoff: ${{ steps.cutoff.outputs.cutoff }}
       dist-id: ${{ steps.dist.outputs.artifact-id }}
       dist-sha256: ${{ steps.digests.outputs.sha256 }}
     steps:
@@ -92,18 +92,16 @@ jobs:
       # writes the uploaded files is a tested one rather than whatever was
       # newest at run time.
       - name: Set up uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          version: "0.13.6"
+          version: "0.13.8"
           python-version: "3.11"
           enable-cache: false
 
       # The version is stamped into pyproject.toml by the release export; read
       # it once and reuse it for the ordering gate and the smoke test. It is
       # checked against a plain version shape before it becomes an output,
-      # because later steps put it in file names and commands. The cutoff is
-      # the instant this run began resolving: the SBOM closure resolves
-      # nothing newer.
+      # because later steps put it in file names and commands.
       - name: Read the release version
         id: ver
         run: |
@@ -115,7 +113,6 @@ jobs:
             exit 1
           fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
-          echo "cutoff=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
           echo "Publishing linkedparticles $v"
 
       # Fail closed if the exactly-pinned core is not yet on the index. This is
@@ -138,17 +135,28 @@ jobs:
           # 2026-08-25: the 1.139.0 core upload returned 200 OK and the JSON
           # API still omitted it past the +99s mark), so this gate retries
           # before failing closed rather than turning propagation lag into a
-          # red release.
-          for i in 1 2 3 4 5 6 7 8 9 10; do
-            if python -m pip download --no-deps --only-binary=:all: --dest /tmp/core-check \
-              --index-url "$index" "linkedparticles-core==$VERSION"; then
+          # red release. PyPI caches each simple page for 600 seconds
+          # (`Cache-Control: max-age=600`), so a copy read before the upload
+          # can be served for that long: the last probe comes after it.
+          for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do
+            if python -m pip download --no-cache-dir --no-deps --only-binary=:all: \
+              --dest /tmp/core-check --index-url "$index" "linkedparticles-core==$VERSION"; then
               exit 0
             fi
             echo "not resolvable yet (attempt $i); retrying in 60s"
             sleep 60
           done
-          echo "linkedparticles-core==$VERSION still not resolvable after 10 minutes" >&2
+          echo "linkedparticles-core==$VERSION still not resolvable after 14 minutes" >&2
           exit 1
+
+      # The instant the SBOM closure resolves nothing newer than. Taken once
+      # the core gate above has seen the pinned core, so that core is always
+      # older than the cutoff: a cutoff read before it, on a run started
+      # before the core upload, would hold the core out of the closure for
+      # good, since a re-run of the SBOM job reuses this output.
+      - name: Record the closure cutoff
+        id: cutoff
+        run: echo "cutoff=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       # The build backend is pinned exactly and hash-checked: hatchling and
       # its dependencies come from `.github/build-constraints.txt`, so a new
@@ -260,9 +268,9 @@ jobs:
           persist-credentials: false
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          version: "0.13.6"
+          version: "0.13.8"
           python-version: "3.11"
           enable-cache: false
 
@@ -274,7 +282,8 @@ jobs:
           path: dist/
 
       # `UV_EXCLUDE_NEWER` holds the closure to what the index served when
-      # the build began, so a package released during the run cannot join it.
+      # the build saw the pinned core, so a package released during the run
+      # cannot join it.
       # The generator is not resolved at all: it installs from the hashed
       # `.github/sbom-tool-requirements.txt`, wheels only, into a venv of its
       # own, so the SBOM describes the closure without the tool in it.
@@ -302,14 +311,36 @@ jobs:
           # one on PyPI (security review D3).
           core=""
           if [ "$REHEARSAL" = "true" ]; then
-            python -m pip download --no-deps --only-binary=:all: \
+            python -m pip download --no-cache-dir --no-deps --only-binary=:all: \
               --index-url https://test.pypi.org/simple/ --dest /tmp/rehearsal-core \
               "linkedparticles-core==$v"
             core="$(ls /tmp/rehearsal-core/*.whl)"
           fi
           # Wheels only, so no build backend runs while the closure installs.
-          uv pip install --python /tmp/sbom-env/bin/python --only-binary :all: \
-            --index-url https://pypi.org/simple/ $core dist/*.whl
+          # The pinned core can be missing from the page this runner reads
+          # for minutes after the build job saw it: PyPI's CDN keeps each
+          # variant of a simple page for up to 600 seconds, and uv asks for
+          # another variant than pip. In 1.224.5 this install could not see
+          # the core four minutes after its upload, and the run was re-run.
+          # So it retries past that lifetime, re-reading the core's page on
+          # every attempt rather than its own cached copy.
+          installed=""
+          for delay in 15 30 60 60 60 60 60 60 60 60 60 60 60 60 0; do
+            if uv pip install --python /tmp/sbom-env/bin/python --only-binary :all: \
+              --refresh-package linkedparticles-core \
+              --index-url https://pypi.org/simple/ $core dist/*.whl; then
+              installed=1
+              break
+            fi
+            if [ "$delay" -gt 0 ]; then
+              echo "the closure does not resolve yet; retrying in ${delay}s"
+              sleep "$delay"
+            fi
+          done
+          if [ -z "$installed" ]; then
+            echo "the closure still does not resolve after about 13 minutes" >&2
+            exit 1
+          fi
           # `--pyproject` names the root component from the tree's own
           # metadata, so the document is about this distribution rather than
           # about an anonymous virtualenv. `--output-reproducible` drops the
@@ -635,11 +666,16 @@ jobs:
           fi
           python -m venv /tmp/smoke
           /tmp/smoke/bin/python -m pip install --upgrade pip
-          # Backoff totals 525s of sleep across 11 probes, about 10 minutes
-          # with probe time: the budget of the other index gates.
+          # Backoff totals 765s of sleep across 15 probes. PyPI caches each
+          # simple page for 600 seconds, and a page read just after the
+          # upload can still be the old one for that long: in 1.224.5 the
+          # first probe ran 13 seconds after the upload, every probe for the
+          # next nine minutes saw the old page, and the run was re-run. The
+          # last probe now comes well after that lifetime. `--no-cache-dir`
+          # keeps pip from answering from its own copy of the page.
           listed=""
-          for delay in 15 30 60 60 60 60 60 60 60 60 0; do
-            if /tmp/smoke/bin/pip download --no-deps --only-binary=:all: \
+          for delay in 15 30 60 60 60 60 60 60 60 60 60 60 60 60 0; do
+            if /tmp/smoke/bin/pip download --no-cache-dir --no-deps --only-binary=:all: \
               --index-url "$index" --dest /tmp/smoke-probe "${wanted[@]}"; then
               listed=1
               break
@@ -650,15 +686,15 @@ jobs:
             fi
           done
           if [ -z "$listed" ]; then
-            echo "${wanted[*]} still not listed on $index after about 10 minutes" >&2
+            echo "${wanted[*]} still not listed on $index after about 13 minutes" >&2
             exit 1
           fi
           if [ "$REHEARSAL" = "true" ]; then
             # The two probed wheels as local files, everything else from PyPI.
-            /tmp/smoke/bin/pip install --index-url "$pypi" /tmp/smoke-probe/*.whl
+            /tmp/smoke/bin/pip install --no-cache-dir --index-url "$pypi" /tmp/smoke-probe/*.whl
             /tmp/smoke/bin/pip check
           else
-            /tmp/smoke/bin/pip install --index-url "$pypi" "linkedparticles==$VERSION"
+            /tmp/smoke/bin/pip install --no-cache-dir --index-url "$pypi" "linkedparticles==$VERSION"
           fi
           /tmp/smoke/bin/python -I - <<'PY'
           import os

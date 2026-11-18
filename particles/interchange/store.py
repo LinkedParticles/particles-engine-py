@@ -45,12 +45,14 @@ from particles.core.reanchor import REANCHOR_ACTOR
 from particles.core.schema import (
     AssertionModality,
     ContributorRef,
+    ExternalRef,
     Particle,
     ProvenanceRef,
     ProvenanceRefType,
     Subject,
 )
 from particles.core.scoring.confidence import CalibrationSource
+from particles.core.status import Status
 from particles.extraction.polarity import POLARITY_KEY
 from particles.extraction.scope import SCOPE_KEY
 from particles.ingest.routing import skips_conflict_resolution
@@ -107,6 +109,11 @@ class ImportSummary:
     imported with that id prefixed :data:`ORIGIN_REF_PREFIX` instead (R23).
     ``recalibrated`` counts particles whose unit claimed an operator's or an
     agent's calibration, imported as ``IMPORTED`` instead (R43).
+    ``skipped_status`` counts the units set aside because their ``status`` is
+    not ``ACTIVE``, per status value: an import admits active claims only, and
+    a lifecycle state is what this store's own ladder decides (D1).
+    ``reason_cleared`` counts imported particles whose unit's ``statusReason``
+    named the source store's history, stored with none (D2).
     """
 
     imported: int = 0
@@ -117,6 +124,8 @@ class ImportSummary:
     retagged: int = 0
     reanchored: int = 0
     recalibrated: int = 0
+    skipped_status: dict[str, int] = field(default_factory=dict)
+    reason_cleared: int = 0
 
 
 #: The asserter an import stamps on a record it creates, and on a unit whose own
@@ -453,6 +462,12 @@ async def import_units(
     belief appends none of its refs to it (R23). An operator's or an agent's
     calibration source is imported as ``IMPORTED`` (``recalibrated``, R43).
 
+    Only ``ACTIVE`` units are imported. A unit with any other ``status`` is set
+    aside before any subject is resolved, so it writes nothing, and is counted
+    per status in ``skipped_status``; an admitted unit's ``statusReason`` is
+    cleared (``reason_cleared``), since the claim's lifecycle here is what the
+    ladder decides. Restore keeps lifecycle state.
+
     Every unit's subjects are resolved first, committed under the store's
     writer lock in one transaction with ``subject_units`` (a bundle's
     standalone subjects), so a subject reference that cannot be built into a
@@ -491,7 +506,15 @@ async def import_units(
 
     summary = ImportSummary()
     single_trust_order = get_config().reconciliation_mode_for(store) == "single"
-    parsed_units = [from_unit(unit) for unit in units]
+    parsed_units = []
+    for parsed in (from_unit(unit) for unit in units):
+        # A retired, superseded or held unit names a judgment no one in this
+        # store made, so it is set aside before its subjects are resolved and
+        # writes nothing (D1).
+        if parsed.particle.status is Status.ACTIVE:
+            parsed_units.append(parsed)
+        else:
+            _count_dropped_keys(summary.skipped_status, [parsed.particle.status.value])
     targets = await _target_records(session, (parsed.particle for parsed in parsed_units))
     unit_subjects: list[list[str]] = []
     async with write_transaction(session, store):
@@ -512,7 +535,15 @@ async def import_units(
         _count_dropped_keys(summary.dropped_keys, parsed.dropped_keys)
         particle, done = _neutralise_particle(parsed.particle, targets)
         _count_neutralised(summary, done)
-        particle = particle.model_copy(update={"subject_ids": subject_ids})
+        update: dict[str, Any] = {"subject_ids": subject_ids}
+        reason_cleared = particle.status_reason is not None
+        if reason_cleared:
+            # The source store's reason describes the source store's history;
+            # here the ladder decides the claim's lifecycle (D2).
+            # Restore shares :func:`_neutralise_particle` and keeps the reason,
+            # so it is cleared here, on the import route only.
+            update["status_reason"] = None
+        particle = particle.model_copy(update=update)
         # An imported duplicate adds nothing to the belief it duplicates: the
         # bundle's refs are origin metadata, and appending them would let a
         # bundle widen that belief's sources (R23). Each unit's gather reads the
@@ -532,6 +563,7 @@ async def import_units(
             summary.dropped += 1
         else:
             summary.imported += 1
+            summary.reason_cleared += int(reason_cleared)
     return summary
 
 
@@ -553,15 +585,19 @@ async def _resolve_subject_ref(session: AsyncSession, ref: SubjectRef) -> tuple[
     for ext in ref.external_refs:
         existing = await find_by_external_ref(session, ext.namespace, ext.id)
         if existing is not None:
+            await _confirm_reached(session, existing.id, ext)
             return existing.id, False
 
     if ref.canonical_name:
         # A binding path: an imported Subject named "User" or "I" is not this
         # store's conversational persona, whatever forms its fold has recorded.
+        # An import is an operator's act, so it never binds by name to a
+        # Subject an agent principal minted and nobody confirmed.
         by_name = await find_by_name(
             session,
             ref.canonical_name,
             skip_aliases_of=persona_alias_guard(ref.canonical_name, None),
+            confirmed_only=True,
         )
         if by_name is not None:
             return by_name.id, False
@@ -573,6 +609,7 @@ async def _resolve_subject_ref(session: AsyncSession, ref: SubjectRef) -> tuple[
             asserted_by=IMPORT_ASSERTER,
         )
         await insert_subject(session, subject)
+        await _fold_provisional(session, subject)
         return subject.id, True
 
     return None, False
@@ -729,10 +766,17 @@ async def _import_subject_unit(session: AsyncSession, unit: dict[str, Any]) -> t
 
     subject = subject_from_unit(unit)
     for ext in subject.external_ids:
-        if await find_by_external_ref(session, ext.namespace, ext.id) is not None:
+        reached = await find_by_external_ref(session, ext.namespace, ext.id)
+        if reached is not None:
+            await _confirm_reached(session, reached.id, ext)
             return False, False
     guard = persona_alias_guard(subject.canonical_name, None)
-    if await find_by_name(session, subject.canonical_name, skip_aliases_of=guard) is not None:
+    if (
+        await find_by_name(
+            session, subject.canonical_name, skip_aliases_of=guard, confirmed_only=True
+        )
+        is not None
+    ):
         return False, False
     demoted = _demote_reserved(subject.asserted_by, subject.contributors, subject.created_at)
     if demoted is not None:
@@ -741,7 +785,30 @@ async def _import_subject_unit(session: AsyncSession, unit: dict[str, Any]) -> t
             update={"asserted_by": asserted_by, "contributors": contributors}
         )
     await insert_subject(session, subject)
+    await _fold_provisional(session, subject)
     return True, demoted is not None
+
+
+async def _confirm_reached(session: AsyncSession, subject_id: str, ext: ExternalRef) -> None:
+    """An import that reaches a provisional Subject's external ref confirms it."""
+    from particles.store.subject_provisional import AcceptedVia, accept
+
+    await accept(
+        session,
+        subject_id,
+        via=AcceptedVia.EXTERNAL_REF,
+        actor=IMPORT_ASSERTER,
+        detail={"refs": [f"{ext.namespace}:{ext.id}"], "resolution": "import"},
+    )
+
+
+async def _fold_provisional(session: AsyncSession, subject: Subject) -> None:
+    """Offer an imported, confirmed Subject to the provisional fold."""
+    # Deferred: ingest is the Engine reconciliation layer this module already
+    # reaches lazily (corpus↔ingest cycle seam).
+    from particles.ingest.subject_resolver import fold_or_hold
+
+    await fold_or_hold(session, subject)
 
 
 # ---------------------------------------------------------------------------

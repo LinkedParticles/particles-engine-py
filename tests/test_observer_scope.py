@@ -621,3 +621,218 @@ class TestRescope:
         assert not await lens_may_engage(db_session)
         with pytest.raises(ValueError, match="is global"):
             await assign_key(db_session, page, A, actor="op")
+
+
+class TestReferenceRoutes:
+    """The deposit routes that write ``scope:reference`` and the ones that do not."""
+
+    async def test_an_operator_text_deposit_is_reference_and_standing_is_global(
+        self, cli_db: Any
+    ) -> None:
+        from particles.api.client.local import LocalBackend
+        from particles.core.observer_scope import REFERENCE_MARKER
+        from particles.corpus.store import get_entry
+        from particles.db import DEFAULT_STORE, session_scope
+
+        backend = LocalBackend()
+        read, _ = await backend.deposit_text(
+            text="An article I read.", tags=[], store=DEFAULT_STORE, deposited_by="operator"
+        )
+        mine, _ = await backend.deposit_text(
+            text="A note every project starts from.",
+            tags=[],
+            store=DEFAULT_STORE,
+            deposited_by="operator",
+            standing=True,
+        )
+        async with session_scope() as session:
+            read_entry = await get_entry(session, read)
+            mine_entry = await get_entry(session, mine)
+        assert read_entry is not None and read_entry.tags == [REFERENCE_MARKER]
+        assert mine_entry is not None and mine_entry.tags == []
+
+    async def test_a_redeposit_matching_a_global_entry_never_gains_the_marker(
+        self, cli_db: Any
+    ) -> None:
+        from particles.api.client.local import LocalBackend
+        from particles.corpus.store import get_entry
+        from particles.db import DEFAULT_STORE, session_scope
+
+        backend = LocalBackend()
+        first, _ = await backend.deposit_text(
+            text="Same bytes.", tags=[], store=DEFAULT_STORE, deposited_by="op", standing=True
+        )
+        again, _ = await backend.deposit_text(
+            text="Same bytes.", tags=[], store=DEFAULT_STORE, deposited_by="op"
+        )
+        assert again == first
+        async with session_scope() as session:
+            entry = await get_entry(session, first)
+        assert entry is not None and entry.tags == []
+
+    async def test_standing_on_a_redeposit_unmarks_and_records_it(self, cli_db: Any) -> None:
+        from particles.api.client.local import LocalBackend
+        from particles.corpus.store import get_entry
+        from particles.db import DEFAULT_STORE, session_scope
+        from particles.store.event_store import OperatorEventType, list_events
+
+        backend = LocalBackend()
+        first, _ = await backend.deposit_text(
+            text="Promote me.", tags=[], store=DEFAULT_STORE, deposited_by="op"
+        )
+        again, _ = await backend.deposit_text(
+            text="Promote me.", tags=[], store=DEFAULT_STORE, deposited_by="op", standing=True
+        )
+        assert again == first
+        async with session_scope() as session:
+            entry = await get_entry(session, first)
+            events = await list_events(
+                session, event_type=OperatorEventType.OBSERVER_SCOPE_REFERENCE_UNMARKED
+            )
+        assert entry is not None and entry.tags == []
+        assert len(events) == 1 and events[0].payload == {"by": "standing"}
+
+    async def test_an_importer_that_declares_nothing_is_a_document_route(self) -> None:
+        from particles.corpus.deposit import importer_route_kind
+        from particles.ingest.importers.registry import get_importers
+
+        assert all(importer_route_kind(i) == "document" for i in get_importers())
+
+        class Notes:
+            ROUTE_KIND = "statement"
+
+        assert importer_route_kind(Notes()) == "statement"
+
+    async def test_a_statement_importer_drops_the_marker(self, db_session: Any) -> None:
+        from unittest.mock import patch
+
+        from particles.core.observer_scope import REFERENCE_MARKER
+        from particles.corpus.deposit import deposit_url
+
+        seen: list[list[str]] = []
+
+        class Notes:
+            ROUTE_KIND = "statement"
+
+            def accepts_url(self, url: str) -> bool:
+                return url.startswith("https://notes.example/")
+
+            async def deposit(
+                self, session: Any, url: str, deposited_by: str, tags: list[str]
+            ) -> tuple[str, str]:
+                seen.append(tags)
+                return "e", "s"
+
+        with (
+            patch("particles.ingest.importers.registry._importers", [Notes()]),
+            patch("particles.url_safety.validate_fetch_url"),
+        ):
+            await deposit_url(
+                db_session,
+                "https://notes.example/today",
+                deposited_by="op",
+                tags=["mine", REFERENCE_MARKER],
+            )
+        assert seen == [["mine"]]
+
+    def test_the_statement_routes_write_no_marker(self) -> None:
+        """Rule files, vocabulary documents and assertions never call the marking rule."""
+        import inspect
+
+        from particles.corpus import rule_sources
+        from particles.operations import agent_write, vocabulary
+
+        for module in (rule_sources, vocabulary, agent_write):
+            source_text = inspect.getsource(module)
+            assert "with_reference_marker" not in source_text, module.__name__
+
+
+class TestMarkReference:
+    """The first marking run over existing entries."""
+
+    async def _entries(self, session: Any) -> dict[str, str]:
+        from particles.core.schema import SourceType
+        from particles.corpus.deposit import deposit_text
+
+        web, _ = await deposit_text(session, "an article", "op", SourceType.WEB_PAGE, [])
+        note, _ = await deposit_text(session, "a write-up", "op", SourceType.LOCAL_MARKDOWN, [])
+        rule, _ = await deposit_text(
+            session, "a rule", "op", SourceType.LOCAL_MARKDOWN, ["rule-file"]
+        )
+        keyed_entry, _ = await deposit_text(
+            session, "a project note", "op", SourceType.LOCAL_MARKDOWN, [f"project:{A}"]
+        )
+        harvested, _ = await deposit_text(
+            session, "a harvest", "op", SourceType.CONVERSATION, ["claude-code"]
+        )
+        return {"web": web, "note": note, "rule": rule, "keyed": keyed_entry, "h": harvested}
+
+    async def test_the_preview_lists_global_documents_and_writes_nothing(
+        self, db_session: Any
+    ) -> None:
+        from particles.corpus.store import get_entry
+        from particles.operations.observer_scope import mark_reference
+
+        e = await self._entries(db_session)
+        report = await mark_reference(db_session, dry_run=True, actor="op")
+
+        assert sorted(entry_id for entry_id, _, _ in report.listed) == sorted([e["web"], e["note"]])
+        entry = await get_entry(db_session, e["web"])
+        assert entry is not None and entry.tags == []
+
+    async def test_apply_marks_records_and_honours_except(self, db_session: Any) -> None:
+        from particles.core.observer_scope import REFERENCE_MARKER
+        from particles.corpus.store import get_entry
+        from particles.operations.observer_scope import mark_reference
+        from particles.store.event_store import OperatorEventType, list_events
+
+        e = await self._entries(db_session)
+        report = await mark_reference(db_session, excepted=[e["note"]], actor="op")
+
+        assert report.marked == [e["web"]] and report.excepted == [e["note"]]
+        web = await get_entry(db_session, e["web"])
+        note = await get_entry(db_session, e["note"])
+        assert web is not None and REFERENCE_MARKER in web.tags
+        assert note is not None and note.tags == []
+        events = await list_events(
+            db_session, event_type=OperatorEventType.OBSERVER_SCOPE_REFERENCE_MARKED
+        )
+        assert [ev.payload["source_type"] for ev in events] == ["WEB_PAGE"]
+        again = await mark_reference(db_session, actor="op")
+        assert again.marked == [e["note"]]
+
+    async def test_an_except_it_would_not_list_is_refused(self, db_session: Any) -> None:
+        from particles.operations.observer_scope import mark_reference
+
+        e = await self._entries(db_session)
+        with pytest.raises(ValueError, match="does not list"):
+            await mark_reference(db_session, excepted=[e["rule"]], actor="op")
+
+    async def test_vocabulary_documents_are_skipped_and_counted(self, db_session: Any) -> None:
+        from particles.operations.observer_scope import plan_mark_reference
+
+        rows = [("v", [], "cli:vocab", "VOCABULARY_DOCUMENT"), ("w", [], "op", "WEB_PAGE")]
+        report = plan_mark_reference(
+            rows, {}, vocabulary_entries={"v"}, excepted=(), harness_tags=("claude-code",)
+        )
+        assert report.skipped_vocabulary == 1 and report.marked == ["w"]
+
+    async def test_unmark_makes_an_entry_global_again(self, db_session: Any) -> None:
+        from particles.corpus.store import get_entry
+        from particles.operations.observer_scope import mark_reference, unmark_reference
+
+        e = await self._entries(db_session)
+        await mark_reference(db_session, actor="op")
+
+        assert await unmark_reference(db_session, e["web"], actor="op", by="unmark-reference")
+        assert not await unmark_reference(db_session, e["web"], actor="op", by="unmark-reference")
+        entry = await get_entry(db_session, e["web"])
+        assert entry is not None and entry.tags == []
+
+    async def test_assign_refuses_a_reference_entry(self, db_session: Any) -> None:
+        from particles.operations.observer_scope import mark_reference
+
+        e = await self._entries(db_session)
+        await mark_reference(db_session, actor="op")
+        with pytest.raises(ValueError, match="is reference"):
+            await assign_key(db_session, e["web"], A, actor="op")

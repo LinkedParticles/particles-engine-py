@@ -43,6 +43,7 @@ import numpy as np
 
 from particles.config import SubjectsConfig
 from particles.core.generics import is_generic_claim
+from particles.core.observer_scope import project_keys
 from particles.core.reanchor import is_reanchor_restatement
 from particles.core.schema import (
     CorpusEntry,
@@ -52,7 +53,7 @@ from particles.core.schema import (
 )
 from particles.core.scoring.confidence import CalibrationSource
 from particles.core.stance import stance_holder
-from particles.corpus.harvest_marks import is_owner_harvest
+from particles.corpus.harvest_marks import is_harness_uri, is_owner_harvest
 from particles.corpus.rule_sources import is_rule_source
 from particles.embeddings import cosine_similarity
 from particles.extraction.components import component_digest
@@ -345,7 +346,7 @@ def _snapshot_of(entry: CorpusEntry | None, snapshot_id: str | None) -> Any:
 
 
 def _authority(uri: str | None) -> str | None:
-    if not uri:
+    if not uri or is_harness_uri(uri):
         return None
     return urlparse(uri).netloc or None
 
@@ -365,11 +366,54 @@ def _local_lineage_shared(
     tag alone: a deposit route accepts tags from its caller (security review
     N6; 2026-10-24-2, P5).
     """
+    if is_harness_uri(new_entry.uri_r) or is_harness_uri(existing_entry.uri_r):
+        # A harness namespace is a lineage key within its project, never a
+        # publisher. Different harnesses do not join just because both have
+        # a netloc spelled "session"; project_lineage_refuses applies below.
+        return (
+            is_harness_uri(new_entry.uri_r)
+            and is_harness_uri(existing_entry.uri_r)
+            and urlparse(new_entry.uri_r or "").scheme
+            == urlparse(existing_entry.uri_r or "").scheme
+        )
     if _authority(new_entry.uri_r) is not None:
         return True
     if new_snap.author_id or _contributors_key(new_entry):
         return True
     return is_owner_harvest(new_entry) and is_owner_harvest(existing_entry)
+
+
+def _rests_on_no_principal(entry: CorpusEntry, snap: Any, other: CorpusEntry) -> bool:
+    """Whether a lineage the other keys already joined names nobody who wrote it.
+
+    True for a registered harness transcript (whose URI authority is
+    a path segment, not a publisher) and for a local entry with no recorded
+    author or contributors, which N6 joins only as an owner harvest. A recorded
+    author or contributor list is a principal, and keeps the pair as it was.
+    """
+    if any(is_harness_uri(e.uri_r) for e in (entry, other)):
+        return True
+    if _authority(entry.uri_r) is not None:
+        return False
+    return not (snap.author_id or _contributors_key(entry))
+
+
+def project_lineage_refuses(
+    new_entry: CorpusEntry, new_snap: Any, existing_entry: CorpusEntry
+) -> bool:
+    """Whether the project-key clause splits two entries the other keys joined.
+
+    True when they are different entries, their shared lineage rests on no
+    principal (:func:`_rests_on_no_principal`), and their ``project:`` key sets
+    do not intersect; an entry with no key intersects nothing. Called by
+    :func:`update_order` after the other keys, and by the read-only census
+    (``scripts/census_update_lineage.py``), so the two cannot disagree.
+    """
+    return (
+        new_entry.entry_id != existing_entry.entry_id
+        and _rests_on_no_principal(new_entry, new_snap, existing_entry)
+        and not (project_keys(new_entry.tags) & project_keys(existing_entry.tags))
+    )
 
 
 def _contributors_key(entry: CorpusEntry) -> tuple[tuple[str, str], ...]:
@@ -476,15 +520,28 @@ def update_order(
       self-dated third-party file could retire the owner's claim (security
       review N6). A tag alone never counts, since deposit routes take tags
       from their caller;
+    * the sides are two different entries whose shared lineage rests on no
+      principal (a harness transcript, or two owner harvests joined only as
+      such) and their ``project:`` key sets do not intersect. An entry with no
+      key is then one lineage with no other entry. It reads the entries' own
+      tags, so it holds on a store that was never rescoped;
     * either side's source content date is unknown, or the dates are equal.
       ``new_date`` / ``existing_date`` override the snapshot's own date, which
       is how a caller supplies the **latest** observation of a re-stated claim
       (:func:`source_dates`) rather than its first;
     * ``require_attribution`` (the ``multi`` regime) and the
-      lineage is anonymous — no snapshot author and no contributors on either
-      side. In a shared store two unattributed claims cannot be assumed to
-      share a principal, so the rung fails closed rather than letting one
-      contributor's date retire another's belief.
+      lineage is anonymous — no snapshot author, no contributors, and not two
+      owner harvests. In a shared store two unattributed claims cannot be
+      assumed to share a principal, so the rung fails closed rather than
+      letting one contributor's date retire another's belief. Two owner
+      harvests (:func:`~particles.corpus.harvest_marks.is_owner_harvest`) are
+      attributed: the reserved harvester depositor names the operator as
+      their principal, read here and never stamped. Every other
+      clause above still applies to them, the project key among them.
+
+    Rung 2.5 therefore retires a claim only for a newer claim of the same
+    principal: the snapshot author or contributor set, else the harvest
+    principal, else (``single`` only) the store's one principal.
     """
     if not (is_extractor_asserted(new_particle) and is_extractor_asserted(existing)):
         return None
@@ -512,7 +569,13 @@ def update_order(
         new_entry, new_snap, existing_entry
     ):
         return None
-    if require_attribution and not (new_snap.author_id or _contributors_key(new_entry)):
+    if project_lineage_refuses(new_entry, new_snap, existing_entry):
+        return None
+    if require_attribution and not (
+        new_snap.author_id
+        or _contributors_key(new_entry)
+        or (is_owner_harvest(new_entry) and is_owner_harvest(existing_entry))
+    ):
         return None
     new_at = new_date or new_snap.content_published_at
     old_at = existing_date or old_snap.content_published_at

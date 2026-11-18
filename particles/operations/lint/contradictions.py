@@ -232,6 +232,9 @@ class _PairRungs:
     An admitted rung's load is on the run tally and nothing reads a row of
     its own; on the owner's store the generic guard decides some 128,000
     pairs a census, which is that many rows per rung version for no reader.
+    A row is keyed on the two texts, so a shadow rung whose verdict reads
+    more than the texts (``Rung.content_keyed`` false) is counted on the tally
+    and writes none: two records of one text need not share its verdict.
     """
 
     def __init__(self, ladder: Ladder[ClaimPair, ContradictionVerdict]) -> None:
@@ -258,8 +261,9 @@ class _PairRungs:
                 continue
             self.counts[rung.stamp][verdict.value] += 1
             if rung.shadow:
-                key = verdict_key(ProbeKind.CONTRADICTION, a.content, b.content)
-                self.rows.setdefault(rung.stamp, {})[key] = verdict.value
+                if rung.content_keyed:
+                    key = verdict_key(ProbeKind.CONTRADICTION, a.content, b.content)
+                    self.rows.setdefault(rung.stamp, {})[key] = verdict.value
                 continue
             if verdict is ContradictionVerdict.YES:
                 self.flagged_by[(a.id, b.id)] = rung.stamp

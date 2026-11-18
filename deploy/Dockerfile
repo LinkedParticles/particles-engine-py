@@ -1,7 +1,8 @@
 # Particles Engine — the OCI image.
 #
 # One image, built from this repo: the wheel plus its locked dependency
-# closure, the web-UI bundle, the embedding encoder baked at build time, and a
+# closure with the `otel` extra (telemetry stays off until the
+# config turns it on), the web-UI bundle, the embedding encoder baked at build time, and a
 # baked /etc/particles/config.yaml whose every store-adjacent path is pinned
 # absolute under a single /data volume. That last part is the point: it closes
 # the §2-Correction trap class *by construction* — inside the image
@@ -34,13 +35,13 @@ ARG SOURCE=tree
 # same bytes; Dependabot's docker entry moves the digests as a reviewable PR.
 # uv comes from its own release image by digest rather than from a `pip
 # install` that checks no hash, and is the version the publish workflows pin.
-FROM ghcr.io/astral-sh/uv:0.13.6@sha256:af22a52f5eafef3d78e551599d405c02df61919d18028f0cea8eda93bc9986d0 AS uv
+FROM ghcr.io/astral-sh/uv:0.13.8@sha256:5cc1805e2426484abca4ad46ea783bab281fdb225fd82d8ce6d66a81254bac85 AS uv
 
 # ---------------------------------------------------------------------------
 # Stage 1a — builder-tree: resolve the locked closure into a self-contained
 # venv and bake the encoder weights.
 # ---------------------------------------------------------------------------
-FROM python:3.11-slim@sha256:b7a9e5f6a93d6d4a31f129bbd4bdee69efccb6ded0fb230d78aafaf37af98377 AS builder-tree
+FROM python:3.11-slim@sha256:07d4824036af339fa1b6ef769cc99d9c10a141769538b52b3b597c84f7a7b535 AS builder-tree
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -74,27 +75,44 @@ COPY tests/fixtures/update_probe/gate_pairs.json tests/fixtures/update_probe/gat
 # --frozen: install exactly the locked closure, never re-resolve. --no-dev:
 # the dev group (pytest, mypy, mkdocs) has no business in a runtime image.
 # --no-editable: build and install the real wheel, so the image carries the
-# same artifact a `pip install` would.
-RUN uv sync --frozen --no-dev --no-editable --no-install-project \
-    && uv sync --frozen --no-dev --no-editable
+# same artifact a `pip install` would. --extra otel on both calls:
+# the image carries the OpenTelemetry SDK, exporter and instrumentation, and
+# the baked config keeps observability off, so an operator turns telemetry on
+# with a config change instead of a rebuild. Both calls, so the cached
+# closure layer already holds the extra's packages.
+RUN uv sync --frozen --no-dev --no-editable --extra otel --no-install-project \
+    && uv sync --frozen --no-dev --no-editable --extra otel
 
 # Bake the embedding encoder (the bake-vs-download question,
 # routed here in favour of bake): predictable cold start, air-gap friendly, and
 # the image is pulled far less often than the daemon restarts. There is no
 # slim/no-encoder variant in v1 — rejected until a measured need exists; the
 # size cost is disclosed in docs/operator-guide/container-deployment.md.
-RUN /opt/venv/bin/python -c "\
+# The download authenticates when the builder passes `--secret id=hf_token`
+# (scripts/build_engine_image.py does when HF_TOKEN is set): a secret mount is
+# never written to a layer or the image history, unlike a build argument.
+# Without it the download is anonymous, as before.
+RUN --mount=type=secret,id=hf_token \
+    if [ -s /run/secrets/hf_token ]; then export HF_TOKEN="$(cat /run/secrets/hf_token)"; fi; \
+    /opt/venv/bin/python -c "\
 from particles.embeddings import get_embedding_model, EMBEDDING_MODEL_ID; \
 m = get_embedding_model(); \
 assert m is not None, 'embedding encoder failed to load at build time'; \
 print('baked encoder:', EMBEDDING_MODEL_ID)"
+
+# The otel extra is present: a lock or layout change that drops it
+# fails here instead of shipping an image whose observability switch does
+# nothing.
+RUN /opt/venv/bin/python -c "\
+import opentelemetry.sdk, opentelemetry.exporter.otlp.proto.http.trace_exporter, opentelemetry.instrumentation.fastapi; \
+print('otel SDK present')"
 
 # ---------------------------------------------------------------------------
 # Stage 1b — builder-pypi: the publication path. Same venv layout and
 # encoder bake as builder-tree, but the code comes from the index — so the
 # published image carries exactly the artifacts a `pip install` user gets.
 # ---------------------------------------------------------------------------
-FROM python:3.11-slim@sha256:b7a9e5f6a93d6d4a31f129bbd4bdee69efccb6ded0fb230d78aafaf37af98377 AS builder-pypi
+FROM python:3.11-slim@sha256:07d4824036af339fa1b6ef769cc99d9c10a141769538b52b3b597c84f7a7b535 AS builder-pypi
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
@@ -125,15 +143,21 @@ RUN echo "$CLOSURE_CUTOFF" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9
 RUN uv venv /opt/venv \
  && uv pip install --python /opt/venv/bin/python --torch-backend cpu \
     --exclude-newer "${CLOSURE_CUTOFF}" \
-    "linkedparticles==${VERSION}"
+    "linkedparticles[otel]==${VERSION}"
 
-# Same bake as builder-tree (kept in step by tests/test_publish_export.py):
-# predictable cold start, air-gap friendly.
-RUN /opt/venv/bin/python -c "\
+# Same bake and the same otel assertion as builder-tree (kept in step by
+# tests/test_publish_export.py): predictable cold start, air-gap friendly, and
+# the published engine distribution's `otel` extra really installed.
+RUN --mount=type=secret,id=hf_token \
+    if [ -s /run/secrets/hf_token ]; then export HF_TOKEN="$(cat /run/secrets/hf_token)"; fi; \
+    /opt/venv/bin/python -c "\
 from particles.embeddings import get_embedding_model, EMBEDDING_MODEL_ID; \
 m = get_embedding_model(); \
 assert m is not None, 'embedding encoder failed to load at build time'; \
 print('baked encoder:', EMBEDDING_MODEL_ID)"
+RUN /opt/venv/bin/python -c "\
+import opentelemetry.sdk, opentelemetry.exporter.otlp.proto.http.trace_exporter, opentelemetry.instrumentation.fastapi; \
+print('otel SDK present')"
 
 # The selector: `--build-arg SOURCE=pypi` swaps the code source; everything
 # downstream (runtime layout, bakes, labels) is identical either way.
@@ -142,7 +166,7 @@ FROM builder-${SOURCE} AS builder
 # ---------------------------------------------------------------------------
 # Stage 2 — runtime.
 # ---------------------------------------------------------------------------
-FROM python:3.11-slim@sha256:b7a9e5f6a93d6d4a31f129bbd4bdee69efccb6ded0fb230d78aafaf37af98377 AS runtime
+FROM python:3.11-slim@sha256:07d4824036af339fa1b6ef769cc99d9c10a141769538b52b3b597c84f7a7b535 AS runtime
 
 ENV PATH=/opt/venv/bin:$PATH \
     PYTHONUNBUFFERED=1 \

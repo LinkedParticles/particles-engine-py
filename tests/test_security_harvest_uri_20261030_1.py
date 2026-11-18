@@ -22,6 +22,8 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from tests._corpus_rows import CLIENT_HOST_ID
+
 LEGACY = "s9-legacy-operator-key"
 
 
@@ -95,6 +97,7 @@ def _hook_key(home: Path) -> str:
         reserved_ok=True,
         memory_roots=[memory],
         archive_roots=[archive],
+        host_id=CLIENT_HOST_ID,
     )[0]
 
 

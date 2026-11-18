@@ -67,6 +67,15 @@ inactive claim stays inactive) and names the recorded status of a claim whose
 the same sides with the card's own belief marked. A "What do these do?"
 disclosure lists one line per offered gesture.
 
+**The executable contract**. What this screen shows on each card,
+the actions it offers, the forms behind them, the requests they send and every
+string come from the shared curation core, `clients/curation-core/`, which
+this app renders. Its `fixtures/contract.json` holds, for an example of every
+card kind, the card's view and, for each action, the forms, scripted answers,
+exact requests and result. Any client checks itself against that file, whether
+it renders the core or cannot import it. This section summarises the contract;
+where the two differ, the fixtures govern.
+
 | Interaction | API call |
 |---|---|
 | Load / refresh queue (kind filter, limit, semantic toggle) | `GET /curation?limit&kind&semantic` |
@@ -85,8 +94,8 @@ disclosure lists one line per offered gesture.
 
 Interaction contract: cards surface only the engine-computed
 `suggested_gestures`; the client invents none. The primary swipe gesture is
-the cheapest card-resolving v1 gesture per kind (see `src/gestures.ts` for
-the preference table). Destructive gestures (retract) confirm; whole-source
+the cheapest card-resolving v1 gesture per kind (the preference table is in
+the curation core's `src/gestures.ts`). Destructive gestures (retract) confirm; whole-source
 retract shows the dry-run blast radius first. Unknown gestures from a newer
 engine render disabled, never guessed.
 

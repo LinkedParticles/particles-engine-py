@@ -339,6 +339,8 @@ def _entry(published: datetime | None, uri: str = "claude-code://session/a") -> 
         source_type="CONVERSATION",
         snapshots=[Snapshot(content_hash="0" * 64, content_published_at=published)],
         deposited_by="test",
+        # One project, as the harness stamps it: a session's lineage is its project.
+        tags=["project:-Users-o-src-app"],
     )
 
 

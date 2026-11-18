@@ -27,7 +27,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -61,12 +61,14 @@ from particles.operations.consolidation import (
 )
 from particles.operations.curation.cards import CardKind, CurationCard, gestures_for
 from particles.operations.curation.snapshot import CurationQueueResult
+from particles.operations.embed_backfill import EmbedBackfillReport
 from particles.operations.utility_exposure import Exposure, ExposureReader
 from particles.store.event_store import OperatorEventType, list_events, record_event
 from particles.store.particle_store import (
     get_particle_ids_changed_since,
     insert_particle,
 )
+from tests._corpus_rows import local_entry_row
 
 NOW = datetime.now(UTC)
 
@@ -104,6 +106,7 @@ async def _seed_run_event(
     cards: dict[str, int] | None = None,
     duplicates_total: int = 0,
     census_status: str | None = None,
+    groups_recorded: bool = True,
 ) -> None:
     """Write a prior CONSOLIDATION_RUN event in the §7 payload shape.
 
@@ -133,6 +136,8 @@ async def _seed_run_event(
         "census": {
             "cards": cards or {},
             "duplicate_candidate_pairs_total": duplicates_total,
+            # a record written since the duplicate class counts groups.
+            **({"duplicate_groups_total": duplicates_total} if groups_recorded else {}),
             **({"skipped": census_status} if census_status else {}),
         },
     }
@@ -178,6 +183,11 @@ def cycle_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
         ),
     )
     monkeypatch.setattr(consolidation_mod, "_suppressed_keys", AsyncMock(return_value=set()))
+    # the embed pass has its own tests (tests/test_embed_backfill.py);
+    # stubbed so no test here loads the real encoder.
+    monkeypatch.setattr(
+        consolidation_mod, "run_embed_backfill", AsyncMock(return_value=EmbedBackfillReport())
+    )
     monkeypatch.setattr(
         consolidation_mod,
         "build_curation_queue",
@@ -201,6 +211,83 @@ def cycle_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
 # ---------------------------------------------------------------------------
 # Lockfile protocol (§8)
 # ---------------------------------------------------------------------------
+
+
+class _SyscallSteps:
+    """``os`` for the lock code, reporting each step of a description rewrite.
+
+    Each ``write`` puts down one byte, so every mid-write state a racing
+    reader could see is a real state of the file, and ``on_step`` runs after
+    every ``open``, ``write``, ``ftruncate`` and ``fsync``. Only the creating
+    thread's steps are reported: the proxy replaces the module's ``os`` for
+    every thread, and another test's heartbeat may beat meanwhile.
+    """
+
+    def __init__(self, on_step: Callable[[str], None]) -> None:
+        self._on_step = on_step
+        self._owner = threading.get_ident()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(os, name)
+
+    def _step(self, name: str) -> None:
+        if threading.get_ident() == self._owner:
+            self._on_step(name)
+
+    def open(self, path: Any, flags: int, mode: int = 0o777) -> int:
+        fd = os.open(path, flags, mode)
+        self._step("open")
+        return fd
+
+    def write(self, fd: int, data: Any) -> int:
+        written = os.write(fd, bytes(data[:1]))
+        self._step("write")
+        return written
+
+    def ftruncate(self, fd: int, length: int) -> None:
+        os.ftruncate(fd, length)
+        self._step("ftruncate")
+
+    def fsync(self, fd: int) -> None:
+        os.fsync(fd)
+        self._step("fsync")
+
+
+class _BackOffLands:
+    """``time`` for the lock code, whose back-off lets the holder's write land."""
+
+    def __init__(self, probe: Path, landed: bytes) -> None:
+        self._probe = probe
+        self._landed = landed
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(time, name)
+
+    def sleep(self, _seconds: float) -> None:
+        self._probe.write_bytes(self._landed)
+
+
+def _whole(raw: bytes) -> dict[str, Any] | None:
+    """``raw`` as a description, or ``None`` when it does not parse."""
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _read_while_write_lands(
+    monkeypatch: pytest.MonkeyPatch, probe: Path, seen: bytes, landed: bytes
+) -> dict[str, Any] | None:
+    """What a contender reads when its first read sees ``seen``.
+
+    The holder's write lands while the reader backs off between rereads, so
+    the reread sees ``landed``. The back-off is replaced, not slept.
+    """
+    probe.write_bytes(seen)
+    with monkeypatch.context() as m:
+        m.setattr(consolidation_mod, "time", _BackOffLands(probe, landed))
+        return consolidation_mod._read_description(probe)
 
 
 class TestCycleLock:
@@ -286,9 +373,16 @@ class TestCycleLock:
         assert first is not None
         assert first["pass"] == "census"
         # The heartbeat comes from a thread, so it advances while the caller
-        # blocks synchronously.
-        time.sleep(0.3)
+        # blocks synchronously. Poll rather than sleep a fixed
+        # 300 ms: under coverage on a loaded CI runner the thread's first beats
+        # can arrive later than that, and the assertion is that it beats at all.
+        deadline = time.monotonic() + 5.0
         later = consolidation_mod._read_description(path)
+        while (
+            later is None or later["heartbeat_at"] <= first["heartbeat_at"]
+        ) and time.monotonic() < deadline:
+            time.sleep(0.05)
+            later = consolidation_mod._read_description(path)
         assert later is not None
         assert later["heartbeat_at"] > first["heartbeat_at"]
         assert later["pass"] == "census"
@@ -301,6 +395,12 @@ class TestCycleLock:
         # A contender reads the description while the holder rewrites it. An
         # unreadable one is "no holder" after taking the kernel lock and
         # "stale" in the fallback, so either could take a live cycle's lock.
+        # The rewrite is stepped one syscall at a time, each write one byte
+        # long, and the file is read after every step: a contender racing the
+        # holder can see any of these states. No thread or clock picks which,
+        # so every state is checked on every run (a reader thread racing 2000
+        # rewrites saw a torn state on ~7% of reads and failed only when five
+        # rereads in a row were torn, which a loaded machine made likely).
         if not kernel:
 
             def no_flock(_fd: int, _op: int) -> None:
@@ -311,25 +411,40 @@ class TestCycleLock:
         lock = acquire_cycle_lock(path, timeout_minutes=120, heartbeat_seconds=3600)
         assert isinstance(lock, CycleLock)
         assert (lock.fd is not None) is kernel
-        stop = threading.Event()
-        unread: list[str] = []
-
-        def _read() -> None:
-            while not stop.is_set():
-                if consolidation_mod._read_description(path) is None:
-                    unread.append(path.read_text())
-
-        reader = threading.Thread(target=_read)
-        reader.start()
-        try:
-            # Alternate long and short pass names so the file shrinks as well
-            # as grows: a shrink is what leaves a stale tail behind.
-            for i in range(2000):
-                lock.set_pass("x" * 40 if i % 2 else "census")
-        finally:
-            stop.set()
-            reader.join()
-        assert unread == []
+        probe = tmp_path / "reader.lock"
+        steps: list[tuple[str, bytes]] = []
+        # The description first grows (it gains a pass), then alternates long
+        # and short pass names so the file shrinks as well as grows: a shrink
+        # is what leaves a stale tail behind.
+        for name in ("census", "x" * 40, "census", "x" * 40):
+            old = json.loads(path.read_bytes())
+            steps.clear()
+            with monkeypatch.context() as m:
+                m.setattr(
+                    consolidation_mod,
+                    "os",
+                    _SyscallSteps(lambda step: steps.append((step, path.read_bytes()))),
+                )
+                lock.set_pass(name)
+            new = dict(lock.info)
+            whole = path.read_bytes()
+            assert json.loads(whole) == new
+            last_write = max(i for i, (step, _) in enumerate(steps) if step == "write")
+            for i, (step, raw) in enumerate(steps):
+                # An empty file is an unheld lock, and is never reread.
+                assert raw.strip(), f"empty after {step} rewriting to {name!r}"
+                if step != "write" or i == last_write:
+                    # Between the holder's syscalls the file is one whole
+                    # description, never a cut-off or stale-tailed one.
+                    assert _whole(raw) in (old, new), f"after {step}: {raw!r}"
+                else:
+                    # Mid-write the bytes are a mix of old and new. A reader
+                    # rereads a mix, and its reread after the write lands is
+                    # whole.
+                    seen = _read_while_write_lands(monkeypatch, probe, raw, whole)
+                    assert seen is not None, f"mid-write: {raw!r}"
+                    assert seen["pid"] == os.getpid()
+            assert steps[-1][1] == whole
         assert json.loads(path.read_text())["pass"] == "x" * 40
         release_cycle_lock(lock)
 
@@ -652,6 +767,7 @@ class TestPassComposition:
             # is re-snapshotted, extracted, and reconciled in the SAME run.
             "refresh",
             "extract",
+            "embed",
             "reconcile",
             "reconcile_updates",
             "paraphrases",  # after the update sweep, before re-anchoring
@@ -789,6 +905,41 @@ class TestDegradation:
         assert (event.payload or {})["rungs"] == report.rung_counts == {}
 
     @pytest.mark.asyncio
+    async def test_the_run_record_counts_the_withheld_duplicate_pairs(
+        self, db_session: AsyncSession, cycle_env: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """the run record and the snapshot it built carry one count."""
+        import numpy as np
+
+        from particles.core.schema import Subject
+        from particles.operations.curation import collect
+
+        # cycle_env stubs the collection; this test needs the real finder.
+        monkeypatch.setattr(consolidation_mod, "collect_cards", collect.collect_cards)
+        from particles.store.particle_store import insert_particle
+        from particles.store.subject_store import insert_subject
+
+        subject = Subject(canonical_name="particles-engine-py", asserted_by="test")
+        await insert_subject(db_session, subject)
+        for text, head in (("PR #284 was opened.", 0.6), ("PR #288 was opened.", 0.61)):
+            particle = _particle(text, datetime(2026, 11, 1, tzinfo=UTC))
+            particle.subject_ids = [subject.id]
+            vec = np.asarray([head, (1 - head * head) ** 0.5] + [0.0] * 382, dtype=np.float32)
+            await insert_particle(db_session, particle, embedding=vec.tolist())
+        await db_session.commit()
+
+        report = await run_consolidation(db_session, structural_only=True)
+        event = await latest_run_event(db_session)
+        assert event is not None
+        payload = event.payload or {}
+        assert payload["census"]["duplicate_withheld"] == {"identifier_cross@1": 1}
+        assert payload["rungs"]["duplicate"]["rungs"]["identifier_cross@1"] == {"different": 1}
+        assert report.duplicate_withheld == {"identifier_cross@1": 1}
+        # Pass 4 hands the same count to the snapshot it persists.
+        persist = consolidation_mod.collect_and_persist.call_args.kwargs  # type: ignore[attr-defined]
+        assert persist["withheld"] == {"identifier_cross@1": 1}
+
+    @pytest.mark.asyncio
     async def test_structural_only_flag(self, db_session: AsyncSession, cycle_env: Path) -> None:
         report = await run_consolidation(db_session, structural_only=True)
         assert report.semantic_degraded is True
@@ -920,6 +1071,78 @@ class TestDeltaScope:
         assert report.scope_particle_count == 1
 
     @pytest.mark.asyncio
+    async def test_a_belief_the_embed_pass_fills_is_in_that_runs_scope(
+        self, db_session: AsyncSession, cycle_env: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # the embed pass runs before the delta scope is computed,
+        # so an old belief it gives a vector is paired by the run that fills it.
+        import numpy as np
+
+        from particles import embeddings as ep
+        from particles.operations.embed_backfill import run_embed_backfill
+
+        monkeypatch.setattr(consolidation_mod, "run_embed_backfill", run_embed_backfill)
+        updates = AsyncMock(return_value={})
+        monkeypatch.setattr(consolidation_mod, "reconcile_updates", updates)
+        model = MagicMock()
+        model.encode = MagicMock(
+            side_effect=lambda texts, **_: np.ones((len(texts), 4), dtype=np.float32)
+        )
+        original = ep._embedding_model
+        ep.set_embedding_model(model)
+        try:
+            started = NOW - timedelta(hours=25)
+            await _seed_run_event(
+                db_session, completed_at=started + timedelta(minutes=5), started_at=started
+            )
+            outage = _particle("written while the encoder was down", NOW - timedelta(days=80))
+            await insert_particle(db_session, outage)
+            await db_session.commit()
+
+            report = await run_consolidation(db_session, scope="delta")
+        finally:
+            ep.set_embedding_model(original)
+
+        assert _pass(report, "embed").status == "ran"
+        assert report.embed is not None and report.embed.filled == 1
+        control = consolidation_mod.collect_cards.call_args.kwargs["contradiction_probe"]  # type: ignore[attr-defined]
+        assert control.scope_particle_ids == frozenset({outage.id})
+        # Pass 2b, the delta-scoped rung 2.5 sweep, reaches it too.
+        assert outage.id in updates.call_args.kwargs["scope_ids"]
+        events = await list_events(db_session, event_type=OperatorEventType.CONSOLIDATION_RUN)
+        assert events[0].payload is not None
+        assert events[0].payload["census"]["embed"]["filled"] == 1
+        assert "embeddings       filled 1 belief stored without a vector" in (
+            render_consolidation_report(report)
+        )
+
+    @pytest.mark.asyncio
+    async def test_embed_pass_is_skipped_with_the_reason_when_no_encoder_loads(
+        self, db_session: AsyncSession, cycle_env: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.operations.embed_backfill import NO_ENCODER, EmbedBackfillReport
+
+        monkeypatch.setattr(
+            consolidation_mod,
+            "run_embed_backfill",
+            AsyncMock(return_value=EmbedBackfillReport(still_missing=3, skipped_reason=NO_ENCODER)),
+        )
+        report = await run_consolidation(db_session)
+        embed = _pass(report, "embed")
+        assert embed.status == "skipped"
+        assert embed.detail == NO_ENCODER
+        assert "3 beliefs without a vector, not filled" in render_consolidation_report(report)
+
+    @pytest.mark.asyncio
+    async def test_embed_pass_off_at_zero(self, db_session: AsyncSession, cycle_env: Path) -> None:
+        get_config().consolidation.embed.max_per_run = 0
+        report = await run_consolidation(db_session)
+        embed = _pass(report, "embed")
+        assert embed.status == "skipped"
+        assert embed.detail == "consolidation.embed.max_per_run is 0"
+        consolidation_mod.run_embed_backfill.assert_not_called()  # type: ignore[attr-defined]
+
+    @pytest.mark.asyncio
     async def test_delta_window_opens_at_prior_started_at(
         self, db_session: AsyncSession, cycle_env: Path
     ) -> None:
@@ -1049,7 +1272,7 @@ class TestCensusCadence:
         assert second.census_skipped in rendered
         assert "pass skipped: census" not in rendered  # said once, in the headline
         # The last census's counts are shown as that census's, never tonight's.
-        assert "as of that census: 2 contradictions, 1 duplicate pair, 1 stale" in rendered
+        assert "as of that census: 2 contradictions, 1 duplicate group, 1 stale" in rendered
         assert "contradictions   " not in rendered
 
         event = await latest_run_event(db_session)
@@ -1400,7 +1623,12 @@ class TestUtilityBudget:
         get_config().utility.mining.behavioural_matching = True
         get_config().utility.mining.behavioural_candidate_limit = 0  # no pre-filter
         entries = [
-            SimpleNamespace(entry_id=f"e{i}", uri_r=f"claude-code://session/s{i}", tags=[])
+            SimpleNamespace(
+                entry_id=f"e{i}",
+                uri_r=f"claude-code://session/s{i}",
+                tags=[],
+                deposited_by="claude-code-hook",
+            )
             for i in range(n)
         ]
         snaps = {
@@ -1619,7 +1847,7 @@ class TestUtilityBudget:
         assert (report.utility_sessions_mined, report.utility_literal) == (3, 0)
         assert report.utility_behavioural_skipped is not None
         assert report.utility_behavioural_skipped.startswith(
-            "spent US$0.00 of US$0.00; pass 11's use judge skipped"
+            "spent US$0.00 of US$0.00; pass 12's use judge skipped"
         )
 
     @pytest.mark.asyncio
@@ -1712,6 +1940,7 @@ class TestRunRecord:
         assert pass_names == [
             "refresh",
             "extract",
+            "embed",
             "reconcile",
             "reconcile_updates",
             "paraphrases",
@@ -1815,6 +2044,22 @@ class TestRunRecord:
         rendered = render_consolidation_report(report)
         assert "(+1 since the last census)" in rendered
         assert "previous run:" in rendered
+
+    @pytest.mark.asyncio
+    async def test_no_duplicates_delta_against_a_record_that_counted_pairs(
+        self, db_session: AsyncSession, cycle_env: Path
+    ) -> None:
+        """pairs cannot be restated as groups, so that one run has no delta."""
+        await _seed_run_event(
+            db_session,
+            completed_at=NOW - timedelta(days=1),
+            cards={"contradiction": 1, "inconsistency": 0, "stale": 3},
+            duplicates_total=6,
+            groups_recorded=False,
+        )
+        report = await run_consolidation(db_session, scope="store")
+        assert "duplicates" not in report.deltas
+        assert "stale" in report.deltas
 
     @pytest.mark.asyncio
     async def test_no_contradictions_delta_against_a_pre_0280_record(
@@ -2175,7 +2420,6 @@ class TestRefreshPass:
         )
         from particles.corpus.deposit import sha256
         from particles.corpus.store import (
-            CorpusEntryRow,
             SnapshotRow,
             list_snapshots_for_entry,
         )
@@ -2192,7 +2436,7 @@ class TestRefreshPass:
             mutability=Mutability.MUTABLE,
             deposited_by="test",
         )
-        db_session.add(CorpusEntryRow.from_model(entry))
+        db_session.add(local_entry_row(entry))
         snap = Snapshot(
             snapshot_id=str(uuid.uuid4()),
             captured_at=datetime.now(UTC) - timedelta(days=1),
@@ -2468,12 +2712,15 @@ class TestPassExtractPooled:
             PendingSnapshot(entry, f"snap-{i}", NOW, 0)
             for i, entry in enumerate(["a", "a", "a", "b", "b", "c", "d"])
         ]
-        assert consolidation_mod._one_per_entry(pending, 3) == [
-            ("a", "snap-0"),
-            ("b", "snap-3"),
-            ("c", "snap-5"),
-        ]
-        assert len(consolidation_mod._one_per_entry(pending, 20)) == 4
+
+        def chosen(cap: int) -> list[tuple[str, str]]:
+            admitted, _ = consolidation_mod._within_metered_share(
+                consolidation_mod._entry_heads(pending), cap, {}
+            )
+            return [(item.entry_id, item.snapshot_id) for item in admitted]
+
+        assert chosen(3) == [("a", "snap-0"), ("b", "snap-3"), ("c", "snap-5")]
+        assert len(chosen(20)) == 4
 
     def test_priority_tags_fill_the_cap_first(self) -> None:
         """Acceptance 4: rule and memory files ahead of the transcript queue."""
@@ -2515,6 +2762,82 @@ class TestPassExtractPooled:
         ]
         assert consolidation_mod._prioritised(pending) == pending
 
+    def test_a_metered_principal_takes_at_most_its_share_in_the_pooled_pass(self) -> None:
+        """a later snapshot of a chosen entry never uses the share."""
+        from particles.corpus.store import PendingSnapshot
+
+        get_config().consolidation.max_pending_entries = 20
+        pending = [
+            PendingSnapshot(f"p{i}", f"p{i}-a", NOW, 0, metered_principal="agent:a")
+            for i in range(7)
+        ]
+        # A later snapshot of the first chosen entry.
+        pending.insert(1, PendingSnapshot("p0", "p0-b", NOW, 0, metered_principal="agent:a"))
+        pending += [PendingSnapshot(f"o{i}", f"o{i}", NOW, 0) for i in range(3)]
+
+        chosen, deferred = consolidation_mod._selection_with_share(pending, batching=True)
+
+        assert [c.entry_id for c in chosen] == ["p0", "p1", "p2", "p3", "p4", "o0", "o1", "o2"]
+        assert [d.entry_id for d in deferred] == ["p5", "p6"]
+        report = ConsolidationReport()
+        consolidation_mod._disclose_metered_deferral(report, deferred)
+        assert (report.pending_deferred_metered, report.metered_principals_deferred) == (2, 1)
+        assert consolidation_mod._census_payload(report)["pending_deferred_metered"] == 2
+
+    def test_the_serial_pass_counts_each_snapshot_against_the_share(self) -> None:
+        from particles.corpus.store import PendingSnapshot
+
+        get_config().consolidation.max_pending_entries = 20
+        get_config().consolidation.max_pending_per_metered_principal = 2
+        pending = [
+            PendingSnapshot("p", f"p-{i}", NOW + timedelta(minutes=i), 0, metered_principal="a")
+            for i in range(3)
+        ]
+
+        chosen, deferred = consolidation_mod._selection_with_share(pending, batching=False)
+
+        assert [c.snapshot_id for c in chosen] == ["p-0", "p-1"]
+        assert [d.snapshot_id for d in deferred] == ["p-2"]
+
+    def test_the_share_holds_in_the_priority_class_and_is_not_work_conserving(self) -> None:
+        """Unused slots stay unused: the operator's cap never decides what a key extracts."""
+        from particles.corpus.store import PendingSnapshot
+
+        get_config().consolidation.max_pending_entries = 20
+        rule = frozenset({"rule-file"})
+        pending = [
+            PendingSnapshot(f"p{i}", f"p{i}", NOW, 0, tags=rule, metered_principal="agent:a")
+            for i in range(8)
+        ]
+        pending += [
+            PendingSnapshot(f"q{i}", f"q{i}", NOW, 0, metered_principal="agent:b") for i in range(8)
+        ]
+
+        chosen = consolidation_mod._extract_selection(pending, batching=True)
+
+        assert [e for e, _ in chosen] == [
+            "p0",
+            "p1",
+            "p2",
+            "p3",
+            "p4",
+            "q0",
+            "q1",
+            "q2",
+            "q3",
+            "q4",
+        ]
+
+    def test_a_share_of_zero_admits_none_of_a_metered_principals_snapshots(self) -> None:
+        from particles.corpus.store import PendingSnapshot
+
+        get_config().consolidation.max_pending_per_metered_principal = 0
+        pending = [
+            PendingSnapshot("p", "p", NOW, 0, metered_principal="agent:a"),
+            PendingSnapshot("o", "o", NOW, 0),
+        ]
+        assert consolidation_mod._extract_selection(pending, batching=True) == [("o", "o")]
+
     @pytest.mark.asyncio
     async def test_pass_extract_resets_a_stranded_claim_and_extracts_it(
         self, monkeypatch: pytest.MonkeyPatch, db_session: AsyncSession
@@ -2529,7 +2852,7 @@ class TestPassExtractPooled:
             Snapshot,
             WarcRecordType,
         )
-        from particles.corpus.store import CorpusEntryRow, SnapshotRow
+        from particles.corpus.store import SnapshotRow
         from particles.operations import extract as extract_mod
 
         get_config().consolidation.extract_batching = False
@@ -2541,7 +2864,7 @@ class TestPassExtractPooled:
             fetch_policy=FetchPolicy.NEVER,
             deposited_by="test",
         )
-        db_session.add(CorpusEntryRow.from_model(entry))
+        db_session.add(local_entry_row(entry))
         snap = Snapshot(
             snapshot_id=str(uuid.uuid4()),
             captured_at=NOW - timedelta(days=60),
@@ -2592,7 +2915,7 @@ class TestPassExtractPooled:
             WarcRecordType,
         )
         from particles.corpus.deposit import save_blob, sha256
-        from particles.corpus.store import CorpusEntryRow, SnapshotRow
+        from particles.corpus.store import SnapshotRow
         from particles.operations import extract as extract_mod
         from particles.operations.consolidation import _census_payload
 
@@ -2605,7 +2928,7 @@ class TestPassExtractPooled:
             fetch_policy=FetchPolicy.NEVER,
             deposited_by="test",
         )
-        db_session.add(CorpusEntryRow.from_model(entry))
+        db_session.add(local_entry_row(entry))
         snapshot_ids: list[str] = []
         for age in (3, 2, 1):
             content = f"edit {age}".encode()
@@ -3187,7 +3510,7 @@ class TestProgressEvents:
         census = next(e for e in ended if e.label == "census")
         assert census.outcome == "ok"
         assert "contradiction" in census.summary
-        assert "1 duplicate pair" in census.summary
+        assert "1 duplicate group" in census.summary
 
     @pytest.mark.asyncio
     async def test_the_report_is_the_same_with_or_without_a_callback(
@@ -3372,7 +3695,7 @@ class TestSpendBudget:
         reconcile = _pass(report, "reconcile")
         assert reconcile.status == "skipped"
         assert reconcile.detail is not None
-        assert reconcile.detail.startswith("spent US$0.00 of US$0.00; pass 3 skipped")
+        assert reconcile.detail.startswith("spent US$0.00 of US$0.00; pass 4 skipped")
         assert reconcile.detail.endswith("(consolidation.budget_usd)")
         assert consolidation_mod.reconcile_supersession.await_count == 0  # type: ignore[attr-defined]
 
@@ -3382,7 +3705,7 @@ class TestSpendBudget:
         assert kwargs["semantic"] is False
         assert kwargs["contradiction_probe"] is None
         assert report.census_probe_skipped is not None
-        assert "pass 8's contradiction probe skipped" in report.census_probe_skipped
+        assert "pass 9's contradiction probe skipped" in report.census_probe_skipped
 
         # The zero-LLM passes are never budgeted.
         for name in ("disclose", "curation", "projection"):
@@ -3436,7 +3759,7 @@ class TestSpendBudget:
         reconcile = _pass(report, "reconcile")
         assert reconcile.status == "skipped"
         assert reconcile.detail == (
-            "spent US$0.00 of US$0.05; pass 3 skipped (estimated US$0.08 for 50 LLM calls "
+            "spent US$0.00 of US$0.05; pass 4 skipped (estimated US$0.08 for 50 LLM calls "
             "at list price) (consolidation.budget_usd)"
         )
 
@@ -3575,6 +3898,81 @@ class TestRevisionSettledCount:
         assert report.pending_revision_settled == 3
         assert consolidation_mod._census_payload(report)["pending_revision_settled"] == 3
         assert "3 revision pair(s) settled" in render_consolidation_report(report)
+
+
+def _declared_counters() -> list[Any]:
+    """Every ``_Counter`` the module declares, alone or in a table."""
+    counters: list[Any] = []
+    for value in vars(consolidation_mod).values():
+        if isinstance(value, consolidation_mod._Counter):
+            counters.append(value)
+        elif isinstance(value, tuple) and value:
+            counters.extend(v for v in value if isinstance(v, consolidation_mod._Counter))
+    return counters
+
+
+class TestCounterPhrasing:
+    """Each report counter is phrased once, and every renderer reads that phrase."""
+
+    #: The run record's names for counters it renames (a stored format).
+    PAYLOAD_RENAMES = {"pending_remaining": "pending_backlog"}
+
+    #: The three renderers that print counters.
+    RENDERERS = ("_pass_summary", "_pending_line", "render_consolidation_report")
+
+    #: Counters a renderer may still print by hand, each in a sentence about
+    #: something else. The local-refresh cap disclosure says how many entries
+    #: were checked before the cap stopped it.
+    ALLOWED = {("render_consolidation_report", "refresh_checked")}
+
+    def test_each_counter_is_declared_once_and_recorded(self) -> None:
+        counters = _declared_counters()
+        names = [c.field_name for c in counters]
+        assert len(names) == len(set(names)), "a counter is declared twice"
+        payload = consolidation_mod._census_payload(ConsolidationReport())
+        for name in names:
+            assert name in ConsolidationReport.model_fields
+            assert self.PAYLOAD_RENAMES.get(name, name) in payload
+
+    def test_no_renderer_spells_out_a_declared_counter(self) -> None:
+        import ast
+        import inspect
+        import textwrap
+
+        declared = {c.field_name for c in _declared_counters()}
+        found: set[tuple[str, str]] = set()
+        for name in self.RENDERERS:
+            source = textwrap.dedent(inspect.getsource(getattr(consolidation_mod, name)))
+            for node in ast.walk(ast.parse(source)):
+                if not isinstance(node, ast.FormattedValue):
+                    continue
+                for inner in ast.walk(node.value):
+                    if (
+                        isinstance(inner, ast.Attribute)
+                        and isinstance(inner.value, ast.Name)
+                        and inner.value.id == "report"
+                        and inner.attr in declared
+                    ):
+                        found.add((name, inner.attr))
+        assert found <= self.ALLOWED, (
+            f"phrase these counters in their _Counter, not in the renderer: "
+            f"{sorted(found - self.ALLOWED)}"
+        )
+
+    def test_the_pass_end_line_and_the_report_share_a_phrase(self) -> None:
+        """The waiting count once read differently in the two (the drift this fixed)."""
+        report = ConsolidationReport(
+            completed_at=NOW, pending_waiting=2, pending_failed=1, pending_remaining=3
+        )
+        entry = consolidation_mod.ConsolidationPass(name="extract", status="ran")
+        summary = consolidation_mod._pass_summary(
+            report, entry, consolidation_mod._RunProgress(lambda _event: None)
+        )
+        pending = consolidation_mod._pending_line(report)
+        for clause in ("1 failed", "2 waiting on a partial whole read"):
+            assert clause in summary
+            assert clause in pending
+        assert "3 remain" in summary and "(3 remain; the next run continues)" in pending
 
 
 class TestRungLines:

@@ -9,8 +9,9 @@ from __future__ import annotations
 import typer
 
 from particles.api.cli import app, run
-from particles.api.cli._terminal import terminal_echo, terminal_field
+from particles.api.cli._terminal import clip, terminal_echo, terminal_field
 from particles.api.client import Backend, get_backend
+from particles.config import get_config
 from particles.core.schema import (
     AnswerFailureCause,
     AssertionModality,
@@ -65,7 +66,7 @@ def _render_attribution(result: QueryResponse) -> None:
     for pid in cited:
         particle = by_id.get(pid)
         if particle is not None:
-            terminal_echo(f"  [{handles[pid]}] {terminal_field(particle.content[:80])}")
+            terminal_echo(f"  [{handles[pid]}] {terminal_field(clip(particle.content, 80))}")
     invalid = attribution.invalid_citation_count
     if invalid:
         terminal_echo(
@@ -93,7 +94,10 @@ def query_cmd(
     ),
     min_confidence: float = typer.Option(0.0, help="Minimum confidence threshold"),
     audience: str = typer.Option("GENERAL", help="GENERAL, EXPERT, or REGULATORY"),
-    top_k: int = typer.Option(40, help="Number of particles to retrieve"),
+    top_k: int | None = typer.Option(
+        None,
+        help="Number of particles to retrieve (default: query.default_top_k, 40).",
+    ),
     subject: str | None = typer.Option(
         None,
         "--subject",
@@ -111,7 +115,11 @@ def query_cmd(
         "(up-expansion over taxonomy parent links)",
     ),
     show_particles: bool = typer.Option(
-        False, "--show-particles", help="Print retrieved particles with scores before the answer"
+        False,
+        "--show-particles",
+        help="Print retrieved particles with scores before the answer. When the "
+        "answer refuses, this also asks for the nearest beliefs, which are "
+        "otherwise withheld as likely unrelated.",
     ),
     show_source: bool = typer.Option(
         False,
@@ -321,7 +329,8 @@ def query_cmd(
             question=question,
             min_confidence=min_confidence,
             audience=AudienceHint(audience),
-            top_k=top_k,
+            # the configured default, read at call time.
+            top_k=top_k if top_k is not None else get_config().query.default_top_k,
             subject_id=resolved_subject,
             tags=list(tag),
             include_ancestors=include_ancestors,
@@ -342,6 +351,9 @@ def query_cmd(
             list_predicates=predicates,
             list_vocabulary=vocabulary,
             grounded=grounded,
+            # the flag that prints the retrieved particles is also
+            # the one that asks for them when the answer refuses.
+            include_refused_candidates=show_particles,
         )
     except ValueError as exc:
         # Pydantic validation — e.g. a future --as-of instant,
@@ -390,9 +402,14 @@ def query_cmd(
             _render_sources(backend, result)
         return
     # a refusal (the deterministic below-floor answer, or the §4
-    # responder-declared one) promises its nearest beliefs "listed for
-    # transparency" — so render the table (relabelled) even without
-    # --show-particles.
+    # responder-declared one) relabels its nearest beliefs. They are withheld
+    # unless --show-particles asked for them, and then one line
+    # says how many and how to list them.
+    if result.withheld_candidates:
+        terminal_echo(
+            f"{result.withheld_candidates} nearest beliefs withheld as likely "
+            "unrelated (--show-particles lists them)"
+        )
     if show_particles or (result.answer_refused and result.particles):
         from datetime import UTC, datetime
 
@@ -416,7 +433,7 @@ def query_cmd(
                 age_str = "—"
             terminal_echo(
                 f"{p.confidence.value:>5.2f}  {eff:>5.2f}  {age_str:>6}  "
-                f"{extractor:<28}  {terminal_field(p.content[:60])}"
+                f"{extractor:<28}  {terminal_field(clip(p.content, 60))}"
             )
         terminal_echo("")
     if contestedness and result.contestedness:
@@ -426,9 +443,8 @@ def query_cmd(
                 reading.renderings, key=lambda r: (-r.effective_confidence, r.policy)
             )
             attributed = ", ".join(f"{r.policy}:{r.effective_confidence:.2f}" for r in renderings)
-            terminal_echo(
-                f"  {reading.spread:>5.2f}  {terminal_field(p.content[:50]):<50}  [{attributed}]"
-            )
+            claim = terminal_field(clip(p.content, 50))
+            terminal_echo(f"  {reading.spread:>5.2f}  {claim:<50}  [{attributed}]")
         terminal_echo("")
     elif contestedness:
         terminal_echo(
@@ -464,9 +480,8 @@ def query_cmd(
         if badge is None:
             continue
         versus = f" (vs. p-{badge.inconsistency_id[:8]})" if badge.inconsistency_id else ""
-        terminal_echo(
-            f"⚠ contested ({', '.join(badge.bases)}) — {terminal_field(p.content[:60])}{versus}"
-        )
+        claim = terminal_field(clip(p.content, 60))
+        terminal_echo(f"⚠ contested ({', '.join(badge.bases)}) — {claim}{versus}")
         if badge.caveat:
             badge_caveat = badge.caveat
     if badge_caveat:
@@ -480,12 +495,14 @@ def query_cmd(
             if note is None:
                 continue
             line = (
-                f"↳ {terminal_field(p.content[:60])} — now {note.status.value}"
+                f"↳ {terminal_field(clip(p.content, 60))} — now {note.status.value}"
                 f"{f' ({note.status_reason.value})' if note.status_reason else ''}, "
                 f"retired {note.retired_at.isoformat()} [basis: {note.basis}]"
             )
             if note.successor is not None:
-                line += f"; superseded by {note.successor.id[:8]}: {note.successor.content[:60]}"
+                line += (
+                    f"; superseded by {note.successor.id[:8]}: {clip(note.successor.content, 60)}"
+                )
             terminal_echo(line)
         if result.as_of_excluded_undatable:
             terminal_echo(
@@ -574,7 +591,7 @@ def _render_window_listing(result: QueryResponse) -> None:
             marker += f"  [restates p-{hit.restates[:8]}]"
         terminal_echo(
             f"{hit.valid_from.date().isoformat():<10}  {reading:<9}  {kind:<6}  "
-            f"{eff:>5.2f}  {terminal_field(p.content[:55])}{marker}"
+            f"{eff:>5.2f}  {terminal_field(clip(p.content, 55))}{marker}"
         )
     terminal_echo("")
     terminal_echo(result.answer)
@@ -589,7 +606,7 @@ def _render_window_notes(result: QueryResponse) -> None:
         for p, hit in zip(result.particles, result.window_hits, strict=False):
             if hit is None:
                 continue
-            line = f"↳ {p.content[:60]} — {_window_hit_label(hit)}"
+            line = f"↳ {clip(p.content, 60)} — {_window_hit_label(hit)}"
             if hit.retired is not None:
                 reason = hit.retired.status_reason
                 line += f"; retired {hit.retired.status.value}"
@@ -616,7 +633,6 @@ def _render_sources(backend: Backend, result: QueryResponse) -> None:
     hydrated text cannot influence what was retrieved or how it was ordered.
     """
     from particles.api.cli._source_passage import header_lines
-    from particles.config import get_config
     from particles.operations.source_passage import SourcePassage
 
     hits = result.particles[: get_config().source_passage.query_show_limit]
@@ -628,7 +644,7 @@ def _render_sources(backend: Backend, result: QueryResponse) -> None:
 
     terminal_echo(f"\nSources behind the top {len(hits)} of {len(result.particles)} hit(s):")
     for p, passage in zip(hits, run(_hydrate()), strict=True):
-        terminal_echo(f"\n▸ p-{p.id[:8]}  {terminal_field(p.content[:80])}")
+        terminal_echo(f"\n▸ p-{p.id[:8]}  {terminal_field(clip(p.content, 80))}")
         if passage is None:
             terminal_echo("  Match:     unavailable")
             continue
@@ -781,7 +797,7 @@ def _render_structural(result: QueryResponse, req: QueryRequest) -> None:
             obj = terminal_field(claim.object.value) if claim else ""
             terminal_echo(
                 f"{p.confidence.value:>5.2f}  {eff:>5.2f}  {pred[:24]:<24}  "
-                f"{obj[:20]:<20}  {terminal_field(p.content[:40])}"
+                f"{obj[:20]:<20}  {terminal_field(clip(p.content, 40))}"
             )
         terminal_echo("")
     if result.ranking_degraded:

@@ -1,0 +1,5 @@
+{
+  "name": "particles-local",
+  "owner": { "name": "The Particles authors" },
+  "plugins": [{ "name": "particles-curation", "source": "./" }]
+}

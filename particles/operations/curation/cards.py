@@ -19,9 +19,14 @@ from typing import Literal
 from pydantic import BaseModel, Field, computed_field
 
 from particles.config import get_config
-from particles.core.conflict_review import refusal_reason
+from particles.core.conflict_review import RetirementKind, refusal_reason
 from particles.core.observer_scope import BeliefScope, join
 from particles.core.schema import JudgeVerdictKind, Particle, ResolutionAction
+from particles.operations.lint.open_inconsistency import (
+    RETIRED_VERBS,
+    RETIREMENT_RULINGS,
+    RETIREMENT_TITLES,
+)
 
 
 class CardKind(StrEnum):
@@ -37,7 +42,8 @@ class CardKind(StrEnum):
     NO_SUBJECT = "no_subject"  # lint NO_SUBJECT
     GATED_SUBJECTS = "gated_subjects"  # NO_SUBJECT orphans a relink recovers (batch)
     SUBJECTLESS_SOURCE = "subjectless_source"  # NO_SUBJECT orphans of one source
-    DUPLICATE_PAIR = "duplicate_pair"  # links suggest (REPORT)
+    DUPLICATE_PAIR = "duplicate_pair"  # links suggest; per pair before, old keys parse
+    DUPLICATE_GROUP = "duplicate_group"  # links suggest pairs, one card per connected group
     UNCITED_URL = "uncited_url"  # corpus links suggest
     FAILED_SNAPSHOTS = "failed_snapshots"  # quality report (batch)
     REFUSED_SNAPSHOTS = "refused_snapshots"  # sources the extraction model refused
@@ -81,6 +87,8 @@ _GESTURES: dict[CardKind, tuple[str, ...]] = {
     # no_subject:<id> key for assign-subject / supersede / retract.
     CardKind.SUBJECTLESS_SOURCE: ("dismiss", "snooze"),
     CardKind.DUPLICATE_PAIR: ("merge", "dismiss", "snooze"),
+    # every gesture but snooze names the members it rules on.
+    CardKind.DUPLICATE_GROUP: ("merge", "split", "dismiss", "snooze"),
     CardKind.UNCITED_URL: ("deposit", "dismiss"),
     CardKind.FAILED_SNAPSHOTS: ("reindex", "snooze"),
     # an advisory about a store-wide setting. The resolving act is
@@ -172,6 +180,10 @@ KIND_TITLES: dict[CardKind, tuple[str, str]] = {
         "Possible duplicate",
         "Are these two beliefs the same claim?",
     ),
+    CardKind.DUPLICATE_GROUP: (
+        "Possible duplicates",
+        "These beliefs may state one claim. Which of them are the same claim?",
+    ),
     CardKind.UNCITED_URL: (
         "Frequently cited, never deposited",
         "Several sources cite this URL, but it is not in the corpus. Deposit it?",
@@ -202,7 +214,7 @@ KIND_TITLES: dict[CardKind, tuple[str, str]] = {
     ),
     CardKind.DEMOTION: (
         "Retired as replaced",
-        "A later claim retired this one as its replacement. Was the replacement "
+        "This claim was retired in favour of a replacement. Was the replacement "
         "right, or do both claims hold?",
     ),
     CardKind.STALE_BASIS: (
@@ -247,6 +259,15 @@ _KIND_GESTURE_HELP: dict[tuple[CardKind, str], str] = {
     (CardKind.CONFIDENCE_DECAY, "affirm"): "The belief is sound as stated. Record that, "
     "and hide this card for good.",
     (CardKind.DUPLICATE_PAIR, "dismiss"): "They are different claims. Hide this card for good.",
+    (CardKind.DUPLICATE_GROUP, "merge"): "These are one claim. Link the members named with "
+    "--members (ids, or all on a group of ten or fewer) to one hub, elected or named with "
+    "--keep; every belief stays active. An answer shows whichever linked member ranks highest, "
+    "so name only members that state the whole claim, and split off one that states less.",
+    (CardKind.DUPLICATE_GROUP, "split"): "The members named with --members are not the same "
+    "claim as the rest. The two sides are never grouped together again; each is asked about "
+    "on its own.",
+    (CardKind.DUPLICATE_GROUP, "dismiss"): "None of these are the same claim. Hide them for "
+    "good; a later belief that joins one of them is asked about with it.",
     (CardKind.UNCITED_URL, "dismiss"): "Not worth depositing. Stop suggesting this URL.",
     (CardKind.SUBJECTLESS_SOURCE, "dismiss"): "These beliefs can stand without a subject. "
     "Hide them for good; a later subjectless belief from this source is asked about again. "
@@ -256,6 +277,16 @@ _KIND_GESTURE_HELP: dict[tuple[CardKind, str], str] = {
     "retired claim stays retired, because a demotion cannot be reversed: assert it "
     "again if it is still needed.",
 }
+
+# A retired-value record's ``resolve``: claim A is the retired claim
+# and claim B its restatement, so the actions rule on the earlier retirement
+# rather than pick a side. ``{ruling}`` names it ("the retraction").
+_RETIRED_VALUE_RESOLVE_HELP = (
+    "Rule on {ruling} with --action {resolve_actions} [--note TEXT]. PREFER_A keeps "
+    "{ruling} and sets the restatement aside, PREFER_B restores the claim, BOTH_VALID "
+    "restores it as one of several valid readings (the retired claim stays retired), "
+    "DISCARD keeps {ruling} and retracts the restatement. Snooze to decide later."
+)
 
 #: The gestures whose ruling on a ``demotion`` card is kept as a labelled pair,
 #: and the ruling each records.
@@ -272,12 +303,17 @@ def describe_gesture(card: CurationCard, gesture: str, *, snooze_days: int) -> s
     card; ``resolve`` names the actions this card offers.
     """
     template = _KIND_GESTURE_HELP.get((card.kind, gesture)) or _GESTURE_HELP.get(gesture)
+    ruling = ""
+    if card.retired_value is not None and gesture == "resolve":
+        template = _RETIRED_VALUE_RESOLVE_HELP
+        ruling = RETIREMENT_RULINGS[card.retired_value.retirement]
     if template is None:
         return ""
     actions = card.resolve_actions if card.resolve_actions is not None else RESOLVE_ACTIONS
     text = template.format(
         snooze_days=snooze_days,
         resolve_actions="|".join(actions) or "BOTH_VALID|DISCARD",
+        ruling=ruling,
     )
     if (
         card.kind is CardKind.DEMOTION
@@ -353,6 +389,25 @@ def scope_brief(scope: BeliefScope) -> ObserverScopeBrief:
         kind = ObserverScopeKind.UNATTRIBUTED
     projects = [] if scope.is_global else sorted(scope.keys)
     return ObserverScopeBrief(kind=kind, projects=projects, widened=scope.widened)
+
+
+def group_merge_scope_note(scopes: list[BeliefScope]) -> str | None:
+    """What linking a duplicate group does to its members' observer scope.
+
+    The pair rule (``merge_scope_note``) over every member: the note is written
+    only when pooling the members' sources puts one of them in view for a
+    project that did not see it before.
+    """
+    if len(scopes) < 2:
+        return None
+    merged = join(tuple(scopes))
+    if merged.in_view_for_no_project:
+        return None
+    if len({(s.is_global, s.keys) for s in scopes}) == 1:
+        return None
+    if merged.is_global:
+        return "Merging puts every member in view for every project, because one of them is global."
+    return f"Merging puts every member in view for {_project_list(sorted(merged.keys))}."
 
 
 def _project_list(keys: list[str]) -> str:
@@ -433,6 +488,40 @@ class ConflictBrief(BaseModel):
     further_b: list[ParticleBrief] = Field(default_factory=list)
 
 
+class RetiredValueBrief(BaseModel):
+    """What a retired-value record asks the curator to rule on.
+
+    The record holds claim B, a later restatement of claim A, behind A's
+    retirement, so its card asks whether the retirement stands rather than
+    which side is right. Carried by an ``INCONSISTENCY`` card whose record is
+    a retired-value hold, attached live to the served slice and never stored.
+    Display only: the resolve actions are ``resolve_actions`` as for any
+    record.
+    """
+
+    # How claim A was retired; None when A is gone or in a state a hold does
+    # not expect.
+    retirement: RetirementKind | None = None
+    # When, and why, from the operator event that retired A, when one names it.
+    retired_at: datetime | None = None
+    reason: str | None = None
+    # The source of claim B, the restatement.
+    restated_by: str | None = None
+
+
+def retired_value_question(brief: RetiredValueBrief) -> str:
+    """The question a retired-value card puts to the curator (pure)."""
+    when = f" on {brief.retired_at:%Y-%m-%d}" if brief.retired_at is not None else ""
+    why = (brief.reason or "").strip().rstrip(".")
+    because = f", with the reason “{why}”" if why else ""
+    first = f"This claim {RETIRED_VERBS[brief.retirement]}{when}{because}."
+    if brief.restated_by:
+        second = f"A restatement from {brief.restated_by} is held for review."
+    else:
+        second = "A later source states it again, and the restatement is held for review."
+    return f"{first} {second} Keep {RETIREMENT_RULINGS[brief.retirement]}, or restore the claim?"
+
+
 class DuplicateVerdict(BaseModel):
     """The LLM judge's read on a duplicate-pair card.
 
@@ -448,6 +537,22 @@ class DuplicateVerdict(BaseModel):
 
     verdict: JudgeVerdictKind
     rationale: str | None = None
+
+
+class DuplicateEdge(BaseModel):
+    """One candidate pair inside a ``duplicate_group`` card.
+
+    The finder's pair, with the Subject it was found under and, in
+    ``LLM_JUDGE`` mode, the judge's advisory verdict. A client draws the
+    group's structure from these: a member reached only through a chain is
+    one no edge joins to the survivor.
+    """
+
+    a: str
+    b: str
+    similarity: float
+    subject_id: str | None = None
+    verdict: DuplicateVerdict | None = None
 
 
 class CurationCard(BaseModel):
@@ -496,6 +601,12 @@ class CurationCard(BaseModel):
     # with the briefs on the served slice; None when no inconsistency backs
     # the card.
     conflict: ConflictBrief | None = None
+    # An INCONSISTENCY card's ``diagnostic`` without the quotes of its two
+    # sides, for a client that draws the sides from ``conflict`` (
+    # §2): the held-claim examination line, or "" when there is nothing more.
+    # ``diagnostic`` keeps the quotes for the one-line reports. None for every
+    # other kind, and on a card built before the field existed.
+    conflict_note: str | None = None
     # the corpus entry a SUBJECTLESS_SOURCE card groups, its
     # first-SOURCE entry. Part of ``key``. None for every other kind.
     corpus_entry_id: str | None = None
@@ -503,6 +614,10 @@ class CurationCard(BaseModel):
     # it. Part of ``key``, so a snooze covers one alert and a later transition
     # raises a fresh card. None for every other kind.
     rank_lift_alert: str | None = None
+    # set on an INCONSISTENCY card whose record holds a restated
+    # retired claim, which changes its title, question and resolve help.
+    # Filled with the briefs on the served slice; None for every other card.
+    retired_value: RetiredValueBrief | None = None
     # the review actions an INCONSISTENCY card offers, computed
     # from its members' statuses when the slice is served. Every client
     # renders exactly this list. None for every other kind.
@@ -511,19 +626,41 @@ class CurationCard(BaseModel):
     # two sides are in view for different projects (``merge_scope_note``).
     # Display only; None for every other kind and on a store never rescoped.
     scope_note: str | None = None
+    # a DUPLICATE_GROUP card's carded pairs, the linked sets
+    # among its members (claims already joined CO_EVIDENTIAL, one member of
+    # the group each), the standing split / dismiss rulings that name two or
+    # more of its members (each as its classes, restricted to the members),
+    # and its elected survivor, which is the card's key. None for every other
+    # kind.
+    pairs: list[DuplicateEdge] | None = None
+    linked_sets: list[list[str]] | None = None
+    prior_rulings: list[list[list[str]]] | None = None
+    survivor_id: str | None = None
     # The leverage score (§2), filled by leverage.score_cards.
     leverage: float = 0.0
 
     @computed_field  # type: ignore[prop-decorator]
     @property
     def title(self) -> str:
-        """The kind's human title, e.g. "Contested belief" (from ``KIND_TITLES``)."""
+        """The kind's human title, e.g. "Contested belief" (from ``KIND_TITLES``).
+
+        A retired-value record's card names the retirement it asks about
+        instead.
+        """
+        if self.retired_value is not None:
+            return RETIREMENT_TITLES[self.retired_value.retirement]
         return KIND_TITLES[self.kind][0]
 
     @computed_field  # type: ignore[prop-decorator]
     @property
     def question(self) -> str:
-        """The question this kind puts to the curator (from ``KIND_TITLES``)."""
+        """The question this kind puts to the curator (from ``KIND_TITLES``).
+
+        A retired-value record's card asks whether the retirement stands
+        (``retired_value_question``).
+        """
+        if self.retired_value is not None:
+            return retired_value_question(self.retired_value)
         return KIND_TITLES[self.kind][1]
 
     @computed_field  # type: ignore[prop-decorator]
@@ -557,6 +694,9 @@ class CurationCard(BaseModel):
         if self.kind is CardKind.INCONSISTENCY:
             # one record, one key, whatever its members.
             return f"inconsistency:{self.inconsistency_id}"
+        if self.kind is CardKind.DUPLICATE_GROUP:
+            # the survivor, whatever members the group has.
+            return f"duplicate_group:{self.survivor_id}"
         return f"{self.kind.value}:" + "|".join(sorted(self.particle_ids))
 
     @classmethod
@@ -620,6 +760,16 @@ class CurationCard(BaseModel):
                 candidate_event_id=rest,
                 diagnostic="",
                 suggested_gestures=gestures_for(CardKind.PROPOSED_ABSTRACTION),
+            )
+        if prefix == CardKind.DUPLICATE_GROUP.value:
+            # The members are read from the served card.
+            if not rest:
+                raise ValueError(f"Unrecognized card key {key!r}.")
+            return cls(
+                kind=CardKind.DUPLICATE_GROUP,
+                survivor_id=rest,
+                diagnostic="",
+                suggested_gestures=gestures_for(CardKind.DUPLICATE_GROUP),
             )
         if prefix == CardKind.INCONSISTENCY.value:
             if not rest:

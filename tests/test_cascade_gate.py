@@ -46,6 +46,17 @@ def test_reviewer_derived_default_threshold_is_three() -> None:
     assert cascade_gate_passes(PolicyProvenance.REVIEWER_DERIVED, 3) is True
 
 
+def test_reviewer_confirmations_default_to_none() -> None:
+    """A caller that passes no count has no confirmations, so a threshold of one blocks."""
+    assert (
+        cascade_gate_passes(PolicyProvenance.REVIEWER_DERIVED, min_reviewer_confirmations=1)
+        is False
+    )
+    assert (
+        cascade_gate_passes(PolicyProvenance.REVIEWER_DERIVED, min_reviewer_confirmations=0) is True
+    )
+
+
 def test_cap_leaves_a_short_batch_untouched() -> None:
     assert apply_cascade_cap(120, 500) == (120, False)
 

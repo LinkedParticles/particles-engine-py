@@ -198,7 +198,7 @@ def engine_serve_cmd(
 keys_app = typer.Typer(
     help=(
         "Per-client engine keys: each names a principal and a role "
-        "(reader, agent or operator). Run on the engine's host; no HTTP route "
+        "(reader, agent, operator or codex-capture). Run on the engine's host; no HTTP route "
         "manages keys."
     ),
     no_args_is_help=True,
@@ -209,7 +209,9 @@ engine_app.add_typer(keys_app, name="keys")
 @keys_app.command("create")
 def keys_create_cmd(
     role: str = typer.Option(
-        ..., "--role", help="reader (reads only), agent (writes as itself) or operator"
+        ...,
+        "--role",
+        help="reader (reads only), agent (writes as itself), operator or codex-capture",
     ),
     principal: str = typer.Option(
         ...,
@@ -223,7 +225,7 @@ def keys_create_cmd(
         None,
         "--project",
         help=(
-            "Bind an agent key's writes to one project key. Reads are not confined: "
+            "Bind an agent or Codex capture key to one project key. Agent reads are not confined: "
             "every key reads every project."
         ),
     ),
@@ -261,6 +263,33 @@ def keys_create_cmd(
             "resolved, under which its MEMORY.archive.md files lie. Repeat for each."
         ),
     ),
+    host_id: str | None = typer.Option(
+        None,
+        "--host-id",
+        help=(
+            "For a harvester key: the client's host id, which every file:// entry the key "
+            "deposits records as the host its path names. Without it the key names no "
+            "memory or archive file. On the client, `particles init claude-code` or `hook "
+            "doctor` prints it; this engine host's own id is refused."
+        ),
+    ),
+    rule_root: list[str] | None = typer.Option(
+        None,
+        "--rule-root",
+        help=(
+            "For a harvester key: one project's root on the client, under which the hooks "
+            "may push that project's AGENTS.md and CLAUDE.md files. Repeat for each "
+            "project; a directory holding several projects is refused."
+        ),
+    ),
+    global_rule_root: list[str] | None = typer.Option(
+        None,
+        "--global-rule-root",
+        help=(
+            "For a harvester key: the client's ~/.claude, whose AGENTS.md and CLAUDE.md "
+            "directly in it the hooks may push as global rules."
+        ),
+    ),
     output: Path | None = typer.Option(
         None,
         "--output",
@@ -291,7 +320,7 @@ def keys_create_cmd(
     try:
         resolved_role = _keys.Role(role.strip().lower())
     except ValueError as exc:
-        raise typer.BadParameter("--role must be reader, agent or operator") from exc
+        raise typer.BadParameter("--role must be reader, agent, operator or codex-capture") from exc
     # A harness that captures stdout (Claude Code, a CI job, a pipe, or one that
     # runs its shell on a pseudo-terminal, which no check can tell from a
     # person's terminal) keeps whatever is printed, so the key goes to a new
@@ -334,6 +363,9 @@ def keys_create_cmd(
             reserved_ok=reserved_principal,
             memory_roots=memory_roots,
             archive_roots=archive_roots,
+            host_id=host_id,
+            rule_roots=rule_root or None,
+            global_rule_roots=global_rule_root or None,
         )
     except _keys.KeyRuleError as exc:
         _discard(fd, target)
@@ -362,9 +394,18 @@ def keys_create_cmd(
     for label_text, roots in (
         ("memory files under", record.memory_roots),
         ("archive files under", record.archive_roots),
+        ("project rule files under", record.rule_roots),
+        ("global rule files directly in", record.global_rule_roots),
     ):
         if roots:
             typer.echo(f"Harvests {label_text} {', '.join(roots)}")
+    if record.host_id is not None:
+        typer.echo(f"Deposits files for client host {record.host_id}")
+    elif _keys.is_harvester(record.role, record.principal):
+        typer.echo(
+            "No --host-id: this key names no memory or archive file. A remote client's hooks "
+            "need one; `particles init claude-code` on the client prints the command."
+        )
     if record.project is not None:
         typer.echo(f"Writes bound to project {record.project}; reads are not confined.")
     if record.role is _keys.Role.READER:

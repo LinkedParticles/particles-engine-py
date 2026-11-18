@@ -99,6 +99,8 @@ class _World:
             source_type=source_type,
             mutability=Mutability.STABLE,
             content_published_at=T0 + timedelta(days=day),
+            # One project, as the harness stamps it.
+            tags=["project:-Users-o-src-app"],
         )
         particle = Particle(
             id=str(uuid.uuid4()),
@@ -194,7 +196,9 @@ def probe() -> Generator[Callable[..., _Probe], None, None]:
         holder.append(scripted)
         return scripted
 
-    async def read(earlier: str, later: str) -> SlotReading:
+    async def read(earlier: str, later: str, contexts: Any = None) -> SlotReading:
+        # Every paraphrase reading is confirmed on the passages.
+        assert [c.content for c in contexts] == [earlier, later]
         return await holder[-1](earlier, later)
 
     with (
@@ -263,6 +267,7 @@ class TestTheSurvivor:
             "winner_id": c["move"].id,
             "route": "paraphrase",
             "decided_by": update_decided_by(),
+            "winner_entry_id": c["move"].provenance[0].corpus_entry_id,
         }
 
     @pytest.mark.parametrize("verdict", [SlotVerdict.DIFFERENT, SlotVerdict.FIXED])

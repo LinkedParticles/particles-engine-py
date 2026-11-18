@@ -79,3 +79,21 @@ def test_particle_retract_preview_writes_no_terminal_control_sequence(cli_db: Pa
     assert result.exit_code == 0, result.output
     assert not _has_live_control(result.stdout), repr(result.stdout)
     assert "\\x1b[2J" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("text", "width", "expected"),
+    [
+        ("Short claim.", 60, "Short claim."),
+        # The cut lands on a word boundary, so a date is never left half-shown.
+        ("The release went out on 2026-10-27 after review", 30, "The release went out on…"),
+        ("The quota is 40, then 60", 17, "The quota is 40…"),
+        # No space in the back half: cut at the width, never longer.
+        ("x" * 40, 10, "x" * 9 + "…"),
+    ],
+)
+def test_clip_cuts_at_a_word_boundary(text: str, width: int, expected: str) -> None:
+    from particles.api.cli._terminal import clip
+
+    assert clip(text, width) == expected
+    assert len(clip(text, width)) <= width

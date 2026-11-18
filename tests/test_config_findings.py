@@ -477,6 +477,13 @@ def test_finding_n16_the_doctor_reports_an_env_override_of_the_engine_endpoint(
 # ---------------------------------------------------------------------------
 
 
+_SCHEMA_CHECK = "particles.api.cli.memory._refuse_a_store_this_install_cannot_serve"
+
+
+async def _store_is_servable(store: str) -> None:
+    """Stand-in for ``memory serve``'s schema check: these tests cover the store rule before it."""
+
+
 def _unpin_store(monkeypatch: pytest.MonkeyPatch) -> None:
     """Drop ``DATABASE_URL`` so the server sees no pin, restoring it afterwards.
 
@@ -503,7 +510,7 @@ def test_unpinned_default_store_does_not_resolve_into_the_working_directory(
     _unpin_store(monkeypatch)
 
     target = "particles.mcp.main" if argv[0] == "mcp" else "particles.mcp.memory_compat.main"
-    with patch(target) as serve_main:
+    with patch(target) as serve_main, patch(_SCHEMA_CHECK, _store_is_servable):
         result = CliRunner().invoke(app, argv)
 
     assert result.exit_code == 0, result.output
@@ -811,7 +818,9 @@ def _run_session_start(monkeypatch: pytest.MonkeyPatch, store: str) -> list[Path
 
     opened: list[Path] = []
 
-    async def recorder(self: object, store: str, project: str | None = None) -> RenderedDigest:
+    async def recorder(
+        self: object, store: str, project: str | None = None, retired_since: object = None
+    ) -> RenderedDigest:
         raw = _sqlite_file_path(_resolve_store_dsn(store))
         if raw:
             opened.append(Path(raw).resolve())
@@ -1032,7 +1041,10 @@ def test_finding_r11_memory_facade_with_a_remote_engine_serves_no_working_direct
     reset_config()
     assert get_config().engine.base_url
 
-    with patch("particles.mcp.memory_compat.main") as serve_main:
+    with (
+        patch("particles.mcp.memory_compat.main") as serve_main,
+        patch(_SCHEMA_CHECK, _store_is_servable),
+    ):
         result = CliRunner().invoke(app, ["memory", "serve"])
     assert result.exit_code == 0, result.output
     serve_main.assert_called_once()

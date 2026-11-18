@@ -54,6 +54,34 @@ own agent transcripts. `--question` measures ad hoc questions instead and
 prints one row per question. The rendered table never prints a question, an
 answer, a sentence, or a judge's reason.
 
+The projected cost prints before any LLM call. It assumes the answers' length,
+since nothing is answered before the projection: eight sentences an answer
+(`benchmark_leakage.estimate_sentences_per_answer`), and so eight judge calls.
+Answers over a richer context run longer, and `--calibrate-from <report.json>`
+takes the sentences per answer from a saved run instead. Every run ends with a
+`Spend:` block on stderr that sets the estimate beside the tokens and list-price
+dollars the providers reported, for the answer and the judge calls separately,
+and the JSON report records the same figures as `spend`. Thinking is billed as
+output, and the estimate's per-call output figures do not include it, so the
+measured output is the figure to read before pricing the next run.
+
+Every live run carries a spend ceiling. When a model is priced in
+`llm.price_per_mtok`, `--max-usd` names the most the run may spend at list
+price, which is not the account balance. A model with no price entry needs
+`--max-calls`, or `--no-ceiling` for a local model that costs nothing to call.
+There is no default, and a run without the stop its models need refuses before
+any call. The confirmation states the ceiling and the most the calls in flight
+at the stop can add: their output in full, each at its `max_tokens` (an
+answer's bound includes the larger budget the query operation retries at after
+an empty reply), and their input as projected. Once the ceiling is reached no
+call starts, and the calls in flight finish. A question left with a call
+unstarted is excluded as `budget_ceiling` and never checkpointed, so a re-run
+with a higher ceiling answers it afresh and pays only for what is left. A
+stopped report says INCOMPLETE in its table heading and its first note, and
+records `stopped_at_ceiling`. Its rates describe the questions that finished,
+which lean toward short answers, so it is not a result to quote; the resumed
+run is.
+
 ## The first run (2026-10-03)
 
 *Judged under rubric protocol 1, which asks for the verdict before the reason.*

@@ -49,6 +49,7 @@ from pathlib import Path
 from typing import Protocol
 from urllib.parse import unquote, urlparse
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import LoadedConfigFile, get_config, is_broad_root, loaded_config_file
@@ -59,7 +60,9 @@ from particles.core.schema import (
     WarcRecordType,
 )
 from particles.corpus.deposit import save_blob, sha256
-from particles.corpus.harvest_marks import REFRESH_MASKED_TAGS
+from particles.corpus.deposit_role import AGENT_ROLE
+from particles.corpus.follow_edges import CorpusFollowEdgeRow
+from particles.corpus.harvest_marks import REFRESH_MASKED_TAGS, RESERVED_DEPOSITORS
 from particles.corpus.local_read import LocalReadRefused, read_local_file
 from particles.corpus.operator_only import (
     WRITABLE_BY_OTHERS,
@@ -70,6 +73,7 @@ from particles.corpus.operator_only import (
     judge_write_facts,
     writable_only_by_operator,
 )
+from particles.corpus.origin import count_file_entries_by_origin
 from particles.corpus.redaction import redact_secrets
 from particles.corpus.rule_roots import effective_uid, list_rule_source_roots, owned_by_refresher
 from particles.corpus.rule_sources import expand_path
@@ -80,7 +84,8 @@ from particles.corpus.store import (
     list_snapshots_for_entry,
 )
 from particles.corpus.worktree import verified_main_checkout
-from particles.http import get_capped, particles_client
+from particles.host_identity import local_host_id
+from particles.http import get_capped, particles_client, withhold_service_credentials
 
 log = logging.getLogger(__name__)
 
@@ -208,6 +213,13 @@ class RefreshRefusal(StrEnum):
     #: The name is not a regular file, or the file is over
     #: ``local_files.max_bytes``, so the read refuses it (R42).
     UNREADABLE = "unreadable"
+    #: The entry names another host's file. The normal state on
+    #: an engine host serving a client, which pushes those files itself: counted,
+    #: never warned about, and never selected for a refresh.
+    OTHER_HOST = "other_host"
+    #: The entry records no origin, so no host knows it is its own file.
+    #: A deposit from the host that owns the file adopts it.
+    ORIGIN_UNKNOWN = "origin_unknown"
 
     @property
     def note(self) -> str:
@@ -232,6 +244,10 @@ class RefreshRefusal(StrEnum):
             return "the file is a symlink"
         if self is RefreshRefusal.UNREADABLE:
             return "the file is not a regular file within the size cap"
+        if self is RefreshRefusal.OTHER_HOST:
+            return "the file is another host's, which pushes it"
+        if self is RefreshRefusal.ORIGIN_UNKNOWN:
+            return "no host is recorded for the file"
         return "enrolled by an untrusted depositor"
 
 
@@ -250,6 +266,9 @@ class RefusalCounts:
     writable_by_others: int = 0
     symlinked: int = 0
     unreadable: int = 0
+    #: Informational: another host's entries, never in ``total``.
+    other_host: int = 0
+    origin_unknown: int = 0
 
     @classmethod
     def tally(cls, reasons: Iterable[RefreshRefusal]) -> RefusalCounts:
@@ -267,6 +286,8 @@ class RefusalCounts:
             writable_by_others=counts[RefreshRefusal.WRITABLE_BY_OTHERS],
             symlinked=counts[RefreshRefusal.SYMLINKED],
             unreadable=counts[RefreshRefusal.UNREADABLE],
+            other_host=counts[RefreshRefusal.OTHER_HOST],
+            origin_unknown=counts[RefreshRefusal.ORIGIN_UNKNOWN],
         )
 
     @property
@@ -284,6 +305,7 @@ class RefusalCounts:
             + self.writable_by_others
             + self.symlinked
             + self.unreadable
+            + self.origin_unknown
         )
 
     def lines(self) -> list[str]:
@@ -370,7 +392,23 @@ class RefusalCounts:
                 f"{self.unreadable} LAZY local source(s) are not regular files or are over "
                 "local_files.max_bytes and are not refreshed."
             )
+        if self.origin_unknown:
+            out.append(
+                f"{self.origin_unknown} LAZY local source(s) record no host and are not "
+                "refreshed, since no host knows them for its own files. A deposit from the "
+                "host that holds them adopts them: `particles rules sync` there, or the next "
+                "SessionEnd harvest; on the store's own host, `particles db init` stamps them."
+            )
         return out
+
+    def info_lines(self) -> list[str]:
+        """The counts that need no fix: another host's entries."""
+        if not self.other_host:
+            return []
+        return [
+            f"{self.other_host} LAZY local source(s) are another host's files; that host "
+            "pushes them, and this one does not read them."
+        ]
 
 
 def _rule_file_root_sets(
@@ -812,9 +850,43 @@ async def _do_remote_refresh(
 
     # The importer fetches the way its deposit does, so an unchanged source
     # hashes to the prior snapshot's content_hash and becomes a REVISIT. Its own
-    # client carries the SSRF guard and the egress policy.
-    content = await refetch(uri_r)
+    # client carries the SSRF guard and the egress policy. An entry whose
+    # address someone other than the operator chose is refreshed as it was
+    # deposited, without the operator's service credentials (RA1).
+    withheld = await _chosen_by_other_than_operator(session, entry_row)
+    if withheld is None:
+        content = await refetch(uri_r)
+    else:
+        with withhold_service_credentials(withheld):
+            content = await refetch(uri_r)
     return await _record_body(session, entry_row.entry_id, content, prior, datetime.now(UTC))
+
+
+async def _chosen_by_other_than_operator(
+    session: AsyncSession, entry_row: CorpusEntryRow
+) -> str | None:
+    """Who other than the operator chose this entry's address, or ``None``.
+
+    Every confined principal's deposit and a link a deposited source named (a
+    follow edge's target) were fetched without the operator's service
+    credentials, so their refresh is too (security review 2026-11-17-1, RA1).
+    A confined principal's entry is known by its marks: an agent key's carries
+    the agent stamp or its metered principal, and a harvester's or the Codex
+    capture's carries a reserved depositor id, which only those intakes may
+    claim (a harvester key's entry is neither stamped nor metered).
+    """
+    if entry_row.deposit_role == AGENT_ROLE or entry_row.metered_principal is not None:
+        return "the refresh of an agent principal's entry"
+    if entry_row.deposited_by in RESERVED_DEPOSITORS:
+        return "the refresh of a harvester's entry"
+    followed = await session.scalar(
+        select(CorpusFollowEdgeRow.target_entry_id)
+        .where(CorpusFollowEdgeRow.target_entry_id == entry_row.entry_id)
+        .limit(1)
+    )
+    if followed is not None:
+        return "the refresh of a followed link"
+    return None
 
 
 #: Tags of the entries the Claude Code harness enrols (``rules sync`` and the
@@ -855,6 +927,11 @@ async def _do_local_refresh(
     uri_r = entry_row.uri_r
     assert uri_r is not None
 
+    if (other := origin_refusal(entry_row)) is not None:
+        # Another host's path, or one no host claims, is never stat'ed here,
+        # forced or not: ``force`` overrides cadence, not whose file it is.
+        log.info("Entry %s: not read (%s)", entry_row.entry_id[:8], other.note)
+        return None
     try:
         path = path_from_file_uri(uri_r)
     except ValueError as exc:
@@ -1187,6 +1264,19 @@ def is_entry_refused(row: CorpusEntryRow, recorded_roots: Sequence[Path]) -> boo
     return entry_refusal(row, recorded_roots) is not None
 
 
+def origin_refusal(row: CorpusEntryRow) -> RefreshRefusal | None:
+    """Why this host may not read the ``file://`` entry's path at all, or ``None``.
+
+    :attr:`RefreshRefusal.ORIGIN_UNKNOWN` for an entry that records no host,
+    :attr:`RefreshRefusal.OTHER_HOST` for one another host deposited, and the
+    same for every entry when this host has no usable id.
+    """
+    if row.origin_host is None:
+        return RefreshRefusal.ORIGIN_UNKNOWN
+    me = local_host_id()
+    return None if me is not None and row.origin_host == me else RefreshRefusal.OTHER_HOST
+
+
 def entry_refusal(
     row: CorpusEntryRow,
     recorded_roots: Sequence[Path],
@@ -1205,6 +1295,10 @@ def entry_refusal(
     """
     if row.uri_r is None or not row.uri_r.startswith("file://"):
         return None
+    if (other := origin_refusal(row)) is not None:
+        # Whose file it is comes before every gate on whether to read it,
+        # so another host's path is never judged here.
+        return other
     if cwd_store:
         return cwd_store if isinstance(cwd_store, RefreshRefusal) else RefreshRefusal.CWD_STORE
     try:
@@ -1230,7 +1324,14 @@ async def count_refused_local_entries(session: AsyncSession) -> RefusalCounts:
             continue
         if (reason := entry_refusal(row, recorded, cwd_store=cwd_store)) is not None:
             reasons.append(reason)
-    return RefusalCounts.tally(reasons)
+    # The work list holds this host's entries only; the others
+    # are counted by origin, never judged.
+    by_origin = await count_file_entries_by_origin(session, lazy_only=True)
+    return replace(
+        RefusalCounts.tally(reasons),
+        other_host=by_origin.other_hosts,
+        origin_unknown=by_origin.unstamped,
+    )
 
 
 def cwd_relative_store(session: AsyncSession) -> Path | None:

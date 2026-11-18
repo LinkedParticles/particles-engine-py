@@ -586,6 +586,11 @@ class TestCuration:
         assert body["cards"] == []
         assert body["count"] == 0
 
+    def test_response_carries_the_withheld_count(self, client: TestClient) -> None:
+        # the duplicate pairs a rung withheld ride the response, by stamp.
+        body = client.get("/curation", params={"semantic": False}).json()
+        assert body["withheld"] == {"identifier_cross@1": 0}
+
     def test_card_lookup_is_404_for_a_key_no_open_card_has(self, client: TestClient) -> None:
         # the one-card read; a key with a colon rides the path.
         resp = client.get("/curation/cards/subjectless_source:nope")
@@ -2357,6 +2362,38 @@ class TestOperatorCurationWrites:
     ) -> None:
         resp = client.post("/curation/snooze", json={"card_key": "subjectless_source:gone"})
         assert resp.status_code == 400
+
+    def test_duplicate_group_gesture_disabled_403(self, client: TestClient) -> None:
+        resp = client.post(
+            "/curation/duplicate-group",
+            json={"card_key": "duplicate_group:p-a", "gesture": "merge", "members": ["all"]},
+        )
+        assert resp.status_code == 403
+
+    def test_duplicate_group_gesture_needs_a_group_key(
+        self, client: TestClient, belief_writes_enabled: None
+    ) -> None:
+        resp = client.post(
+            "/curation/duplicate-group", json={"card_key": "stale:p-a", "gesture": "dismiss"}
+        )
+        assert resp.status_code == 400
+
+    def test_duplicate_group_gesture_on_a_closed_group_is_400(
+        self, client: TestClient, belief_writes_enabled: None
+    ) -> None:
+        # the members are read from the served card; none is open.
+        from unittest.mock import AsyncMock, patch
+
+        with patch(
+            "particles.operations.curation.session.get_curation_card",
+            AsyncMock(return_value=None),
+        ):
+            resp = client.post(
+                "/curation/duplicate-group",
+                json={"card_key": "duplicate_group:gone", "gesture": "merge", "members": ["all"]},
+            )
+        assert resp.status_code == 400
+        assert "not an open duplicate group" in resp.json()["detail"]
 
     def test_snooze_disabled_403(self, client: TestClient) -> None:
         resp = client.post("/curation/snooze", json={"card_key": "k"})

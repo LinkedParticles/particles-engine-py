@@ -214,12 +214,134 @@ class TestRedateSessions:
             return ids, dry, first, second, len(events)
 
         ids, dry, first, second, events = asyncio.run(_run())
-        assert dry.claims_redated == 1 and dry.snapshots_dated == 0
+        assert dry.claims_redated == 1 and dry.snapshots_dated == 1
         assert first.claims_redated == 1
+        # The dry run counts exactly the snapshots the real run then dates.
+        assert dry.snapshots_dated == first.snapshots_dated
         assert second.claims_redated == 0 and second.claims_unchanged == 2
         assert second.snapshots_dated == 0
         assert events == 2  # one per real run, none for the dry run
         assert _read(ids["wrong"])[0] == datetime(2026, 10, 9, tzinfo=UTC)
+
+
+class TestTurnDays:
+    """a claim on any of the session's days stays; multi-day sessions are listed."""
+
+    def test_a_later_turn_day_is_kept_and_the_session_listed(self, cli_db: Path) -> None:
+        from datetime import date
+
+        from particles.db import session_scope
+        from particles.operations.validity import redate_sessions
+
+        def _days(entry_id: str, uri_r: str | None, tags: list[str]) -> list[date]:
+            return [date(2026, 10, 9), date(2026, 10, 15)] if (uri_r or "").endswith("/s1") else []
+
+        async def _run() -> tuple[dict[str, str], Any]:
+            async with session_scope() as session:
+                ids = await _seed(session)
+            async with session_scope(write=True) as session:
+                report = await redate_sessions(
+                    session, started_at_for=_resolver, turn_days_for=_days
+                )
+                await session.commit()
+            return ids, report
+
+        ids, report = asyncio.run(_run())
+        assert report.claims_redated == 0 and report.claims_unchanged == 2
+        assert _read(ids["wrong"])[0] == WRONG  # 2026-10-15 is a day the session saw
+        [found] = report.multi_day
+        assert found.entry_id == ids["e1"] and found.days == 2 and found.span_days == 6
+        assert found.first_day_claims == 1
+
+
+def _two_day_transcript() -> str:
+    return "\n".join(
+        json.dumps(record)
+        for record in (
+            {"type": "user", "timestamp": "2026-09-01T09:00:00Z", "message": {"content": "start"}},
+            {
+                "type": "assistant",
+                "timestamp": "2026-09-02T09:00:00Z",
+                "message": {"content": [{"type": "text", "text": "next day"}]},
+            },
+        )
+    )
+
+
+class TestRereadCli:
+    def _seed_unmarked(self, root: Path) -> str:
+        from particles.api.cli._claude_code import distill_transcript
+        from particles.corpus.deposit import deposit_text_versioned
+        from particles.db import session_scope
+        from particles.extraction.day_marks import reduce_marks
+
+        raw = _two_day_transcript()
+        (root / "-p").mkdir(parents=True)
+        (root / "-p" / "md1.jsonl").write_text(raw)
+        unmarked = reduce_marks(distill_transcript(raw, "md1").encode()).text.decode()
+
+        async def _seed() -> str:
+            async with session_scope(write=True) as session:
+                entry_id, _, _ = await deposit_text_versioned(
+                    session,
+                    text=unmarked,
+                    uri_r="claude-code://session/md1",
+                    source_type="CONVERSATION",
+                    mutability=Mutability.APPEND_ONLY,
+                    tags=["claude-code", "session:md1"],
+                    deposited_by="claude-code-hook",
+                )
+                await session.commit()
+                return entry_id
+
+        return asyncio.run(_seed())
+
+    def test_dry_run_lists_and_estimates_and_writes_nothing(
+        self, cli_db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.api.cli import memory as memory_cli
+
+        root = tmp_path / "projects"
+        entry_id = self._seed_unmarked(root)
+        monkeypatch.setattr(memory_cli, "_claude_projects_root", lambda: root)
+
+        result = runner.invoke(app, ["memory", "redate", "--dry-run"])
+        assert result.exit_code == 0, result.output
+        assert "1 session(s) span more than one day" in result.output
+        assert entry_id in result.output and "--reread" in result.output
+
+        result = runner.invoke(app, ["memory", "redate", "--reread", "--dry-run"])
+        assert result.exit_code == 0, result.output
+        assert "Re-read of 1 session(s): retire 0 claim(s)" in result.output
+        assert "nothing was written or spent" in result.output
+
+    def test_a_non_interactive_run_needs_yes(
+        self, cli_db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.api.cli import memory as memory_cli
+
+        root = tmp_path / "projects"
+        self._seed_unmarked(root)
+        monkeypatch.setattr(memory_cli, "_claude_projects_root", lambda: root)
+
+        result = runner.invoke(app, ["memory", "redate", "--reread"])
+        assert result.exit_code == 2, result.output
+        assert "pass --yes" in result.output
+
+    def test_skip_leaves_a_session_out(
+        self, cli_db: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from particles.api.cli import memory as memory_cli
+
+        root = tmp_path / "projects"
+        entry_id = self._seed_unmarked(root)
+        monkeypatch.setattr(memory_cli, "_claude_projects_root", lambda: root)
+
+        result = runner.invoke(
+            app, ["memory", "redate", "--reread", "--dry-run", "--skip", entry_id]
+        )
+        assert result.exit_code == 0, result.output
+        assert "No session to re-read" in result.output
 
 
 class TestRedateCli:
@@ -240,7 +362,7 @@ class TestRedateCli:
 
         result = runner.invoke(app, ["memory", "redate", "--dry-run"])
         assert result.exit_code == 0, result.output
-        assert "would set the date on 0 snapshot(s) and move 1 of 2" in result.output
+        assert "would set the date on 1 snapshot(s) and move 1 of 2" in result.output
         assert "Dry run" in result.output
         assert _read(ids["wrong"])[0] == WRONG
 

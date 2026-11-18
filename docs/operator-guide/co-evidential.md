@@ -59,6 +59,11 @@ particles links suggest --subject "1 Pfennig (1948-1950) GDR" --apply
 ```
 
 `--apply` implies `--llm-judge` and links only the `PARAPHRASE` pairs.
+Each link it writes is recorded as a `RELATION_ADDED` operator event naming
+both beliefs, with `created_by: LLM_JUDGE`, the judge that decided it
+(`decided_by`) and the run that applied it (`run_id`). Every link one `--apply`
+writes shares that run id, so `particles events list --type RELATION_ADDED`
+shows what a run linked, and `particles links remove` undoes a link.
 
 ### Then go wide
 

@@ -316,3 +316,10 @@ class TestReleaseOrdering:
             assert _project_version() == TOLERANT_GUARD_SINCE
             body = heads["Unreleased"]
         assert "same-major `schema_version` compatibility" in body.lower()
+
+
+def test_stamps_sort_by_value_with_malformed_ones_last_by_text() -> None:
+    from particles.core.schema_version import stamp_sort_key
+
+    stamps = ["zz", "1.10.0", "garbage", "1.2.0", "0.9.0"]
+    assert sorted(stamps, key=stamp_sort_key) == ["0.9.0", "1.2.0", "1.10.0", "garbage", "zz"]

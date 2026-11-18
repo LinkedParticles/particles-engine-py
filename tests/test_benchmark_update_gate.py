@@ -667,6 +667,19 @@ def test_the_child_environment_drops_every_override(
     assert scripted["ANTHROPIC_API_KEY"] == case.SCRIPTED_KEY_PLACEHOLDER
 
 
+def test_the_child_environment_keeps_named_provider_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A child pinned to a named provider (the rot door's parity row) needs its key."""
+    monkeypatch.setenv("PARTICLES_LLM_API_KEY_GEMINI", "gm-test")
+    monkeypatch.setenv("PARTICLES_LOCAL_LLM_API_KEY", "local-test")
+    monkeypatch.setenv("PARTICLES_SOMETHING", "x")
+    env = case.child_env(tmp_path, arm="live")
+    assert env["PARTICLES_LLM_API_KEY_GEMINI"] == "gm-test"
+    assert env["PARTICLES_LOCAL_LLM_API_KEY"] == "local-test"
+    assert "PARTICLES_SOMETHING" not in env
+
+
 def test_the_child_config_carries_only_the_pins_and_the_readers_wiring(tmp_path: Path) -> None:
     cfg = case.child_config(tmp_path, _pins(), same_slot_admits=False, arm="live")
     assert cfg["agent_memory"] == {"projection": {"enabled": False}}
@@ -786,6 +799,8 @@ def scripted(tmp_path_factory: pytest.TempPathFactory) -> Generator[dict[str, An
     reset_config()
 
 
+# Over the 30 s per-test ceiling (D2.4): six child processes, paid once
+# here instead of once per check on whichever runner each check landed; ~32 s in CI.
 def test_the_scripted_arm(scripted: dict[str, Any], subtests: pytest.Subtests) -> None:
     """Every check on the one scripted run, each reported as its own subtest.
 

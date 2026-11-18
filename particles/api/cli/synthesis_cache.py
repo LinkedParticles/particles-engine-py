@@ -16,6 +16,7 @@ import typer
 
 from particles.api.cli import app, run
 from particles.api.cli._progress import confirm
+from particles.api.cli._remote import refuse_remote_sync
 from particles.api.cli._terminal import terminal_echo, terminal_field
 from particles.db import session_scope
 
@@ -29,6 +30,7 @@ app.add_typer(cache_app, name="synthesis-cache")
 @cache_app.command("list")
 def synthesis_cache_list_cmd() -> None:
     """List every cached article (subject, hash, prompt version, age, size)."""
+    refuse_remote_sync("synthesis-cache list")
     run(_list_entries())
 
 
@@ -37,6 +39,7 @@ def synthesis_cache_show_cmd(
     subject_id: str = typer.Argument(..., help="Subject ID (prefix OK)"),
 ) -> None:
     """Print the cached article body(ies) + metadata for one subject."""
+    refuse_remote_sync("synthesis-cache show")
     run(_show_entry(subject_id))
 
 
@@ -47,6 +50,7 @@ def synthesis_cache_vacuum_cmd(
     ),
 ) -> None:
     """Delete unreachable rows: stale prompt versions + orphaned subjects."""
+    refuse_remote_sync("synthesis-cache vacuum")
     run(_vacuum(dry_run))
 
 
@@ -56,6 +60,7 @@ def synthesis_cache_evict_cmd(
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt"),
 ) -> None:
     """Evict every cached article for one subject."""
+    refuse_remote_sync("synthesis-cache evict")
     run(_evict(subject_id, yes))
 
 

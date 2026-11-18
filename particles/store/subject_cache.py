@@ -67,6 +67,16 @@ def make_key(session: AsyncSession, name: str) -> str:
     return f"subject:{store_scope(session)}:{name.lower()}"
 
 
+def make_scoped_key(session: AsyncSession, name: str, principal: str, kind: str) -> str:
+    """Positive-cache key for an answer that depends on who resolved it.
+
+    A provisional Subject answers one principal's minting resolutions, so its
+    answer is keyed by principal and kind as well as name; a confirmed answer
+    is keyed by :func:`make_key` and answers everyone.
+    """
+    return f"subject:{store_scope(session)}:{kind}:{principal}\x00{name.lower()}"
+
+
 def cache_get(key: str) -> CacheEntry | None:
     entry = _cache.get(key)
     if entry is None:

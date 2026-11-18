@@ -33,6 +33,7 @@ from __future__ import annotations
 import logging
 from collections import deque
 from datetime import datetime
+from enum import StrEnum
 
 from sqlalchemy import DateTime, Float, Index, String, UniqueConstraint, delete, or_, select
 from sqlalchemy.engine import CursorResult
@@ -108,6 +109,64 @@ class ParticleRelationRow(Base):
         )
 
 
+class RelationEventSite(StrEnum):
+    """Where the event recording a relation's creation is written (RA3).
+
+    Every :class:`RelationCreatedBy` maps to one site in
+    :data:`RELATION_EVENT_SITE`, so a new kind of writer has to say where its
+    disclosure lives before it can write an edge.
+    """
+
+    #: :func:`create_relation` writes a ``RELATION_ADDED`` event per edge.
+    CREATE_RELATION = "create_relation"
+    #: A model verdict wrote the edge: :func:`create_relation` writes the
+    #: ``RELATION_ADDED`` event and refuses the edge unless the caller names
+    #: the verdict's rung (``decided_by``) and its run (``run_id``).
+    #: The event is a disclosure, not an operator's ruling on a card.
+    CREATE_RELATION_VERDICT = "create_relation_verdict"
+    #: The caller writes one ``DUPLICATES_MERGED`` event per merged group,
+    #: naming every member, in the same transaction.
+    CALLER_MERGE_EVENT = "caller_merge_event"
+    #: Written on the extraction path, which keeps no operator events; the
+    #: edge's snapshot and the claims it joins are its record.
+    EXTRACTION_UNLOGGED = "extraction_unlogged"
+
+
+#: Where each kind of relation's creation is disclosed. Total over
+#: :class:`RelationCreatedBy`; ``tests/test_relation_event_chokepoint.py``
+#: checks it and every ``create_relation`` call site against it.
+RELATION_EVENT_SITE: dict[RelationCreatedBy, RelationEventSite] = {
+    RelationCreatedBy.MANUAL_CLI: RelationEventSite.CREATE_RELATION,
+    RelationCreatedBy.AGENT_ASSERTED: RelationEventSite.CREATE_RELATION,
+    RelationCreatedBy.HUMAN_REVIEW: RelationEventSite.CREATE_RELATION,
+    RelationCreatedBy.LLM_JUDGE: RelationEventSite.CREATE_RELATION_VERDICT,
+    RelationCreatedBy.AUTO_CLUSTER_V1: RelationEventSite.CREATE_RELATION_VERDICT,
+    RelationCreatedBy.EXACT_DUPLICATE: RelationEventSite.CALLER_MERGE_EVENT,
+    RelationCreatedBy.REREAD_DUPLICATE: RelationEventSite.CALLER_MERGE_EVENT,
+    RelationCreatedBy.EXTRACTOR_DIRECT: RelationEventSite.EXTRACTION_UNLOGGED,
+    RelationCreatedBy.OBSERVER_DIVERGENCE: RelationEventSite.EXTRACTION_UNLOGGED,
+}
+
+_LOGGED_HERE: frozenset[RelationEventSite] = frozenset(
+    {RelationEventSite.CREATE_RELATION, RelationEventSite.CREATE_RELATION_VERDICT}
+)
+
+
+def is_verdict_link(created_by: str | None) -> bool:
+    """Whether a ``RELATION_ADDED`` event's ``created_by`` names a model verdict.
+
+    Readers that count operator gestures (curation precision) skip such an
+    event: the operator ran the pass, but no one ruled on the pair.
+    """
+    if created_by is None:
+        return False
+    try:
+        kind = RelationCreatedBy(created_by)
+    except ValueError:
+        return False
+    return RELATION_EVENT_SITE[kind] is RelationEventSite.CREATE_RELATION_VERDICT
+
+
 async def create_relation(
     session: AsyncSession,
     particle_a: str,
@@ -117,6 +176,8 @@ async def create_relation(
     confidence: float = 1.0,
     *,
     actor: str = "links-add",
+    decided_by: str | None = None,
+    run_id: str | None = None,
 ) -> ParticleRelation:
     """Create a relation between two particles.
 
@@ -124,15 +185,26 @@ async def create_relation(
     between a particle and itself is rejected — a particle does not
     corroborate itself.
 
-    ``actor`` is recorded on the ``RELATION_ADDED`` event of a manual or an
-    agent link, so an MCP agent's link is credited to its asserter identity
-    rather than to the operator's `links add`.
+    The edge's creation is disclosed where :data:`RELATION_EVENT_SITE` says.
+    For a kind this function logs, it writes a ``RELATION_ADDED`` event in the
+    caller's transaction naming both particles, credited to ``actor`` (so an
+    MCP agent's link is credited to its asserter identity rather than to the
+    operator's `links add`). A kind a model verdict writes (``LLM_JUDGE``)
+    must name the verdict's rung in ``decided_by`` and the run that applied it
+    in ``run_id``; both ride the event's payload (RA3).
 
     Returns the persisted ``ParticleRelation``. Raises ``ValueError`` for
-    self-relations.
+    self-relations, and for a verdict-written kind missing ``decided_by`` or
+    ``run_id``.
     """
     if particle_a == particle_b:
         raise ValueError("Cannot create a relation between a particle and itself")
+    site = RELATION_EVENT_SITE[created_by]
+    if site is RelationEventSite.CREATE_RELATION_VERDICT and not (decided_by and run_id):
+        raise ValueError(
+            f"A {created_by.value} relation records the verdict that made it: "
+            "pass decided_by and run_id."
+        )
 
     a, b = _endpoints_for_write(particle_a, particle_b, relation_type)
     relation = ParticleRelation(
@@ -153,16 +225,26 @@ async def create_relation(
         )
     )
     await session.flush()
-    # only a deliberate link (the operator's `links add`, an agent's
-    # `link_add`) is logged. LLM_JUDGE / EXTRACTOR_DIRECT relations are not
-    # decisions anyone made.
-    if created_by in (RelationCreatedBy.MANUAL_CLI, RelationCreatedBy.AGENT_ASSERTED):
+    # a deliberate link (the operator's `links add`, an agent's
+    # `link_add`) is logged, and so is a link a model verdict made (RA3): a
+    # CO_EVIDENTIAL edge pools the pair at query time, so a verdict that writes
+    # one changes what a query returns and has to be disclosed.
+    if site in _LOGGED_HERE:
+        payload: dict[str, object] = {
+            "relation_type": relation_type.value,
+            "confidence": confidence,
+            "created_by": created_by.value,
+        }
+        if decided_by is not None:
+            payload["decided_by"] = decided_by
+        if run_id is not None:
+            payload["run_id"] = run_id
         await record_event(
             session,
             actor=actor,
             event_type=OperatorEventType.RELATION_ADDED,
             refs=[(EventRefKind.PARTICLE, a), (EventRefKind.PARTICLE, b)],
-            payload={"relation_type": relation_type.value, "confidence": confidence},
+            payload=payload,
         )
     return relation
 

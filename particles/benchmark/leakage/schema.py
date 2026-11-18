@@ -31,8 +31,10 @@ from enum import StrEnum
 
 from pydantic import BaseModel, Field, computed_field
 
+from particles.benchmark.ceiling import STOP_EXCLUSION, StoppedAtCeiling
 from particles.benchmark.relevance_floor.schema import QuestionSource
 from particles.benchmark.rot.schema import Rate
+from particles.benchmark.spend import RunSpend
 from particles.core.schema import AttributionKind
 
 #: Call outcomes that left nothing to score. The first two are the memory
@@ -45,9 +47,17 @@ EXCLUSION_ANSWER = "answer_failed"
 EXCLUSION_EMPTY = "empty"
 #: The judge replied, but not with a usable verdict.
 EXCLUSION_UNPARSEABLE = "unparseable"
+#: The run's spend stop left a call of this question unstarted.
+EXCLUSION_CEILING = STOP_EXCLUSION
 #: Causes a re-run should try again: never checkpointed, never restored.
 RETRYABLE_EXCLUSIONS = frozenset(
-    {EXCLUSION_INFRA, EXCLUSION_BUDGET, EXCLUSION_ANSWER, EXCLUSION_UNPARSEABLE}
+    {
+        EXCLUSION_INFRA,
+        EXCLUSION_BUDGET,
+        EXCLUSION_ANSWER,
+        EXCLUSION_UNPARSEABLE,
+        EXCLUSION_CEILING,
+    }
 )
 
 
@@ -252,3 +262,9 @@ class LeakageReport(BaseModel):
     #: Questions excluded from every denominator, by cause.
     excluded: dict[str, int] = Field(default_factory=dict)
     quality_notes: list[str] = Field(default_factory=list)
+    #: The run's projection beside the usage the providers reported for it.
+    #: ``None`` on a report written before the field existed.
+    spend: RunSpend | None = None
+    #: Set when the run stopped at its spend ceiling, ``None`` on
+    #: a complete report. A stopped run is not a result to quote; its resume is.
+    stopped_at_ceiling: StoppedAtCeiling | None = None

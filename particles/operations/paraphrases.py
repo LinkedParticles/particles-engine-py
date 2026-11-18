@@ -61,7 +61,7 @@ from particles.core.schema import CorpusEntry, Particle
 from particles.core.status import Status, StatusReason
 from particles.db import store_of, write_transaction
 from particles.embeddings import cosine_similarity
-from particles.ingest.conflict_plan import plan_update_event
+from particles.ingest.conflict_plan import plan_update_event, source_entry_id
 from particles.ingest.observer_gate import ObserverGate
 from particles.ingest.pipeline import (
     SlotReading,
@@ -69,12 +69,14 @@ from particles.ingest.pipeline import (
     update_decided_by,
     update_prompt_hash,
 )
+from particles.ingest.retirement_cap import admits_retirement
+from particles.ingest.second_reading import ClaimContext
 from particles.ingest.subject_resolver import load_speaker_key
 from particles.ingest.update_supersession import SpeakerKey, SubjectIndex, particle_subject_ids
 from particles.llm.breaker import llm_circuit_open
 from particles.llm.usage import observe_sampling
 from particles.operations.probe_ledger import recall, remember
-from particles.operations.reconcile import _pair_update_order
+from particles.operations.reconcile import _pair_update_order, stored_pair_contexts
 from particles.store.candidate_cache import load_active_candidates
 from particles.store.event_store import EventRefKind, OperatorEventType, list_events, record_event
 from particles.store.particle_store import (
@@ -133,6 +135,9 @@ class ParaphraseReport(BaseModel):
     kept: list[dict[str, object]] = Field(default_factory=list)
     #: True when the run stopped at ``consolidation.max_paraphrase_probes``.
     capped: bool = False
+    #: Candidates not asked because the winner's entry reached its per-entry
+    #: bound; each is left for the contradiction census.
+    entry_capped: int = 0
     #: The cursor after this run; ``None`` until a first retirement is examined.
     cursor: dict[str, str] | None = None
     warnings: list[str] = Field(default_factory=list)
@@ -158,13 +163,16 @@ class ParaphraseReport(BaseModel):
             "retired": self.retired,
             "kept": self.kept,
             "capped": self.capped,
+            "entry_capped": self.entry_capped,
             "cursor": self.cursor,
         }
 
 
-async def _read_update_slot(earlier: str, later: str) -> SlotReading:
-    """The rung 2.5 update probe, with its second reading. The test seam."""
-    return await read_update_slot(earlier, later)
+async def _read_update_slot(
+    earlier: str, later: str, contexts: tuple[ClaimContext, ClaimContext] | None = None
+) -> SlotReading:
+    """The rung 2.5 update probe, confirmed on the passages. The seam."""
+    return await read_update_slot(earlier, later, contexts=contexts)
 
 
 def _slot_key(earlier: Particle, later: Particle) -> VerdictKey:
@@ -297,7 +305,11 @@ async def _retire(session: AsyncSession, paraphrase: Particle, winner: Particle)
             session, paraphrase.id, Status.PROVENANCE_STALE, StatusReason.SUPERSEDED_BY_UPDATE
         )
         event = plan_update_event(
-            paraphrase.id, winner.id, route=ROUTE, decided_by=update_decided_by()
+            paraphrase.id,
+            winner.id,
+            route=ROUTE,
+            decided_by=update_decided_by(),
+            winner_entry_id=source_entry_id(winner),
         )
         await record_event(
             session,
@@ -327,8 +339,17 @@ async def _ask(
     the cursor.
     """
     for score, paraphrase in chosen:
+        if not await admits_retirement(
+            session,
+            source_entry_id(winner),
+            pair=(paraphrase.id, winner.id),
+            retired_id=paraphrase.id,
+        ):
+            report.entry_capped += 1
+            continue
+        contexts = await stored_pair_contexts(session, paraphrase, winner)
         with observe_sampling() as sampling:
-            reading = await _read_update_slot(paraphrase.content, winner.content)
+            reading = await _read_update_slot(paraphrase.content, winner.content, contexts=contexts)
         report.probes += 1
         if reading.purpose == "verification":
             report.readings += 1

@@ -168,6 +168,9 @@ async def _import_tree_remote(
                 tags=tags,
                 content_date=None,
                 content=content,
+                # A vault or project tree is the operator's own writing: a
+                # statement route, never marked reference.
+                statement=True,
             )
             results.append((outcome.entry_id, outcome.snapshot_id))
             if out_unchanged is not None:

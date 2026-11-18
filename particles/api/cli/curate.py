@@ -6,8 +6,13 @@
 
 ``particles curate`` prints the unified, finite, leverage-ranked worklist that
 unions the existing read diagnostics; ``particles curate apply <gesture> <key>``
-dispatches a card's gesture onto the existing write op. Local-engine surface
-(the HTTP exposure for a thin client is deferred).
+dispatches a card's gesture onto the existing write op.
+
+With ``engine.base_url`` set the listing, ``--card`` and ``--refresh`` route
+through the :class:`~particles.api.client.Backend` seam (``GET /curation``,
+``GET /curation/cards/{key}``, ``POST /curation/rebuild``); ``--precision`` and
+``curate apply`` have no engine route yet, so they refuse rather than act on a
+local store.
 """
 
 from __future__ import annotations
@@ -18,20 +23,21 @@ import shlex
 import textwrap
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import NoReturn
+from typing import Any, NoReturn
 
 import typer
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.api.cli import app, run
 from particles.api.cli._logging import configure_logging
+from particles.api.cli._remote import ensure_local, refuse_remote_sync
 from particles.api.cli._terminal import terminal_echo
+from particles.api.client import Backend, get_backend
 from particles.config import get_config
+from particles.core.ladders import WITHHELD_REASONS
 from particles.core.schema import ProvenanceRefType
 from particles.db import session_scope
 from particles.operations.curation import BeliefRevision
 from particles.operations.curation.cards import (
-    KIND_TITLES,
     CardKind,
     ConflictBrief,
     CurationCard,
@@ -41,10 +47,23 @@ from particles.operations.curation.cards import (
     describe_gesture,
 )
 from particles.operations.curation.snapshot import CurationQueueResult
-from particles.store.particle_store import get_particle
 
 curate_app = typer.Typer(no_args_is_help=False)
 app.add_typer(curate_app, name="curate")
+
+
+def _episode_line(shadow: dict[str, Any] | None) -> str:
+    """The episode shadow the collection recorded, in one line."""
+    if not shadow:
+        return ""
+    withheld = int(shadow.get("withheld", 0))
+    sessions = int(shadow.get("session_cards", 0))
+    admitted = int(shadow.get("admitted_withheld", 0))
+    net = int(shadow.get("admitted_net", 0))
+    return (
+        f"Episode shadow: {withheld:,} pair and group cards would fold into {sessions:,} session "
+        f"cards; admitted entries {admitted:,} (net {net:,}). Nothing is withheld yet."
+    )
 
 
 def _freshness_line(result: CurationQueueResult, *, bypassed: bool = False) -> str:
@@ -101,6 +120,9 @@ def _stale_hint(result: CurationQueueResult) -> str:
 def _resolve_kind(kind: str | None) -> CardKind | None:
     if kind is None:
         return None
+    if kind.lower() == CardKind.DUPLICATE_PAIR.value:
+        # the duplicate class is one card per group now.
+        return CardKind.DUPLICATE_GROUP
     try:
         return CardKind(kind.lower())
     except ValueError as exc:
@@ -237,7 +259,7 @@ def curate_main(
 def curate_apply_cmd(
     gesture: str = typer.Argument(
         ...,
-        help="affirm | snooze | dismiss | retract | merge | deposit | assign-subject "
+        help="affirm | snooze | dismiss | retract | merge | split | deposit | assign-subject "
         "| supersede | accept | reject | resolve. The queue listing says what each one "
         "does to that card.",
     ),
@@ -284,6 +306,19 @@ def curate_apply_cmd(
         "names the actions this conflict offers; DEFER records a note and leaves it open.",
     ),
     note: str | None = typer.Option(None, "--note", help="resolve: a note recorded on the review."),
+    members: list[str] | None = typer.Option(
+        None,
+        "--members",
+        help="merge / split on a duplicate group: the members to rule on, as ids or id "
+        "prefixes from the listing, comma-separated or repeated. `all` names every member "
+        "of a group of ten or fewer.",
+    ),
+    keep: str | None = typer.Option(
+        None,
+        "--keep",
+        help="merge on a duplicate group: the member the others are linked to. Defaults "
+        "to the elected survivor among those named.",
+    ),
 ) -> None:
     """Apply a gesture to a card from the curation queue.
 
@@ -298,7 +333,12 @@ def curate_apply_cmd(
       particles curate apply supersede KEY --content "The window is 30 days."
           --reason "Changed in 1.140" --confidence 0.85
       particles curate apply resolve KEY --action BOTH_VALID --note "Different runs"
+      particles curate apply merge KEY --members all
+      particles curate apply split KEY --members 1a2b3c4d,5e6f7a8b
     """
+    # No engine route applies a gesture yet: refuse rather than write a local
+    # store while the daily loop runs on the engine.
+    refuse_remote_sync("curate apply")
     subject_list = [v for v in (subjects or []) if v.strip()]
     revision: BeliefRevision | None = None
     if gesture.lower() == "supersede":
@@ -342,6 +382,11 @@ def curate_apply_cmd(
         stray = [flag for flag, value in (("--action", action), ("--note", note)) if value]
         if stray:
             _fail(f"{', '.join(stray)} applies only to the resolve gesture.")
+    member_list = [v.strip() for raw in members or [] for v in raw.split(",") if v.strip()]
+    if (member_list or keep) and gesture.lower() not in ("merge", "split"):
+        _fail("--members and --keep apply only to merge and split on a duplicate group.")
+    if keep and gesture.lower() != "merge":
+        _fail("--keep applies only to merge.")
     run(
         _apply(
             gesture=gesture,
@@ -352,6 +397,8 @@ def curate_apply_cmd(
             revision=revision,
             action=action,
             note=note,
+            members=member_list or None,
+            keep=keep,
         )
     )
 
@@ -381,6 +428,7 @@ async def _show_precision(*, since: datetime | None, kind: CardKind | None, form
     """Queue precision over the window: read-only, nothing stored."""
     from particles.operations.curation import curation_precision, render_precision_lines
 
+    ensure_local("curate --precision")
     async with session_scope() as session:
         report = await curation_precision(session, since=since)
 
@@ -425,31 +473,20 @@ async def _show(
     refresh: bool = False,
     no_snapshot: bool = False,
 ) -> None:
-    from particles.operations.curation import (
-        QueueSource,
-        build_curation_queue,
-        rebuild_curation_snapshot,
-    )
-    from particles.operations.quality import get_quality_report
-
-    async with session_scope() as session:
-        report = await get_quality_report(session)
-        if refresh:
-            terminal_echo(
-                "Rebuilding the curation collection (running every finder)…"
-                if semantic
-                else "Rebuilding the curation collection (structural finders; "
-                "contradiction cards carry forward)…"
-            )
-            await rebuild_curation_snapshot(session, semantic=semantic)
-        result = await build_curation_queue(
-            session,
-            limit=limit,
-            kind=kind,
-            semantic=semantic,
-            source=QueueSource.LIVE if no_snapshot else QueueSource.SNAPSHOT,
+    backend = get_backend()
+    report = await backend.quality()
+    if refresh:
+        terminal_echo(
+            "Rebuilding the curation collection (running every finder)…"
+            if semantic
+            else "Rebuilding the curation collection (structural finders; "
+            "contradiction cards carry forward)…"
         )
-        related = await _load_related(session, result.cards)
+        await backend.curation_rebuild(semantic=semantic)
+    result = await backend.curation_queue(
+        limit=limit, kind=kind, semantic=semantic, no_snapshot=no_snapshot
+    )
+    related = await _load_related(backend, result.cards)
 
     terminal_echo(
         f"Store: {report.active_particles:,} active · "
@@ -457,7 +494,13 @@ async def _show(
         f"{report.snapshots_failed:,} failed snapshots · "
         f"{report.subjects_without_particles:,} subjects w/o particles"
     )
-    terminal_echo(_freshness_line(result, bypassed=no_snapshot) + "\n")
+    terminal_echo(_freshness_line(result, bypassed=no_snapshot))
+    episode_line = _episode_line(result.episode_shadow)
+    if episode_line:
+        terminal_echo(episode_line)
+    for line in withheld_lines(result.withheld):
+        terminal_echo(line)
+    terminal_echo("")
 
     cards = result.cards
     if not cards:
@@ -477,12 +520,23 @@ async def _show(
     terminal_echo("Inspect a belief with:  particles particle show ID")
 
 
-async def _show_card(key: str) -> None:
-    from particles.operations.curation import get_curation_card
+def withheld_lines(withheld: dict[str, int | None]) -> list[str]:
+    """One line per withholding rung that withheld a pair or was switched off."""
+    lines: list[str] = []
+    for stamp, n in sorted(withheld.items()):
+        if n is None:
+            lines.append(f"{stamp} off: every duplicate candidate pair is on the queue")
+        elif n:
+            reason = WITHHELD_REASONS.get(stamp.partition("@")[0], "a rung ruled them different")
+            noun = "pair" if n == 1 else "pairs"
+            lines.append(f"{n:,} duplicate candidate {noun} withheld: {reason} ({stamp})")
+    return lines
 
-    async with session_scope() as session:
-        card = await get_curation_card(session, key)
-        related = await _load_related(session, [card]) if card is not None else _Related()
+
+async def _show_card(key: str) -> None:
+    backend = get_backend()
+    card = await backend.curation_card(key)
+    related = await _load_related(backend, [card]) if card is not None else _Related()
     if card is None:
         _fail(f"No open card with key {key!r}.")
     snooze_days = get_config().curation.snooze_days
@@ -546,7 +600,7 @@ class _Related:
 _SIDE_LINE = re.compile(r"^Particle ([AB])[^:]*: (?:(" + _UUID.pattern + r") — )?(.*)$")
 
 
-async def _load_related(session: AsyncSession, cards: list[CurationCard]) -> _Related:
+async def _load_related(backend: Backend, cards: list[CurationCard]) -> _Related:
     """Load the other half of each disagreement the listing shows.
 
     A contradiction or retraction-cascade finding names its other belief only
@@ -560,12 +614,12 @@ async def _load_related(session: AsyncSession, cards: list[CurationCard]) -> _Re
         for pid in _UUID.findall(c.diagnostic):
             if pid in c.particle_ids or pid in out.beliefs:
                 continue
-            p = await get_particle(session, pid)
+            p = await backend.particle_show(pid)
             if p is not None:
                 out.beliefs[pid] = p.content
         if c.inconsistency_id is None or c.inconsistency_id in out.sides:
             continue
-        inc = await get_particle(session, c.inconsistency_id)
+        inc = await backend.particle_show(c.inconsistency_id)
         if inc is None:
             continue
         # The INCONSISTENCY's first two PARTICLE refs are A then B; its content
@@ -581,7 +635,7 @@ async def _load_related(session: AsyncSession, cards: list[CurationCard]) -> _Re
         sides: list[tuple[str | None, str]] = []
         for n, label in enumerate("AB"):
             ref_id = ref_ids[n] if n < len(ref_ids) else None
-            side = await get_particle(session, ref_id) if ref_id else None
+            side = await backend.particle_show(ref_id) if ref_id else None
             if side is not None:
                 sides.append((side.id, side.content))
             elif label in text:
@@ -618,15 +672,24 @@ def _render_card(
     index: int, card: CurationCard, related: _Related, *, snooze_days: int
 ) -> list[str]:
     """The listing block for one card: the question, the evidence, the choices."""
-    title, question = KIND_TITLES.get(card.kind, (card.kind.value, ""))
+    # The card's own title and question: a retired-value record's card words
+    # them for the retirement it asks about.
+    title, question = card.title, card.question
     lines = [f"{index}. {title}  [{card.kind.value}, leverage {card.leverage:.2f}]"]
     if question:
         lines += _wrap(question, "   ")
-    lines += _wrap(card.diagnostic, "   ")
+    # A conflict card draws its sides below, so it states only what the
+    # diagnostic adds to their quotes.
+    conflict = card.conflict if card.kind is CardKind.INCONSISTENCY else None
+    note = card.conflict_note if conflict is not None else None
+    if note is None:
+        lines += _wrap(card.diagnostic, "   ")
+    elif note:
+        lines += _wrap(note, "   ")
 
-    if card.kind is CardKind.INCONSISTENCY and card.conflict is not None:
+    if conflict is not None:
         # the card is the record; its sides are the evidence.
-        lines += _conflict_lines(card.conflict)
+        lines += _conflict_lines(conflict)
         sides: list[tuple[str | None, str]] = []
     else:
         sides = related.sides.get(card.inconsistency_id or "", [])
@@ -634,18 +697,30 @@ def _render_card(
     briefs = {b.particle_id: b for b in card.particles}
     shown = [b for b in card.particles if b.particle_id not in side_ids]
     # A pair reads as A / B; a batch card's beliefs are a list, one bullet each.
-    batch = card.kind in (CardKind.GATED_SUBJECTS, CardKind.SUBJECTLESS_SOURCE)
+    group = card.kind is CardKind.DUPLICATE_GROUP
+    batch = group or card.kind in (CardKind.GATED_SUBJECTS, CardKind.SUBJECTLESS_SOURCE)
     labels = "AB" if len(shown) == 2 and not batch else "•" * len(shown)
+    linked_with = {pid: s for s in card.linked_sets or [] for pid in s}
     for tag, brief in zip(labels, shown, strict=False):
         lines += _quote(tag, brief.content)
-        lines.append(_INDENT + _brief_meta(brief))
+        meta = _brief_meta(brief)
+        if group and brief.particle_id == card.survivor_id:
+            meta += " · survivor"
+        if group and brief.particle_id in linked_with:
+            others = [p[:8] for p in linked_with[brief.particle_id] if p != brief.particle_id]
+            meta += " · linked with " + ", ".join(others)
+        lines.append(_INDENT + meta)
         if card.kind is CardKind.SUBJECTLESS_SOURCE:
             # each belief can still be fixed on its own key.
             own = f"{CardKind.NO_SUBJECT.value}:{brief.particle_id}"
             lines.append(f"{_INDENT}key: {shlex.quote(own)}")
     unshown = len(card.particle_ids) - len(card.particles)
-    if card.kind is CardKind.SUBJECTLESS_SOURCE and card.particles and unshown > 0:
+    if batch and card.kind is not CardKind.GATED_SUBJECTS and card.particles and unshown > 0:
         lines.append(f"   … and {unshown} more: particles curate --card {shlex.quote(card.key)}")
+    for classes in card.prior_rulings or []:
+        # a cut a later claim has bridged; no merge may cross it.
+        cut = " | ".join(", ".join(pid[:8] for pid in c) for c in classes)
+        lines += _wrap(f"Ruled earlier as different claims: {cut}", "   ")
 
     if card.verdict is not None:
         judge = f"LLM judge: {card.verdict.verdict.value}"
@@ -693,6 +768,8 @@ async def _apply(
     revision: BeliefRevision | None = None,
     action: str | None = None,
     note: str | None = None,
+    members: list[str] | None = None,
+    keep: str | None = None,
 ) -> None:
     from particles.operations.curation import apply_gesture
 
@@ -718,6 +795,8 @@ async def _apply(
                 revision=revision,
                 action=action,
                 note=note,
+                members=members,
+                keep=keep,
             )
         except ValueError as exc:
             terminal_echo(f"✗ {exc}", err=True)

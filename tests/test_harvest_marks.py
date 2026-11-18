@@ -232,3 +232,28 @@ async def test_a_web_clipper_capture_cannot_date_itself_after_the_deposit(
     assert published is None or published.replace(tzinfo=published.tzinfo or UTC) <= datetime.now(
         UTC
     )
+
+
+def test_harness_capture_namespaces_share_one_registry():
+    from urllib.parse import urlparse
+
+    from particles.api.cli._claude_code import _SESSION_URI_PREFIX
+    from particles.corpus.harvest_marks import (
+        HARNESS_SOURCES,
+        HARNESS_URI_SCHEMES,
+        RESERVED_DEPOSITORS,
+        RESERVED_TAGS,
+        harness_session_source,
+        is_harness_uri,
+    )
+    from particles.store.trust_store import domain_rows_apply
+
+    assert HARNESS_SOURCES["claude-code"].session_prefix == _SESSION_URI_PREFIX
+    for source in HARNESS_SOURCES.values():
+        uri = source.session_prefix + "synthetic-session"
+        assert urlparse(uri).scheme in HARNESS_URI_SCHEMES
+        assert is_harness_uri(uri) and not domain_rows_apply(uri)
+        assert harness_session_source(uri) == source
+        assert source.tag in RESERVED_TAGS and source.depositor in RESERVED_DEPOSITORS
+    assert not is_harness_uri("inbox://session/example")
+    assert harness_session_source("https://session/example") is None

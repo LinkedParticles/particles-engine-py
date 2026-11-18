@@ -17,7 +17,8 @@
 #
 # What this publishes: `ghcr.io/linkedparticles/engine`, built with
 # `--build-arg SOURCE=pypi` — the image's code is the released PyPI pair
-# (`linkedparticles==<version>`, resolving its exactly-pinned core), not this
+# (`linkedparticles[otel]==<version>`, resolving its exactly-pinned core and
+# the OpenTelemetry extra, which the baked config leaves off), not this
 # tree; the tree contributes only the static bakes (web-UI dist, the baked
 # config) via deploy/Dockerfile's runtime stage. The public image is the
 # release, containerized.
@@ -140,10 +141,12 @@ jobs:
         run: |
           set -euo pipefail
           # Same retry as the Publish workflow's core gate: the index can lag
-          # a fresh upload by several minutes, and this workflow fires right
-          # after that upload.
-          for i in 1 2 3 4 5 6 7 8 9 10; do
-            if python3 -m pip download --no-deps --only-binary=:all: --dest /tmp/pair-check \
+          # a fresh upload by several minutes, this workflow fires right
+          # after that upload, and PyPI caches each simple page for 600
+          # seconds, so the last probe comes after that lifetime.
+          for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do
+            if python3 -m pip download --no-cache-dir --no-deps --only-binary=:all: \
+              --dest /tmp/pair-check \
               "linkedparticles==$VERSION" \
               "linkedparticles-core==$VERSION"; then
               exit 0
@@ -151,7 +154,7 @@ jobs:
             echo "pair not resolvable yet (attempt $i); retrying in 60s"
             sleep 60
           done
-          echo "released pair still not resolvable after 10 minutes" >&2
+          echo "released pair still not resolvable after 14 minutes" >&2
           exit 1
 
       # The closure cutoff the Dockerfile's pypi stage requires: the moment

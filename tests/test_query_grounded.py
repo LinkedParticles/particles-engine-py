@@ -43,6 +43,7 @@ from particles.operations.query.grounding import (
     handle_for,
     parse_grounded,
     particle_handles,
+    strip_attribution_tags,
 )
 from particles.operations.query.respond import REFUSAL_MARKER
 
@@ -169,6 +170,22 @@ class TestParse:
         assert unit.kind is AttributionKind.INFERENCE
         assert unit.cited_ids == [_A]
 
+    def test_one_bracket_mixing_citations_and_a_declaration(self) -> None:
+        # Composers write this form about as often as the adjacent pair, as the
+        # activation door build showed. Read the same, so the
+        # citation is kept and the compact strip has nothing left to miss.
+        mixed = parse_grounded("So it was a dev default [p-1a2b3c4d, inference].", _HANDLES)
+        pair = parse_grounded("So it was a dev default [p-1a2b3c4d] [inference].", _HANDLES)
+        assert mixed.attribution == pair.attribution
+        assert mixed.answer == pair.answer
+        assert strip_attribution_tags(mixed.answer) == "So it was a dev default."
+
+    def test_background_wins_within_one_bracket_too(self) -> None:
+        parsed = parse_grounded("Common knowledge [inference, p-5e6f7a8b, background].", _HANDLES)
+        (unit,) = parsed.attribution.sentences
+        assert unit.kind is AttributionKind.BACKGROUND
+        assert unit.cited_ids == [_B]
+
     def test_clause_level_citations_split_the_sentence(self) -> None:
         parsed = parse_grounded(
             "It reported CLEAN [p-1a2b3c4d], and stayed CLEAN later [p-5e6f7a8b].", _HANDLES
@@ -250,6 +267,28 @@ def _sent(client: MagicMock) -> tuple[str, str]:
     return system_text, user_text
 
 
+class TestStripTags:
+    """the compact MCP answer is the grounded answer without its tags."""
+
+    def test_removes_every_canonical_tag_and_nothing_else(self) -> None:
+        a, b = _particle("A."), _particle("B.")
+        handles = particle_handles([a, b])
+        reply = (
+            f"Porto [{handles[a.id]}]. Welsh is likely [inference].\n\n"
+            f"- Both [{handles[a.id]}, {handles[b.id]}].\nA remark [sic] and [a link](x)."
+        )
+        labelled = parse_grounded(reply, handles).answer
+
+        plain = strip_attribution_tags(labelled)
+
+        assert "[unattributed]" in labelled
+        assert plain == ("Porto. Welsh is likely.\n\n- Both.\nA remark [sic] and [a link](x).")
+
+    def test_leaves_an_ungrounded_answer_unchanged(self) -> None:
+        text = "The user lives in Porto (see [notes](x)) [sic]."
+        assert strip_attribution_tags(text) == text
+
+
 class TestQueryOp:
     async def test_a_grounded_request_cites_handles_and_returns_the_labels(
         self, two_beliefs: Any
@@ -299,7 +338,8 @@ class TestQueryOp:
             two_beliefs, f"{REFUSAL_MARKER}\nNothing here bears on it.", grounded=True
         )
         assert response.answer_refused is True
-        assert response.answer == "Nothing here bears on it."
+        assert response.answer.startswith("Nothing here bears on it.\n\n")
+        assert response.answer.endswith("request them with `include_refused_candidates`.")
         assert response.answer_attribution is None
 
     async def test_nothing_the_composer_adds_is_stored(self, two_beliefs: Any) -> None:

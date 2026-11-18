@@ -109,6 +109,10 @@ SITES: dict[tuple[str, str, str], tuple[str, str]] = {
         FENCED,
         "fenced_prompt over the claim",
     ),
+    ("particles.extraction.episode", "read_episodes", "complete_with_provider_model"): (
+        FENCED,
+        "fenced_prompt over the claims and their passages",
+    ),
     ("particles.extraction.structure", "structure_content", "complete"): (
         FENCED,
         "fenced_prompt over the claim",
@@ -258,6 +262,10 @@ SITES: dict[tuple[str, str, str], tuple[str, str]] = {
     ("particles.benchmark.relevance_floor.runner", "_judge_one", "_scored_call"): (
         BENCHMARK,
         "a relevance-floor benchmark's fixture questions",
+    ),
+    ("particles.benchmark.rot.answer_runner", "_call", "complete_with_provider_model"): (
+        BENCHMARK,
+        "a rot world's door texts, handed to the reader as an agent harness would",
     ),
     (
         "particles.benchmark.memory.runner",
@@ -560,6 +568,39 @@ async def test_update_probe_sends_the_system_turn() -> None:
 
 
 @pytest.mark.asyncio
+async def test_the_passage_confirmation_is_fenced() -> None:
+    """the passage reading fences the claim, its source and its passage."""
+    from particles.ingest import pipeline
+    from particles.ingest.second_reading import ClaimContext
+
+    older = ClaimContext(
+        content="The user lives in Boston.",
+        source="s1",
+        date="2026-10-01",
+        passage="## User\n\nI live in Boston.",
+    )
+    newer = ClaimContext(
+        content="The user lives in Denver.", source="s2", date="2026-10-20", passage=HOSTILE
+    )
+    assert_fenced(*pipeline._update_passage_prompt(older, newer))
+    seen: list[dict[str, Any]] = []
+
+    async def fake(prompt: str, **kwargs: Any) -> str:
+        seen.append({"prompt": prompt, **kwargs})
+        return "REASON: one slot.\nSLOT: CHANGES\nVERDICT: YES"
+
+    with patch.object(pipeline, "_llm_call", side_effect=fake):
+        reading = await pipeline.read_update_slot(
+            older.content, newer.content, contexts=(older, newer)
+        )
+    assert len(seen) == 2
+    assert_fenced(seen[1]["system"], seen[1]["prompt"])
+    assert HOSTILE in seen[1]["prompt"] and HOSTILE not in seen[0]["prompt"]
+    assert reading.decided_by is not None
+    assert reading.decided_by.name == pipeline.UPDATE_PASSAGE_RUNG
+
+
+@pytest.mark.asyncio
 async def test_the_duplicate_judge_is_fenced() -> None:
     from particles.ingest.duplicate_judge import judge_request, run_judge
 
@@ -683,6 +724,16 @@ async def test_modality_classifier_is_fenced() -> None:
     call = AsyncMock(return_value=('{"assertion_modality": "FALSIFIABLE"}', "stub/model"))
     with patch("particles.llm.complete_with_provider_model", call):
         await classify_modality(HOSTILE)
+    assert_fenced(call.await_args.kwargs["system"], call.await_args.args[1])
+
+
+@pytest.mark.asyncio
+async def test_episode_reader_is_fenced() -> None:
+    from particles.extraction.episode import EpisodeItem, read_episodes
+
+    call = AsyncMock(return_value=('[{"claim": 1, "episode": "standing"}]', "stub/model"))
+    with patch("particles.llm.complete_with_provider_model", call):
+        await read_episodes([EpisodeItem(HOSTILE, HOSTILE)], passage_chars=2000)
     assert_fenced(call.await_args.kwargs["system"], call.await_args.args[1])
 
 

@@ -311,10 +311,16 @@ read-side variants the way `claude-sonnet-5` did (Kendall's tau-b 0.828 against
 a bar of 0.6), while scoring 0.15 to 0.19 lower in absolute accuracy
 ([rank agreement](local-rank-agreement-2026-10-12.md)). An exploratory sweep of
 read-side settings can therefore run locally at no API cost, with the hosted
-model needed only to confirm the few settings worth reporting. That result is
-about ranking read-side variants on one benchmark. It says nothing about
-extraction quality on a local model, which has not been measured to a standard
-that would ship as a default.
+model needed only to confirm the few settings worth reporting. The ordering
+held with the hosted model judging the local answers (tau-b 0.733), and on the
+extractor benchmark the local model ranked write-side variants by recall at the
+bar exactly (tau-b 0.600) but did not rank them by precision
+([rank agreement, continued](local-rank-agreement-2026-11-08.md)). On a sweep
+of six extractor variants that confirmed the local top three on the hosted
+model, the hosted bill would have been US$5.69 instead of US$15.26. These
+results are about ranking variants. They say nothing about extraction quality
+on a local model, which has not been measured to a standard that would ship as
+a default.
 
 ## Not yet measured
 

@@ -40,6 +40,11 @@ The same scope suspends the probe-verdict ledger, so a report served to a
 request without the operator's authority leaves the store unchanged (R5).
 Every bucket is a principal's when the request's key resolves to one, and an
 address's otherwise (:func:`_client_bucket`).
+
+**The agent writes that make no model call have a bucket of their own**
+(security review 2026-10-26-1, R6): :func:`enforce_write_rate_limit`, sized by
+``api.write_rate_limit_per_minute`` and keyed the same way, so a burst of tags
+or links neither spends nor waits on the model-call allowance.
 """
 
 from __future__ import annotations
@@ -206,6 +211,48 @@ async def _enforce_rate_limit_dep(request: Request) -> None:
 #: ``enforce_rate_limit`` inline instead, since only ``semantic=True`` drives the
 #: LLM.
 RateLimitDep = Annotated[None, Depends(_enforce_rate_limit_dep)]
+
+
+#: The prefix of every write-bucket key, so no model-call bucket (a principal's,
+#: an address's, the loopback or peerless one) can share its tokens.
+_WRITE_BUCKET_PREFIX = "write|"
+
+
+def enforce_write_rate_limit(request: Request) -> None:
+    """Apply the per-client write bucket to ``request``; raise 429 when exhausted.
+
+    The agent writes that make no model call (retract, link, unlink, tag,
+    untag, the useful press) spend from a bucket of their own, sized by
+    ``api.write_rate_limit_per_minute`` and keyed like the model-call bucket
+    (:func:`_client_bucket`), but holding separate tokens: a burst of tags
+    never spends the allowance a deposit needs, and a run of deposits never
+    throttles a tag (security review 2026-10-26-1, R6). Every caller spends
+    from it, an operator key included. No-op when the setting is ``≤ 0``.
+    """
+    rate = get_config().api.write_rate_limit_per_minute
+    if rate <= 0:
+        return
+    key = _WRITE_BUCKET_PREFIX + _client_bucket(request)
+    if not _allow(key, rate, time.monotonic()):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=(
+                "Write rate limit exceeded for this client. Retry after a short "
+                "wait or raise api.write_rate_limit_per_minute."
+            ),
+            headers={"Retry-After": "60"},
+        )
+
+
+async def _enforce_write_rate_limit_dep(request: Request) -> None:
+    """:func:`enforce_write_rate_limit` as an async dependency, on the event loop."""
+    enforce_write_rate_limit(request)
+
+
+#: Dependency form for the agent writes that make no model call. A parameter
+#: dependency, so the route's gate (a path-operation dependency) refuses first
+#: and a refused request never touches the bucket.
+WriteRateLimitDep = Annotated[None, Depends(_enforce_write_rate_limit_dep)]
 
 
 class _RequestMeter:

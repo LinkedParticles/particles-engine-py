@@ -796,7 +796,7 @@ class TestSpecTierSync:
         spec = (
             Path(__file__).parents[1] / "docs" / "spec" / "technical-specification.md"
         ).read_text()
-        match = re.search(r"^## 14\.5 .*?^## 14\.6 ", spec, re.MULTILINE | re.DOTALL)
+        match = re.search(r"^### 14\.5 .*?^### 14\.6 ", spec, re.MULTILINE | re.DOTALL)
         assert match, "techspec §14.5 not found"
         return match.group(0)
 

@@ -57,12 +57,20 @@ jobs:
           python .github/dco_check.py --range
           "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}"
 
-  pytest:
-    name: pytest
+  # The suite runs in four shards on four runners (unsharded it took 13 to
+  # 17 minutes on one, and its merge gates every release). The `pytest` job
+  # below is the one check branch protection requires: it reports under the
+  # same name the unsharded job did, and passes only when every shard passed.
+  pytest-shard:
+    name: pytest shard ${{ matrix.shard }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           # The floor interpreter — pyproject says requires-python = ">=3.11",
           # so testing there is what makes that claim true.
@@ -101,15 +109,36 @@ jobs:
 
       # `not integration` is the tier that needs no API key. The integration
       # tier makes real Anthropic calls and is a developer-key concern.
-      - name: Run the suite
-        run: .venv/bin/pytest tests/ -m "not integration" -q
+      # `.github/pytest_shard.py` keeps this shard's whole test modules,
+      # dealt by source size, so the four shards run the suite exactly once.
+      - name: Run this shard of the suite
+        env:
+          PYTHONPATH: ${{ github.workspace }}/.github
+          SHARD: ${{ matrix.shard }}/${{ strategy.job-total }}
+        run: .venv/bin/pytest tests/ -m "not integration" -q -p pytest_shard --shard "$SHARD"
+
+  # The required check. `always()` so a failed or cancelled shard reports a
+  # red `pytest` rather than a skipped one; the matrix result is `success`
+  # only when every shard succeeded.
+  pytest:
+    name: pytest
+    needs: pytest-shard
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every shard to pass
+        env:
+          RESULT: ${{ needs.pytest-shard.result }}
+        run: |
+          [ "$RESULT" = "success" ] || { echo "a pytest shard did not pass: $RESULT" >&2; exit 1; }
+          echo "every pytest shard passed"
 
   projection-drift:
     name: projection drift
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           python-version: "3.11"
           enable-cache: false
@@ -245,7 +274,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           python-version: "3.11"
           enable-cache: false
@@ -266,7 +295,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up uv
-        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           python-version: "3.11"
           enable-cache: false

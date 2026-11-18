@@ -52,6 +52,12 @@ class ImporterPlugin(Protocol):
     hashes to the prior snapshot. ``particles corpus refresh`` calls it for an
     entry this importer accepts; an importer without it makes that refresh
     fail rather than GET a URI-R that names a different document.
+
+    One attribute is optional too: ``ROUTE_KIND``, which an
+    importer of the operator's own writing (a notes vault) sets to
+    ``"statement"`` so its entries stay global. An importer that sets nothing
+    brings in material read, and a deposit through it that names no project is
+    marked ``scope:reference``. Every importer shipped today is the latter.
     """
 
     def accepts_url(self, url: str) -> bool:

@@ -65,6 +65,7 @@ from .as_of import RetirementIndex, is_never_believed, load_as_of_view, load_ret
 from .decay_policy import DecayPolicy, load_decay_policy
 from .effective_confidence import score_effective_confidence
 from .observer_scope import filter_visible, merged_scope_note
+from .source_info import load_hit_sources
 from .source_trust import TrustPolicy, load_trust_policy
 
 #: Bases whose ``valid_from`` may close a predecessor: a stated,
@@ -398,7 +399,7 @@ async def _listing_store(
     return rows, gather, as_of_notes, as_of_excluded
 
 
-def _listing_response(
+async def _listing_response(
     request: QueryRequest,
     rows: list[tuple[Particle, float]],
     gather: WindowGather,
@@ -406,6 +407,7 @@ def _listing_response(
     as_of_notes: dict[str, AsOfNote],
     as_of_excluded: int,
     scope_notes: list[ObserverScopeNote],
+    session: AsyncSession | None = None,
 ) -> QueryResponse:
     ordered = sorted(rows, key=lambda row: _hit_sort_key(gather.hits[row[0].id]))
     top = ordered[: request.top_k]
@@ -414,10 +416,14 @@ def _listing_response(
     answer += f"{len(ordered) - began} were in force."
     if len(ordered) > len(top):
         answer += f" Showing the first {len(top)} by valid_from."
+    listed = [p for p, _ in top]
     return QueryResponse(
         answer=answer,
-        particles=[p for p, _ in top],
+        particles=listed,
         effective_confidences=[e for _, e in top],
+        # one store's listing resolves its sources; the federated
+        # listing has no single session to resolve them in and sends none.
+        sources=await load_hit_sources(session, listed) if session is not None else [],
         window=request.window,
         window_hits=[gather.hits.get(p.id) for p, _ in top],
         window_coverage=coverage,
@@ -446,8 +452,8 @@ async def window_listing(session: AsyncSession, request: QueryRequest) -> QueryR
         scope_notes=scope_notes,
     )
     coverage = await gather.coverage(session)
-    return _listing_response(
-        request, rows, gather, coverage, as_of_notes, as_of_excluded, scope_notes
+    return await _listing_response(
+        request, rows, gather, coverage, as_of_notes, as_of_excluded, scope_notes, session
     )
 
 
@@ -489,7 +495,7 @@ async def window_listing_federated(
             as_of_notes.update(notes)
             as_of_excluded += excluded
     assert merged_coverage is not None
-    return _listing_response(
+    return await _listing_response(
         request, merged_rows, merged, merged_coverage, as_of_notes, as_of_excluded, scope_notes
     )
 

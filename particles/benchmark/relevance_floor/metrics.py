@@ -17,7 +17,7 @@ from collections.abc import Sequence
 
 from particles.benchmark.rot.schema import Rate
 
-from .schema import FloorRow, HeldOutQuestion, QuestionResult, RefusalRow
+from .schema import FloorRow, HeldOutQuestion, QuestionResult, RefusalRow, ResponderRow
 
 _QUANTILES = (0, 10, 25, 50, 75, 90, 100)
 
@@ -81,6 +81,30 @@ def answerable_rate(results: Sequence[QuestionResult]) -> Rate:
         if result.answerable is not None:
             rate.add(result.answerable)
     return rate
+
+
+def responder_refusals(results: Sequence[QuestionResult]) -> ResponderRow:
+    """The responder's refusals against the judged label.
+
+    Meaningful only when the judge read each refusal's withheld top-k (judge
+    protocol 2 on); under protocol 1 every refusal is labelled unanswerable
+    unjudged and this would report a false-refusal rate of zero by construction.
+    Rows without a judged label or a recorded refusal flag join no denominator.
+    """
+    row = ResponderRow()
+    for result in results:
+        if result.answerable is None or result.responder_refused is None:
+            continue
+        refused = result.responder_refused
+        source = result.source.value
+        row.refused.add(refused)
+        if result.answerable:
+            row.answerable_refused.add(refused)
+            row.answerable_refused_by_source.setdefault(source, Rate()).add(refused)
+        if refused:
+            row.refused_were_answerable.add(result.answerable)
+            row.refused_were_answerable_by_source.setdefault(source, Rate()).add(result.answerable)
+    return row
 
 
 def similarity_quantiles(values: Sequence[float]) -> dict[str, float]:

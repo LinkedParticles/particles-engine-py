@@ -1,0 +1,16 @@
+{
+  "name": "particles-claude-code-plugin",
+  "version": "0.1.0",
+  "description": "The Particles curation pane for Claude Code: a renderer of the shared curation core.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node esbuild.config.mjs",
+    "check": "node esbuild.config.mjs --check"
+  },
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@anthropic-ai/claude-code": "2.1.315",
+    "esbuild": "0.28.2"
+  }
+}

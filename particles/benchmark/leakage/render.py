@@ -12,6 +12,7 @@ its numerator and denominator; an empty denominator prints ``n/a``.
 
 from __future__ import annotations
 
+from particles.benchmark.ceiling import render_stopped
 from particles.benchmark.rot.schema import Rate
 
 from .schema import LeakageReport
@@ -38,8 +39,10 @@ def render_report(report: LeakageReport, *, per_question: bool = False) -> str:
     judge = sel.judge_model_id + ("" if sel.distinct_judge else "  (SAME MODEL AS COMPOSER)")
     counts = report.sentences
     mean = "n/a" if report.mean_answer_fraction is None else f"{report.mean_answer_fraction:.1%}"
+    stopped = report.stopped_at_ceiling
     lines = [
-        "Model-prior leakage — answer sentences the retrieved particles do not support",
+        ("INCOMPLETE (stopped at the spend ceiling): " if stopped is not None else "")
+        + "Model-prior leakage — answer sentences the retrieved particles do not support",
         f"  questions      {sel.questions} [{sources}] from {origin}",
         f"                 fingerprint {sel.fingerprint}",
         f"  store          {sel.store} — {sel.store_active_particles:,} ACTIVE particles",
@@ -74,6 +77,8 @@ def render_report(report: LeakageReport, *, per_question: bool = False) -> str:
             f"cite), unattributed {counts.unattributed} ({counts.unsupported_unattributed} "
             f"unsupported), invalid citations {counts.invalid_citations}",
         ]
+    if stopped is not None:
+        lines += render_stopped(stopped)
     lines += [
         "",
         "SENTENCES",

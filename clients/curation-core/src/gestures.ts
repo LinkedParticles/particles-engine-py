@@ -41,6 +41,7 @@ export function gestureAvailability(
     case "comment":
     case "resolve": // POST /review/{inconsistency_id}
     case "merge":
+    case "split": // POST /curation/duplicate-group
     case "deposit":
     case "supersede":
     case "reindex":
@@ -99,6 +100,7 @@ export function primaryGesture(kind: string, offered: string[]): string | null {
     // one card per source; each belief keeps its own gestures.
     subjectless_source: ["dismiss"],
     duplicate_pair: ["merge"],
+    duplicate_group: ["merge"],
     uncited_url: ["deposit", "dismiss"],
     failed_snapshots: ["reindex"],
   };
@@ -121,6 +123,11 @@ export function primaryGesture(kind: string, offered: string[]): string | null {
  */
 export function gestureLabel(gesture: string, kind = ""): string {
   if (kind === "contested" && gesture === "affirm") return "Stands anyway";
+  // On a demotion card the two gestures record a ruling on the replacement,
+  // not on one belief: affirm says it was right, dismiss that both
+  // claims hold. The generic "Still true" read as the opposite ruling.
+  if (kind === "demotion" && gesture === "affirm") return "Replacement is right";
+  if (kind === "demotion" && gesture === "dismiss") return "Both hold";
   const labels: Record<string, string> = {
     affirm: "Still true",
     snooze: "Snooze",
@@ -128,6 +135,7 @@ export function gestureLabel(gesture: string, kind = ""): string {
     comment: "Resolve…",
     resolve: "Resolve…",
     merge: "Merge",
+    split: "Split off",
     deposit: "Deposit",
     supersede: "Edit",
     retract: "Retract",
@@ -154,7 +162,18 @@ export function gestureHint(gesture: string, kind = ""): string {
     "contested:affirm":
       "This belief stands despite the disagreement. Hides the card for good; a conflict it is in keeps its own card.",
     "duplicate_pair:dismiss": "They are different claims. Hides the card for good.",
+    "duplicate_group:merge":
+      "The checked members are one claim. Links them; every belief stays active. An answer shows whichever ranks highest, so check only members that state the whole claim.",
+    "duplicate_group:split":
+      "The checked members are not the same claim as the rest. The two sides are never grouped together again.",
+    "duplicate_group:dismiss":
+      "None of these are the same claim. Hides them for good; a later belief that joins one of them is asked about again.",
     "uncited_url:dismiss": "Not worth depositing. Stops suggesting this URL.",
+    "subjectless_source:dismiss":
+      "These beliefs can stand without a subject. Hides the card for good.",
+    "demotion:affirm": "The replacement was right. Hides the card for good.",
+    "demotion:dismiss":
+      "Both claims hold. Hides the card for good. The retired claim stays retired: assert it again if it is still needed.",
   };
   const generic: Record<string, string> = {
     affirm: "The belief is still correct. Records that and hides the card for good.",
@@ -177,4 +196,28 @@ export function gestureHint(gesture: string, kind = ""): string {
 /** Gestures whose CSS should mark them destructive. */
 export function isDangerGesture(gesture: string): boolean {
   return gesture === "retract";
+}
+
+/** The ruling "keep" leaves standing on a retired-value record, by how claim A was retired. */
+const RETIRED_RULINGS: Record<string, string> = {
+  retracted: "the retraction",
+  superseded: "the replacement",
+  reviewed: "that ruling",
+};
+
+/** "the retraction", "the replacement", …, for a card's `retired_value.retirement`. */
+export function retiredRuling(retirement: string | null | undefined): string {
+  return RETIRED_RULINGS[retirement ?? ""] ?? "the earlier ruling";
+}
+
+/**
+ * The hint a retired-value card gives a gesture in place of the
+ * conflict wording, or undefined to keep the kind's own.
+ */
+export function retiredValueHint(gesture: string, ruling: string): string | undefined {
+  const hints: Record<string, string> = {
+    resolve: `Keep ${ruling}, or restore the claim.`,
+    snooze: "Decide later. Hides the card for a while; the restatement stays held.",
+  };
+  return hints[gesture];
 }
