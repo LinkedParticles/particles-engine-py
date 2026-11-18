@@ -43,8 +43,8 @@ with the façade:
 {
   "mcpServers": {
     "memory": {
-      "command": "uv",
-      "args": ["run", "--project", "/path/to/particles-engine-py",
+      "command": "uvx",
+      "args": ["--from", "linkedparticles",
                "particles", "memory", "serve"],
       "env": {
         "DATABASE_URL": "sqlite+aiosqlite:////path/to/memory.db",
@@ -58,6 +58,21 @@ with the façade:
 
 In VS Code the key is `servers` rather than `mcpServers`; everything else is
 identical.
+
+`uvx` ships with [uv](https://docs.astral.sh/uv/). It fetches the
+`linkedparticles` package from PyPI on first launch, caches it, and runs the
+`particles` command from it, the way `npx` runs the reference server. To serve
+from a checkout instead, use `"command": "uv"` with
+`"args": ["run", "--project", "/path/to/checkout", "particles", "memory", "serve"]`.
+Other commands on this page are written `particles …`: run each as
+`uvx --from linkedparticles particles …`, or put the command on your `PATH`
+once with `uv tool install linkedparticles`.
+
+The server never creates or migrates the store it opens. Create the store and
+opt it into writes before your client first launches the server
+([Setting it up from scratch](#setting-it-up-from-scratch)). Started on a
+missing store, one with no schema, or one behind the installed release, it
+exits before serving and prints the `db init` command that fixes it.
 
 !!! warning "Pin the paths for any unattended process"
     An MCP server is launched by your client and inherits almost nothing.
@@ -91,7 +106,7 @@ mcp:
 Create the store first:
 
 ```bash
-particles db init
+uvx --from linkedparticles particles db init
 ```
 
 ## Setting it up from scratch
@@ -106,8 +121,11 @@ YAML
 export PARTICLES_CONFIG=~/particles-memory/config.yaml
 export DATABASE_URL="sqlite+aiosqlite:///$HOME/particles-memory/memory.db"
 export PARTICLES_BLOB_DIR=~/particles-memory/blobs
-particles db init
+uvx --from linkedparticles particles db init
 ```
+
+Use the same three paths in the client entry's `env` block: the server reads
+the store and the write setting from them, not from your shell.
 
 A write-enabled store automatically reconciles in `multi` mode, so a
 contradiction between two claims is surfaced rather than silently resolved.

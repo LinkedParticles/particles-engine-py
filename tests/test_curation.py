@@ -1060,7 +1060,7 @@ class TestDuplicateVerdict:
         assert mock.await_args is not None
         assert mock.await_args.kwargs["mode"] is SuggestMode.LLM_JUDGE
 
-        dup = next(c for c in cards if c.kind is CardKind.DUPLICATE_PAIR)
+        dup = next(c for c in cards if c.kind is CardKind.DUPLICATE_GROUP)
         assert isinstance(dup.verdict, DuplicateVerdict)
         assert dup.verdict.verdict is JudgeVerdictKind.DISTINCT
 
@@ -1075,7 +1075,7 @@ class TestDuplicateVerdict:
         assert mock.await_args is not None
         assert mock.await_args.kwargs["mode"] is SuggestMode.REPORT
 
-        dup = next(c for c in cards if c.kind is CardKind.DUPLICATE_PAIR)
+        dup = next(c for c in cards if c.kind is CardKind.DUPLICATE_GROUP)
         assert dup.verdict is None
 
     @pytest.mark.asyncio
@@ -1089,7 +1089,7 @@ class TestDuplicateVerdict:
         with patch("particles.operations.curation.collect.suggest_co_evidential", mock):
             cards = await collect_cards(db_session, semantic=True)
 
-        dup = next(c for c in cards if c.kind is CardKind.DUPLICATE_PAIR)
+        dup = next(c for c in cards if c.kind is CardKind.DUPLICATE_GROUP)
         assert dup.verdict is not None
         assert dup.verdict.verdict is JudgeVerdictKind.UNSURE
 
@@ -1199,7 +1199,7 @@ class TestDuplicateVerdict:
         ):
             cards = await collect_cards(db_session, semantic=True)
 
-        dup = next(c for c in cards if c.kind is CardKind.DUPLICATE_PAIR)
+        dup = next(c for c in cards if c.kind is CardKind.DUPLICATE_GROUP)
         assert dup.verdict is not None
         assert dup.verdict.verdict is JudgeVerdictKind.DISTINCT
 
@@ -1374,6 +1374,128 @@ class TestConflictCards:
             "BOTH_VALID",
             "DISCARD",
         ]
+
+    @pytest.mark.asyncio
+    async def test_a_retired_value_card_asks_whether_the_retirement_stands(
+        self, db_session: AsyncSession
+    ) -> None:
+        # both claims usually read the same, so "which is right"
+        # asks nothing. The card names the retraction, its date and reason,
+        # and the two rulings instead.
+        from particles.core.conflict_resolution import RETIRED_VALUE_KEY
+        from particles.store.event_store import EventRefKind, record_event
+
+        text = "`pre-commit` is found by prefixing the venv to PATH."
+        a = _active(text, status=Status.RETRACTED, status_reason=StatusReason.EXPLICIT_RETRACTION)
+        b = _quarantined(text)
+        await _insert(db_session, a, b)
+        event = await record_event(
+            db_session,
+            actor="cli:particle-retract",
+            event_type=OperatorEventType.PARTICLE_RETRACTED,
+            reason="Superseded by the AGENTS.md rule forbidding the PATH prefix.",
+            refs=[(EventRefKind.PARTICLE, a.id)],
+        )
+        record = _inconsistency(a.id, b.id).model_copy(
+            update={"properties": {RETIRED_VALUE_KEY: "EXPLICIT_RETRACTION"}}
+        )
+        plain_a, plain_b = _active("port 7000"), _active("port 7001")
+        await _insert(db_session, record, plain_a, plain_b)
+        plain = _inconsistency(plain_a.id, plain_b.id)
+        await _insert(db_session, plain)
+
+        cards = await _conflict_cards(db_session)
+        card = cards[record.id]
+        assert card.retired_value is not None
+        assert card.retired_value.retirement == "retracted"
+        assert card.retired_value.retired_at == event.occurred_at
+        assert card.title == "Restated after retraction"
+        assert card.question == (
+            f"This claim was retracted on {event.occurred_at:%Y-%m-%d}, with the reason "
+            "“Superseded by the AGENTS.md rule forbidding the PATH prefix”. A later source "
+            "states it again, and the restatement is held for review. Keep the retraction, "
+            "or restore the claim?"
+        )
+        assert card.diagnostic.startswith("Restated after retraction: ")
+        help_text = describe_gesture(card, "resolve", snooze_days=7)
+        assert "PREFER_A keeps the retraction" in help_text
+        assert "PREFER_B restores the claim" in help_text
+        dumped = card.model_dump(mode="json")
+        assert dumped["title"] == "Restated after retraction"
+        assert dumped["retired_value"]["retirement"] == "retracted"
+
+        # An ordinary record keeps the generic wording.
+        other = cards[plain.id]
+        assert other.retired_value is None
+        assert (other.title, other.question) == KIND_TITLES[CardKind.INCONSISTENCY]
+        assert other.diagnostic.startswith("Open conflict: ")
+        # The sides are drawn from `conflict`; the note holds nothing more.
+        assert other.conflict_note == ""
+        assert describe_gesture(other, "resolve", snooze_days=7).startswith(
+            "Settle the conflict with --action"
+        )
+
+    @pytest.mark.asyncio
+    async def test_a_lost_review_is_dated_by_the_review_that_demoted_it(
+        self, db_session: AsyncSession
+    ) -> None:
+        # A DEFER of the hold itself also names claim A; it retired nothing,
+        # so the card reads the PREFER review that did.
+        from particles.core.conflict_resolution import RETIRED_VALUE_KEY
+        from particles.store.event_store import EventRefKind, record_event
+
+        a = _active(
+            "r A", status=Status.PROVENANCE_STALE, status_reason=StatusReason.CONFLICT_RESOLVED
+        )
+        b = _quarantined("r A")
+        await _insert(db_session, a, b)
+        for action, note in (("PREFER_B", "The other source is current"), ("DEFER", "ask Sam")):
+            await record_event(
+                db_session,
+                actor="cli:review",
+                event_type=OperatorEventType.REVIEW_RESOLVED,
+                reason=note,
+                refs=[(EventRefKind.PARTICLE, a.id)],
+                payload={"action": action},
+            )
+        record = _inconsistency(a.id, b.id).model_copy(
+            update={"properties": {RETIRED_VALUE_KEY: "CONFLICT_RESOLVED"}}
+        )
+        await _insert(db_session, record)
+
+        card = (await _conflict_cards(db_session))[record.id]
+        assert card.retired_value is not None
+        assert card.retired_value.retirement == "reviewed"
+        assert card.retired_value.reason == "The other source is current"
+        assert card.title == "Restated after review"
+        assert card.question.endswith("Keep that ruling, or restore the claim?")
+
+    def test_retired_value_wording_follows_the_retirement(self) -> None:
+        from particles.operations.curation.cards import RetiredValueBrief
+
+        def card(brief: RetiredValueBrief) -> CurationCard:
+            return CurationCard(
+                kind=CardKind.INCONSISTENCY,
+                inconsistency_id="rec",
+                diagnostic="",
+                retired_value=brief,
+            )
+
+        replaced = card(
+            RetiredValueBrief(retirement="superseded", restated_by="https://example.org/notes")
+        )
+        assert replaced.title == "Restated after replacement"
+        assert replaced.question == (
+            "This claim was replaced. A restatement from https://example.org/notes is held "
+            "for review. Keep the replacement, or restore the claim?"
+        )
+        reviewed = card(RetiredValueBrief(retirement="reviewed"))
+        assert reviewed.title == "Restated after review"
+        assert reviewed.question.startswith("This claim lost a conflict review. ")
+        assert reviewed.question.endswith("Keep that ruling, or restore the claim?")
+        unknown = card(RetiredValueBrief())
+        assert unknown.title == "Restated after retirement"
+        assert unknown.question.endswith("Keep the earlier ruling, or restore the claim?")
 
     @pytest.mark.asyncio
     async def test_a_belief_in_two_records_gets_two_cards(self, db_session: AsyncSession) -> None:

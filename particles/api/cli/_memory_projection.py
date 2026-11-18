@@ -310,6 +310,7 @@ async def run_projection_cycle(
     harvested_text: str | None,
     *,
     project_roots: tuple[Path, ...] = (),
+    refuse_unharvested: bool = False,
 ) -> dict[str, Any]:
     """Render → splice the memory-index region after a successful harvest.
 
@@ -329,6 +330,11 @@ async def run_projection_cycle(
     store must never write its beliefs into a file every session in that
     project loads as facts about the user. ``project_roots`` names
     repositories whose project-scope install may also bind the directory.
+
+    ``refuse_unharvested`` is for a caller that harvests nothing first (the
+    ``particles project --splice`` verb): a region whose body differs
+    from the last render holds edits no harvest has deposited, so the cycle
+    returns ``{"skipped": "unharvested-region-edits"}`` and writes nothing.
     """
     from particles.api.cli._projection_git import new_run_id
     from particles.operations.projection import SpliceError, splice_region
@@ -405,6 +411,13 @@ async def run_projection_cycle(
         dirty = target is not None and (
             snapshot is None or target.body.strip("\n") != snapshot.strip("\n")
         )
+        if (
+            refuse_unharvested
+            and target is not None
+            and target.body.strip("\n") != (snapshot or "").strip("\n")
+        ):
+            # An empty region never rendered (the seeded pair) is not an edit.
+            return {"skipped": "unharvested-region-edits"}
 
         # Fold-and-archive (§7, default-on), gated per line: a
         # pointer folds only while the region just rendered shows a belief its
@@ -500,7 +513,7 @@ async def _maybe_commit(
 class DigestDecision:
     """What the SessionStart hook should inject."""
 
-    action: Literal["full", "skip", "diff"]
+    action: Literal["full", "skip", "diff", "degraded"]
     content: str | None = None
     #: The beliefs of the projected region the harness loaded, in the region's
     #: order: the sources-trailer ids. Empty when no region with
@@ -564,39 +577,16 @@ async def digest_decision(store: str, payload: dict[str, Any]) -> DigestDecision
     engine renders it from this client's manifest. A render the
     engine refuses or fails raises, and the hook degrades that to ``full``.
     """
-    if not projection_enabled():
+    current = loaded_current_region(payload)
+    if current is None:
         return DigestDecision("full")
-
-    # The file Claude Code loaded is the repository's, which in a linked
-    # worktree is not the one beside the transcript.
-    memory_dir = resolve_session_project(payload).memory_dir
-    if memory_dir is None:
-        return DigestDecision("full")
-    _present, raw = _read_memory_md(memory_dir / "MEMORY.md")
-    if raw is None:
-        return DigestDecision("full")
-
-    text = raw.decode("utf-8", errors="replace")
-    region = next((r for r in find_projected_regions(text) if r.region == MEMORY_REGION), None)
-    if region is None:
-        return DigestDecision("full")
-    loaded_ids = parse_sources_trailers(region.body)
-    if loaded_ids is None:
-        return DigestDecision("full")
-    # The trailer vouches for the region only while the region is the body the
-    # projection last rendered into this file. An edited region (or one with no
-    # recorded render) is not the store's view: push the full digest, and
-    # credit none of its bullets as shown (security review 2026-10-26-1, W34).
-    snapshot = load_projection_snapshots(memory_dir).get(MEMORY_REGION)
-    if snapshot is None or region.body.strip("\n") != snapshot.strip("\n"):
-        return DigestDecision("full")
-
+    memory_dir, region_body, loaded_ids = current
     # The harness loaded this region whatever is decided below, so every
     # decision from here on carries it.
-    loaded = loaded_beliefs(region.body, loaded_ids)
+    loaded = loaded_beliefs(region_body, loaded_ids)
     observer = observer_project_for(memory_dir.parent.name)
     fresh = await _render_region_body(store, observer)
-    if observer is not None and _observer_line(fresh) != _observer_line(region.body):
+    if observer is not None and _observer_line(fresh) != _observer_line(region_body):
         # The loaded region was rendered through another observer, or none: what
         # it shows is not this session's view, so a top-up over it would be
         # wrong. Push the whole scoped digest.
@@ -607,7 +597,7 @@ async def digest_decision(store: str, payload: dict[str, Any]) -> DigestDecision
     if fresh_ids == loaded_ids:
         return DigestDecision("skip", loaded=loaded)
 
-    loaded_lines = set(region.body.splitlines())
+    loaded_lines = set(region_body.splitlines())
     diff = [
         line for line in fresh.splitlines() if line.startswith("- ") and line not in loaded_lines
     ]
@@ -621,6 +611,54 @@ async def digest_decision(store: str, payload: dict[str, Any]) -> DigestDecision
         "its last render:_\n\n"
     )
     return DigestDecision("diff", content=header + "\n".join(diff) + "\n", loaded=loaded)
+
+
+def loaded_current_region(payload: dict[str, Any]) -> tuple[Path, str, set[str]] | None:
+    """``(memory dir, region body, trailer ids)`` of the region the session loaded, if current.
+
+    Current means the region the projection last rendered into the file Claude
+    Code loaded, unedited, with a parseable sources trailer. ``None`` when the
+    projection is off, there is no such region, or it was edited. Reads files
+    only, no store, so a SessionStart short of time can still ask it.
+    """
+    if not projection_enabled():
+        return None
+    # The file Claude Code loaded is the repository's, which in a linked
+    # worktree is not the one beside the transcript.
+    memory_dir = resolve_session_project(payload).memory_dir
+    if memory_dir is None:
+        return None
+    _present, raw = _read_memory_md(memory_dir / "MEMORY.md")
+    if raw is None:
+        return None
+    text = raw.decode("utf-8", errors="replace")
+    region = next((r for r in find_projected_regions(text) if r.region == MEMORY_REGION), None)
+    if region is None:
+        return None
+    loaded_ids = parse_sources_trailers(region.body)
+    if loaded_ids is None:
+        return None
+    # The trailer vouches for the region only while the region is the body the
+    # projection last rendered into this file. An edited region (or one with no
+    # recorded render) is not the store's view: push the full digest, and
+    # credit none of its bullets as shown (security review 2026-10-26-1, W34).
+    snapshot = load_projection_snapshots(memory_dir).get(MEMORY_REGION)
+    if snapshot is None or region.body.strip("\n") != snapshot.strip("\n"):
+        return None
+    return memory_dir, region.body, loaded_ids
+
+
+def degraded_decision(payload: dict[str, Any]) -> DigestDecision | None:
+    """The decision when the freshness check ran out: keep a current loaded region.
+
+    ``None`` when the session loaded no current region, so the caller pushes
+    the full digest as before.
+    """
+    current = loaded_current_region(payload)
+    if current is None:
+        return None
+    _memory_dir, region_body, loaded_ids = current
+    return DigestDecision("degraded", loaded=loaded_beliefs(region_body, loaded_ids))
 
 
 def _read_memory_md(memory_md: Path) -> tuple[bool, bytes | None]:

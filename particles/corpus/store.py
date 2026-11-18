@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, aliased, mapped_column
 from sqlalchemy.orm.attributes import flag_modified
 
-from particles.core.observer_scope import UNATTRIBUTED_MARKER, project_keys
+from particles.core.observer_scope import REFERENCE_MARKER, UNATTRIBUTED_MARKER, project_keys
 from particles.core.schema import (
     ContributorRef,
     CorpusEntry,
@@ -31,6 +31,7 @@ from particles.core.schema import (
 )
 from particles.db import Base
 from particles.extraction.components import ComponentRecord
+from particles.host_identity import local_host_id
 
 log = logging.getLogger(__name__)
 
@@ -74,6 +75,26 @@ class CorpusEntryRow(Base):
     # *not* on the pydantic ``CorpusEntry`` model — it is read only by
     # ``particles.corpus.supersession`` at reconciliation time, never serialized.
     document_supersession_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # the host id (``particles.host_identity``) of the machine
+    # whose filesystem a ``file://`` URI-R names. An in-process deposit stamps
+    # this host's id, an HTTP deposit the presenting key's ``host_id``; the
+    # local refresh reads only entries of its own host. NULL ≡ unknown: read by
+    # no host until a deposit adopts the entry. Engine-internal like the column
+    # above: not on the ``CorpusEntry`` model, never serialised.
+    origin_host: Mapped[str | None] = mapped_column(String, nullable=True)
+    # the principal of the metered agent key (an agent key that is
+    # not a harvester's) whose deposits this entry holds. Set when such a
+    # deposit creates the entry or first lands on an unmarked entry of its
+    # own, never cleared; read only by the deposit cap and pass 1's share.
+    # NULL ≡ unmetered. Engine-internal: not on the ``CorpusEntry`` model.
+    metered_principal: Mapped[str | None] = mapped_column(String, nullable=True, index=True)
+    # ``"agent"`` when an agent principal's route wrote this entry
+    # (``particles.corpus.deposit_role``), so extracting it mints any new
+    # Subject provisional to ``deposited_by``. Set by the route from the
+    # authenticated caller, never from a request body, and never cleared.
+    # NULL for an operator's, a harvester's, and every pre-ADR entry.
+    # Engine-internal like the columns above: never serialised.
+    deposit_role: Mapped[str | None] = mapped_column(String, nullable=True)
 
     def to_model(self, snapshots: list[Snapshot] | None = None) -> CorpusEntry:
         return CorpusEntry(
@@ -462,20 +483,23 @@ async def snapshot_exists_by_hash(session: AsyncSession, content_hash: str) -> b
     return result.scalar_one_or_none() is not None
 
 
-async def get_entry_by_content_hash(session: AsyncSession, content_hash: str) -> CorpusEntry | None:
+async def get_entry_by_content_hash(
+    session: AsyncSession, content_hash: str, *, exclude_depositor: str | None = None
+) -> CorpusEntry | None:
     """Return the corpus entry with a ``RESPONSE`` snapshot holding ``content_hash``.
 
     ``ABSENT`` records never match: their digest is the empty
     body's, and an absence is not content an empty file could deduplicate onto.
     """
-    result = await session.execute(
-        select(SnapshotRow.entry_id)
-        .where(
-            SnapshotRow.content_hash == content_hash,
-            SnapshotRow.warc_record_type == WarcRecordType.RESPONSE.value,
-        )
-        .limit(1)
+    query = select(SnapshotRow.entry_id).where(
+        SnapshotRow.content_hash == content_hash,
+        SnapshotRow.warc_record_type == WarcRecordType.RESPONSE.value,
     )
+    if exclude_depositor is not None:
+        query = query.join(CorpusEntryRow, CorpusEntryRow.entry_id == SnapshotRow.entry_id).where(
+            CorpusEntryRow.deposited_by != exclude_depositor
+        )
+    result = await session.execute(query.limit(1))
     entry_id = result.scalar_one_or_none()
     if entry_id is None:
         return None
@@ -571,6 +595,23 @@ async def get_source_types_for_entries(
         ).all()
         source_types.update({entry_id: source_type for entry_id, source_type in rows})
     return source_types
+
+
+async def any_reference_entry(session: AsyncSession) -> bool:
+    """Whether any corpus entry carries the ``scope:reference`` marker.
+
+    The digest and the agent-memory region read their beliefs' scopes only
+    when one does, so a store with no marked entry renders exactly as before.
+    The match is on the JSON-quoted tag, which a stored list holds only as
+    that whole tag (a quote inside another tag is escaped), so one row is
+    enough.
+    """
+    row = await session.execute(
+        select(CorpusEntryRow.entry_id)
+        .where(CorpusEntryRow.tags_json.contains(json.dumps(REFERENCE_MARKER)))
+        .limit(1)
+    )
+    return row.first() is not None
 
 
 async def list_entry_tag_rows(session: AsyncSession) -> list[tuple[str, str | None, list[str]]]:
@@ -1246,6 +1287,10 @@ class PendingSnapshot:
     """The corpus entry's tags, for the pass-1 priority class."""
     absent: bool = False
     """An ``ABSENT`` record: processed after the pass's RESPONSE work."""
+    source_type: str | None = None
+    """The entry's source type, for the transcript order and budget class."""
+    metered_principal: str | None = None
+    """The metered agent principal the entry is counted against, for pass 1's share."""
 
     @property
     def waiting_since(self) -> datetime:
@@ -1325,6 +1370,8 @@ async def list_pending_snapshots_for_catchup(
                 SnapshotRow.extraction_attempts,
                 CorpusEntryRow.tags_json,
                 SnapshotRow.warc_record_type,
+                CorpusEntryRow.source_type,
+                CorpusEntryRow.metered_principal,
             )
             .join(CorpusEntryRow, CorpusEntryRow.entry_id == SnapshotRow.entry_id)
             .where(SnapshotRow.extraction_status == ExtractionStatus.PENDING.value)
@@ -1367,8 +1414,19 @@ async def list_pending_snapshots_for_catchup(
             owed_since=owed[str(entry_id)],
             tags=_parse_tags(tags_json),
             absent=record_type == WarcRecordType.ABSENT.value,
+            source_type=str(source_type) if source_type is not None else None,
+            metered_principal=str(metered) if metered is not None else None,
         )
-        for entry_id, snapshot_id, captured_at, attempts, tags_json, record_type in pending_rows
+        for (
+            entry_id,
+            snapshot_id,
+            captured_at,
+            attempts,
+            tags_json,
+            record_type,
+            source_type,
+            metered,
+        ) in pending_rows
     ]
     listed.sort(key=lambda p: (p.attempts, p.waiting_since, p.captured_at, p.snapshot_id))
     return listed
@@ -1735,22 +1793,31 @@ async def list_collapsed_snapshot_ids(session: AsyncSession) -> set[str]:
 
 
 async def list_refreshable_local_entries(session: AsyncSession) -> list[tuple[str, str]]:
-    """``(entry_id, uri_r)`` for every LAZY corpus entry with a ``file://`` URI-R.
+    """``(entry_id, uri_r)`` for every LAZY ``file://`` corpus entry of this host.
 
     The refresh pass's work list. The ``LAZY`` filter is the
     gate, reused deliberately: ``deposit_file`` defaults to ``NEVER``, so nothing
     already in a store starts refreshing on upgrade — an operator opts in per
     entry, which is the same operator promise mutability keys on.
 
+    Only entries whose ``origin_host`` is this host's id are listed:
+    another host's entry is never refreshed here, so it never takes a
+    place under ``local_refresh.max_entries`` either. A host with no usable id
+    lists nothing.
+
     Ordered oldest-entry-first so a capped run makes round-robin progress rather
     than re-checking the same head every night.
     """
+    host_id = local_host_id()
+    if host_id is None:
+        return []
     result = await session.execute(
         select(CorpusEntryRow.entry_id, CorpusEntryRow.uri_r)
         .where(
             CorpusEntryRow.fetch_policy == FetchPolicy.LAZY.value,
             CorpusEntryRow.uri_r.is_not(None),
             CorpusEntryRow.uri_r.startswith("file://"),
+            CorpusEntryRow.origin_host == host_id,
         )
         .order_by(CorpusEntryRow.created_at.asc())
     )

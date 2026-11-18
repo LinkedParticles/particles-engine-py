@@ -52,6 +52,24 @@ def keys_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[Path
 
 
 @pytest.fixture
+def no_installed_hooks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """An account with no Particles hooks installed: an empty ``HOME``, a cwd outside any repo.
+
+    The doctor's ``engine:`` line judges this shell's key only when the
+    installed hooks pin none (``hook._token_pins``), and it finds the hooks in
+    ``~/.claude/settings.json`` and the cwd repository's project settings. A
+    test that reads the real ones passes or fails with the account running it.
+    """
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.chdir(work)
+    return home
+
+
+@pytest.fixture
 def engine(
     cli_db: Path, keys_file: Path, monkeypatch: pytest.MonkeyPatch
 ) -> Generator[TestClient, None, None]:
@@ -82,6 +100,8 @@ def _bearer(token: str) -> dict[str, str]:
 HOOK_ROOTS: dict[str, Any] = {
     "memory_roots": ["/home/u/.claude/projects"],
     "archive_roots": ["/home/u/.particles/claude-code/projects"],
+    # The client host the key deposits for, never the engine's.
+    "host_id": "0c1e7a5e-0000-4000-8000-00000000c11e",
 }
 
 
@@ -143,7 +163,10 @@ class TestMintingRules:
 class TestKeyFile:
     def test_no_secret_at_rest(self, keys_file: Path) -> None:
         token = _mint("agent", AGENT)
-        secret = token.rsplit("_", 1)[1]
+        # ptk_<role>_<id>_<secret>: the secret's alphabet includes "_", so
+        # split on the three fixed separators, never on the last one.
+        secret = token.split("_", 3)[3]
+        assert len(secret) == 43
         text = keys_file.read_text()
         assert secret not in text
         assert token not in text
@@ -583,6 +606,89 @@ class TestRateBuckets:
             assert spent.status_code == 200, spent.text
             assert attempt().status_code == 429, name
 
+    #: The agent writes that make no model call, each with a body the handler
+    #: refuses (400) or accepts: the bucket is spent before the handler runs.
+    _NO_MODEL_WRITES: dict[str, tuple[str, dict[str, Any]]] = {
+        "retract": ("/particles/retract", {"particle_id": "p-none", "reason": "r"}),
+        "link": ("/particles/link", {"particle_a": "p-a", "particle_b": "p-b"}),
+        "unlink": ("/particles/unlink", {"particle_a": "p-a", "particle_b": "p-b"}),
+        "tag": ("/particles/tag", {"particle_id": "p-none", "tags": ["t"]}),
+        "untag": ("/particles/untag", {"particle_id": "p-none", "tags": ["t"]}),
+        "useful": ("/memory/useful", {"particle_id": "p-none", "reason": "r"}),
+    }
+
+    @pytest.mark.parametrize("route", sorted(_NO_MODEL_WRITES))
+    def test_each_no_model_write_spends_from_the_write_bucket(
+        self, engine: TestClient, route: str
+    ) -> None:
+        """the six writes are held to api.write_rate_limit_per_minute."""
+        from particles.api._rate_limit import reset_rate_limiter
+        from particles.config import get_config
+
+        get_config().api.write_rate_limit_per_minute = 1
+        reset_rate_limiter()
+        path, body = self._NO_MODEL_WRITES[route]
+        token = _mint("agent", AGENT)
+        first = engine.post(path, json=body, headers=_bearer(token))
+        assert first.status_code != 429, first.text
+        second = engine.post(path, json=body, headers=_bearer(token))
+        assert second.status_code == 429, second.text
+        assert "api.write_rate_limit_per_minute" in second.json()["detail"]
+        # Another principal has its own write allowance.
+        other = engine.post(path, json=body, headers=_bearer(_mint("agent", OTHER_AGENT)))
+        assert other.status_code != 429, other.text
+
+    def test_the_write_bucket_shares_no_tokens_with_the_model_call_bucket(
+        self, engine: TestClient
+    ) -> None:
+        from particles.api._rate_limit import reset_rate_limiter
+        from particles.config import get_config
+
+        get_config().api.rate_limit_per_minute = 1
+        get_config().api.write_rate_limit_per_minute = 1
+        reset_rate_limiter()
+        token = _mint("agent", AGENT)
+        path, body = self._NO_MODEL_WRITES["tag"]
+
+        def tag() -> int:
+            return engine.post(path, json=body, headers=_bearer(token)).status_code
+
+        def deposit(text: str) -> int:
+            return engine.post(
+                "/particles/deposit", json={"text": text}, headers=_bearer(token)
+            ).status_code
+
+        # A spent model-call allowance leaves the tag its own token.
+        assert deposit("one") == 200
+        assert deposit("two") == 429
+        assert tag() != 429
+        # A spent write allowance leaves the deposit its own token.
+        reset_rate_limiter()
+        assert tag() != 429
+        assert tag() == 429
+        assert deposit("three") == 200
+
+    def test_an_operator_key_is_held_to_the_write_bucket(self, engine: TestClient) -> None:
+        from particles.api._rate_limit import reset_rate_limiter
+        from particles.config import get_config
+
+        get_config().api.write_rate_limit_per_minute = 1
+        reset_rate_limiter()
+        path, body = self._NO_MODEL_WRITES["useful"]
+        assert engine.post(path, json=body).status_code != 429
+        assert engine.post(path, json=body).status_code == 429
+
+    def test_a_zero_write_limit_disables_the_bucket(self, engine: TestClient) -> None:
+        from particles.api._rate_limit import reset_rate_limiter
+        from particles.config import get_config
+
+        get_config().api.write_rate_limit_per_minute = 0
+        reset_rate_limiter()
+        path, body = self._NO_MODEL_WRITES["tag"]
+        token = _mint("agent", AGENT)
+        for _ in range(5):
+            assert engine.post(path, json=body, headers=_bearer(token)).status_code != 429
+
     def test_bad_keys_never_touch_a_principals_bucket(self, engine: TestClient) -> None:
         from particles.api._rate_limit import reset_rate_limiter
         from particles.config import get_config
@@ -778,9 +884,28 @@ class TestWhoAmI:
             "project": "repo",
             "memory_roots": None,
             "archive_roots": None,
+            "host_id": None,
+            "rule_roots": None,
+            "global_rule_roots": None,
+            "belief_write_stores": ["default"],
         }
         legacy = engine.get("/auth/whoami").json()
         assert legacy["role"] == "operator" and legacy["key_id"] == "env"
+        assert legacy["belief_write_stores"] == ["default"]
+
+    def test_the_write_stores_follow_the_switch_and_the_role(self, engine: TestClient) -> None:
+        """A client reads which stores take its belief writes without a write."""
+        from particles.config import get_config
+
+        reader = _mint("reader", "someone-reading")
+        agent = _mint("agent", AGENT)
+        assert (
+            engine.get("/auth/whoami", headers=_bearer(reader)).json()["belief_write_stores"] == []
+        )
+        get_config().mcp.write.enabled_stores = []
+        assert (
+            engine.get("/auth/whoami", headers=_bearer(agent)).json()["belief_write_stores"] == []
+        )
 
     def test_a_keyed_engine_wants_a_key(self, engine: TestClient) -> None:
         bare = TestClient(engine.app, base_url="http://127.0.0.1:8000", client=("127.0.0.1", 1))
@@ -819,7 +944,7 @@ class TestTokenWarnings:
         assert "legacy PARTICLES_API_KEY (operator)" in line
 
     def test_the_doctor_warns_on_an_operator_key_in_the_hooks(
-        self, keys_file: Path, monkeypatch: pytest.MonkeyPatch
+        self, keys_file: Path, no_installed_hooks: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from particles.api.cli.hook import _engine_line
         from particles.config import reset_config
@@ -1491,7 +1616,7 @@ class TestDoctorRoleLabel:
     """W77 / W68: `hook doctor` names the role of the token it judges."""
 
     def test_doctor_engine_line_names_a_reader_key_as_a_reader(
-        self, keys_file: Path, monkeypatch: pytest.MonkeyPatch
+        self, keys_file: Path, no_installed_hooks: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         from particles.api.cli.hook import _engine_line
         from particles.config import reset_config
@@ -1980,3 +2105,445 @@ class TestUsefulCreditIsOperatorOnly:
         assert first["credit_key"].startswith("explicit:http:/memory/useful:")
         assert second["counted"] is False
         assert len(self._credits(pid)) == 1
+
+
+# --- Codex capture authority -------------------------------------------
+
+_CODEX_ID = "11111111-1111-4111-8111-111111111111"
+_CODEX_OTHER = "22222222-2222-4222-8222-222222222222"
+_CODEX_HOME_ID = "33333333-3333-4333-8333-333333333333"
+_CODEX_HOME = "/home/u/日本 codex"
+_CODEX_URI = f"codex://session/{_CODEX_ID}"
+_CODEX_PROJECT = "-home-u-example"
+
+
+def _capture_body(identity: str = _CODEX_ID) -> dict[str, Any]:
+    return {
+        "uri_r": f"codex://session/{identity}",
+        "codex_capture": {
+            "version": 1,
+            "session_id": identity,
+            "text": "## User\n\nSynthetic capture.\n\n",
+            "home_path": _CODEX_HOME,
+            "home_id": _CODEX_HOME_ID,
+            "launch_root": "/home/u/example",
+            "project_key": _CODEX_PROJECT,
+            "contract": "codex-conversation/1",
+            "started_at": "2026-11-08T00:00:00Z",
+            "raw_size": 400,
+            "raw_hash": "a" * 64,
+            "messages": [{"id": "message-one", "body_length": len("Synthetic capture.")}],
+            "expected_capture_id": None,
+        },
+    }
+
+
+def _capture_headers(token: str, *, home: str = _CODEX_HOME) -> dict[str, str]:
+    from urllib.parse import quote
+
+    return _bearer(token) | {
+        "X-Particles-Codex-Home-Id": _CODEX_HOME_ID,
+        "X-Particles-Codex-Home": quote(home),
+    }
+
+
+def _capture_key(**kwargs: Any) -> tuple[str, _keys.KeyRecord]:
+    return _keys.mint(Role.CODEX_CAPTURE, "codex-hook", reserved_ok=True, **kwargs)
+
+
+@pytest.mark.parametrize("reserved_ok", [True, False])
+@pytest.mark.parametrize("role", [Role.AGENT, Role.READER, Role.OPERATOR])
+def test_codex_name_requires_its_role(keys_file, role, reserved_ok) -> None:
+    from particles.config import get_config
+
+    if role is Role.OPERATOR:
+        get_config().curation.operator_identity = "codex-hook"
+    with pytest.raises(KeyRuleError, match="codex-capture"):
+        _keys.mint(role, "codex-hook", reserved_ok=reserved_ok)
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"memory_roots": ["/home/u/memory"]},
+        {"archive_roots": ["/home/u/archive"]},
+        {"rule_roots": ["/home/u/example"]},
+        {"global_rule_roots": ["/home/u/rules"]},
+        {"host_id": _CODEX_HOME_ID},
+    ],
+)
+def test_codex_file_metadata_is_refused_at_mint_and_lookup(keys_file, extra) -> None:
+    with pytest.raises(KeyRuleError):
+        _capture_key(**extra)
+    token, _ = _capture_key()
+    data = json.loads(keys_file.read_text())
+    data["keys"][0].update(extra)
+    keys_file.write_text(json.dumps(data))
+    _keys.reset_key_cache()
+    assert _keys.lookup(token) is None
+
+
+def test_codex_mismatched_roles_cannot_resolve_from_hand_edited_records(keys_file) -> None:
+    capture, _ = _capture_key()
+    ordinary = _mint("agent", AGENT)
+    data = json.loads(keys_file.read_text())
+    for item in data["keys"]:
+        item["principal"] = AGENT if item["role"] == "codex-capture" else "codex-hook"
+        item["reserved_ok"] = True
+    keys_file.write_text(json.dumps(data))
+    _keys.reset_key_cache()
+    assert _keys.lookup(capture) is None
+    assert _keys.lookup(ordinary) is None
+    with pytest.raises(KeyRuleError, match="codex-hook"):
+        _keys.mint(Role.CODEX_CAPTURE, AGENT, reserved_ok=True)
+    with pytest.raises(KeyRuleError, match="reserved-principal"):
+        _keys.mint(Role.CODEX_CAPTURE, "codex-hook")
+
+
+def test_capture_key_is_refused_at_every_protected_route_except_its_own(
+    engine, monkeypatch
+) -> None:
+    import re
+
+    from particles.api import auth
+    from particles.config import get_config
+
+    get_config().api.require_auth_for_reads = True
+    token, key = _capture_key()
+    headers = _bearer(token)
+    body = engine.get("/auth/whoami", headers=headers).json()
+    assert body["codex_capture_protocol"] == 1
+    assert (body["principal"], body["role"], body["key_id"]) == (
+        "codex-hook",
+        "codex-capture",
+        key.key_id,
+    )
+    monkeypatch.setattr(
+        "particles.db.write_lock", MagicMock(side_effect=AssertionError("took writer lock"))
+    )
+    exceptions = {auth._identity_gate, auth._text_deposit_gate, auth._codex_proof_gate}
+    for method, path, route in _routes():
+        gate = route.dependant.dependencies
+        if gate and gate[0].call in auth.GATE_DEPENDENCIES - exceptions:
+            target = re.sub(r"\{[^}]+\}", "default", path)
+            response = engine.request(method, target, headers=headers)
+            assert response.status_code == 403, (method, path, response.text)
+
+    get_config().api.require_auth_for_reads = False
+    assert engine.get("/corpus", headers=headers).status_code == 200
+    assert (
+        engine.get("/corpus", headers=headers | {"Sec-Fetch-Site": "cross-site"}).status_code == 403
+    )
+    assert engine.get("/digest/default", headers=headers).status_code == 403
+
+
+def test_codex_namespace_refusals_never_take_the_writer_lock(engine, monkeypatch) -> None:
+    from pydantic import ValidationError
+
+    from particles.api.app import DepositTextRequest
+
+    capture, _ = _capture_key(project=_CODEX_PROJECT)
+    claude = _mint("agent", HOOK, reserved_ok=True, **HOOK_ROOTS)
+    audit = _mint("agent", "audit", reserved_ok=True, **HOOK_ROOTS)
+    reader = _mint("reader", "viewer")
+    monkeypatch.setattr(
+        "particles.db.write_lock", MagicMock(side_effect=AssertionError("took writer lock"))
+    )
+    path = "/corpus/deposit/text"
+    envelope = _capture_body()
+    # A legacy schema (before the union) has no top-level text to parse.
+    with pytest.raises(ValidationError, match="Field required"):
+        DepositTextRequest.model_validate(envelope)
+    for token in (claude, audit, reader, TEST_ENGINE_KEY):
+        headers = _bearer(token)
+        assert engine.post(path, json=envelope, headers=headers).status_code == 403
+        for uri in (_CODEX_URI, _CODEX_URI.upper(), " cO%64ex%3A//session/" + _CODEX_ID):
+            assert (
+                engine.post(
+                    path, json={"uri_r": uri, "text": "foreign"}, headers=headers
+                ).status_code
+                == 403
+            )
+        assert (
+            engine.get(
+                f"/corpus/codex-capture/{_CODEX_ID}", headers=_capture_headers(token)
+            ).status_code
+            == 403
+        )
+    for uri in (
+        "file:///home/u/.claude/projects/memory/file.md",
+        f"claude-code://session/{_CODEX_ID}",
+        f"{_CODEX_URI}?x=1",
+        f"{_CODEX_URI}#fragment",
+        f"{_CODEX_URI}/extra",
+        f"codex://user@session/{_CODEX_ID}",
+        f"codex://session:23/{_CODEX_ID}",
+        f"{_CODEX_URI}\n",
+    ):
+        assert (
+            engine.post(path, json=envelope | {"uri_r": uri}, headers=_bearer(capture)).status_code
+            == 400
+        )
+    assert engine.post(path, json={"text": "legacy"}, headers=_bearer(capture)).status_code == 403
+    assert (
+        engine.post(path, json=envelope | {"text": "mixed"}, headers=_bearer(claude)).status_code
+        == 422
+    )
+    assert engine.post("/corpus/deposit/url", json={"url": _CODEX_URI}).status_code == 403
+    assert (
+        engine.post(
+            "/corpus/deposit/file", files={"file": ("doc.txt", b"text")}, data={"tags": "codex"}
+        ).status_code
+        == 403
+    )
+    assert (
+        engine.post("/particles/deposit", json={"text": "foreign", "tags": ["codex"]}).status_code
+        == 403
+    )
+
+    for launch, project in ((None, None), ("/other", "-other")):
+        body = _capture_body()
+        body["codex_capture"].update(launch_root=launch, project_key=project)
+        assert engine.post(path, json=body, headers=_bearer(capture)).status_code == 403
+    malformed = engine.post(path, json=envelope | {"standing": True}, headers=_bearer(capture))
+    assert malformed.status_code == 422
+    assert "Synthetic capture" not in malformed.text and _CODEX_HOME not in malformed.text
+
+
+def test_codex_engine_capture_and_proof_continuity(engine) -> None:
+    capture, record = _capture_key(project=_CODEX_PROJECT)
+    other_project, _ = _capture_key(project="-other")
+    replacement, _ = _capture_key(project=_CODEX_PROJECT)
+    write = "/corpus/deposit/text"
+    read = f"/corpus/codex-capture/{_CODEX_ID}"
+    body = _capture_body()
+    payload = body["codex_capture"]
+    payload["prefix"] = {"byte_offset": 400, "ordinal": 2, "sha256": "a" * 64}
+    assert engine.get(read, headers=_capture_headers(capture)).status_code == 404
+    response = engine.post(write, json=body, headers=_bearer(capture))
+    assert response.status_code == 200, response.text
+    first = response.json()
+    head_response = engine.get(read, headers=_capture_headers(capture))
+    assert head_response.headers["cache-control"] == "no-store"
+    head = head_response.json()["manifest"]
+    assert head["snapshot_id"] == first["snapshot_id"]
+    assert "Synthetic capture" not in head_response.text
+    assert (
+        engine.get(read, headers=_capture_headers(capture, home="/home/u/moved")).status_code == 404
+    )
+    assert engine.get(read, headers=_capture_headers(other_project)).status_code == 404
+    for token, update, reason in (
+        (capture, {"home_path": "/home/u/moved"}, "codex_home_moved"),
+        (capture, {"home_id": _CODEX_OTHER}, "codex_home_moved"),
+        (
+            other_project,
+            {"launch_root": "/other", "project_key": "-other"},
+            "capture_binding_changed",
+        ),
+    ):
+        refusal = engine.post(
+            write, json=body | {"codex_capture": payload | update}, headers=_bearer(token)
+        )
+        assert refusal.status_code == 409 and refusal.json() == {"detail": reason}
+
+    boundary = engine.get(
+        read, headers=_capture_headers(capture), params={"byte_offset": 400, "ordinal": 2}
+    )
+    prefix = payload.pop("prefix")
+    assert boundary.json() == {"manifest": None, "prefix": prefix}
+    # Simulate a worker losing its credential before deposit and a later worker retrying.
+    _keys.revoke(record.key_id)
+    assert engine.post(write, json=body, headers=_bearer(capture)).status_code == 401
+    stale = engine.post(write, json=body, headers=_bearer(replacement))
+    assert stale.status_code == 409 and stale.json() == {"detail": "codex_capture_head_changed"}
+    payload.update(expected_capture_id=head["capture_id"], prior_raw_hash=payload["raw_hash"])
+    response = engine.post(write, json=body, headers=_bearer(replacement))
+    assert response.status_code == 200 and response.json() == first | {"unchanged": True}
+
+    previous_text = payload["text"]
+    for update in (
+        {"home_path": "/home/u/moved"},
+        {"text": "rewritten"},
+        {"text": previous_text + "Additional text without any more raw bytes."},
+        {"raw_hash": "c" * 64},
+        {"prior_raw_hash": "c" * 64},
+        {"messages": [payload["messages"][0] | {"id": "changed"}]},
+    ):
+        assert (
+            engine.post(
+                write, json=body | {"codex_capture": payload | update}, headers=_bearer(replacement)
+            ).status_code
+            == 409
+        )
+
+    payload.update(
+        raw_size=500,
+        raw_hash="b" * 64,
+        text=previous_text + "## Assistant\n\nAppend.\n\n",
+        messages=[*payload["messages"], {"id": "message-two", "body_length": len("Append.")}],
+    )
+    grown = engine.post(write, json=body, headers=_bearer(replacement))
+    assert grown.status_code == 200 and grown.json()["entry_id"] == first["entry_id"]
+    assert grown.json()["snapshot_id"] != first["snapshot_id"]
+    assert engine.post(write, json=body, headers=_bearer(replacement)).status_code == 409
+
+    # The child may refer to exactly the committed parent boundary.
+    child = _capture_body(_CODEX_OTHER)
+    child["codex_capture"]["parent"] = prefix | {"session_id": _CODEX_ID}
+    unverified = child["codex_capture"] | {
+        "parent": child["codex_capture"]["parent"] | {"ordinal": 3}
+    }
+    assert (
+        engine.post(
+            write, json=child | {"codex_capture": unverified}, headers=_bearer(replacement)
+        ).status_code
+        == 409
+    )
+    sibling = engine.post(write, json=child, headers=_bearer(replacement))
+    assert sibling.status_code == 200 and sibling.json()["entry_id"] != first["entry_id"]
+
+    generic = engine.post(write, json={"text": previous_text, "tags": ["project:other"]})
+    assert generic.status_code == 200 and generic.json()["entry_id"] != sibling.json()["entry_id"]
+    generic_again = engine.post(write, json={"text": previous_text, "tags": ["project:other"]})
+    assert generic_again.json()["entry_id"] == generic.json()["entry_id"]
+    for entry in _entries():
+        if entry.entry_id in {first["entry_id"], sibling.json()["entry_id"]}:
+            assert entry.deposited_by == "codex-hook"
+            assert set(entry.tags) == {"codex", f"project:{_CODEX_PROJECT}"}
+            assert entry.fetch_policy == "NEVER"
+
+
+def test_codex_engine_masks_text_and_hashes_before_storage(engine) -> None:
+    import hashlib
+
+    from particles.corpus.deposit import load_blob
+    from particles.extraction.day_marks import escape_mark_lines
+
+    token, _ = _capture_key(project=_CODEX_PROJECT)
+    write = "/corpus/deposit/text"
+    read = f"/corpus/codex-capture/{_CODEX_ID}"
+    body = _capture_body()
+    payload = body["codex_capture"]
+    first_turn = "日本\n\n## User\n\n## Assistant · 2026-11-08\nDB_PASSWORD=synthetic-password"
+    second_turn = "API_KEY=synthetic-token"
+    escaped = escape_mark_lines(first_turn)
+    heading = "## Assistant · 2026-11-09\n\n"
+    payload.update(
+        text=f"## User\n\n{escaped}\n\n{heading}{second_turn}\n\n",
+        messages=[
+            {"id": "message-one", "body_length": len(escaped)},
+            {"id": "message-two", "body_length": len(second_turn)},
+        ],
+    )
+    refusal = engine.post(
+        write,
+        json=body | {"codex_capture": payload | {"messages": [payload["messages"][0]]}},
+        headers=_bearer(token),
+    )
+    assert refusal.status_code == 409 and refusal.json() == {"detail": "invalid_capture_turns"}
+    assert engine.get(read, headers=_capture_headers(token)).status_code == 404
+    response = engine.post(write, json=body, headers=_bearer(token))
+    assert response.status_code == 200, response.text
+    head = engine.get(read, headers=_capture_headers(token)).json()["manifest"]
+    first_masked = first_turn.replace("synthetic-password", "[REDACTED]")
+    second_masked = "API_KEY=[REDACTED]"
+    stored = (
+        f"## User\n\n{escape_mark_lines(first_masked)}\n\n{heading}{second_masked}\n\n".encode()
+    )
+    assert head["text_hash"] == hashlib.sha256(stored).hexdigest()
+    assert load_blob(head["text_hash"]) == stored
+    assert head["messages"] == [
+        {"id": name, "body_hash": hashlib.sha256(masked.encode()).hexdigest()}
+        for name, masked in (("message-one", first_masked), ("message-two", second_masked))
+    ]
+    payload.update(expected_capture_id=head["capture_id"], prior_raw_hash=payload["raw_hash"])
+    repeated = engine.post(write, json=body, headers=_bearer(token))
+    assert repeated.status_code == 200
+    assert repeated.json() == response.json() | {"unchanged": True}
+
+
+def test_text_deposit_non_capture_keeps_standard_validation(engine) -> None:
+    response = engine.post("/corpus/deposit/text", json=["not a deposit object"])
+    assert response.status_code == 422
+    assert isinstance(response.json()["detail"], list)
+
+
+def test_codex_http_refuses_foreign_owned_uri_before_reuse(engine) -> None:
+    from particles.core.schema import Mutability
+    from particles.corpus.deposit import deposit_text_versioned
+    from particles.db import get_engine, session_scope
+
+    body = _capture_body()
+
+    async def seed() -> str:
+        try:
+            async with session_scope(write=True) as session:
+                entry_id, _, _ = await deposit_text_versioned(
+                    session,
+                    text=body["codex_capture"]["text"],
+                    uri_r=_CODEX_URI,
+                    source_type="CONVERSATION",
+                    mutability=Mutability.APPEND_ONLY,
+                    deposited_by=HOOK,
+                    tags=["claude-code"],
+                )
+                await session.commit()
+                return entry_id
+        finally:
+            await get_engine().dispose()
+
+    foreign_entry = asyncio.run(seed())
+    token, _ = _capture_key()
+    refusal = engine.post("/corpus/deposit/text", json=body, headers=_bearer(token))
+    assert refusal.status_code == 409 and refusal.json()["detail"] == "foreign_codex_entry"
+    assert (
+        engine.get(
+            f"/corpus/codex-capture/{_CODEX_ID}", headers=_capture_headers(token)
+        ).status_code
+        == 404
+    )
+    entries = _entries()
+    assert [(entry.entry_id, entry.deposited_by, entry.tags) for entry in entries] == [
+        (foreign_entry, HOOK, ["claude-code"])
+    ]
+
+
+def test_codex_unattributed_capture_stays_out_of_global_scope(engine) -> None:
+    from particles.config import get_config
+    from particles.core.observer_scope import classify_entry
+
+    get_config().observer_scope.harness_tags = ["claude-code"]
+    token, _ = _capture_key()
+    body = _capture_body()
+    body["codex_capture"].update(launch_root=None, project_key=None)
+    response = engine.post("/corpus/deposit/text", json=body, headers=_bearer(token))
+    assert response.status_code == 200, response.text
+    (entry,) = _entries()
+    assert not classify_entry(entry.tags, get_config().observer_scope.harness_tags).everywhere
+    assert "scope:unattributed" in entry.tags
+
+
+def test_strict_digest_confirms_scope_and_legacy_payload_stays_unchanged(engine) -> None:
+    from particles.api.cli._codex_runtime import initialize_empty_scope
+    from particles.db import get_engine
+
+    url = "/digest/default"
+    project = {"project": "example"}
+    default = engine.get(url, params=project)
+    assert default.status_code == 200
+    assert "observer_engaged" not in default.json()
+    response = engine.get(url, params={**project, "strict_scope": True})
+    assert response.status_code == 409
+    assert response.json() == {"detail": "project_scope_unavailable"}
+
+    async def mark() -> None:
+        try:
+            assert await initialize_empty_scope("default")
+        finally:
+            await get_engine().dispose()
+
+    asyncio.run(mark())
+    default = engine.get(url, params=project).json()
+    scoped = engine.get(url, params={**project, "strict_scope": True})
+    assert scoped.status_code == 200
+    assert scoped.json() == default | {"observer_engaged": True}

@@ -51,6 +51,8 @@ __all__ = [
     "RulingClaim",
     "RulingProbeVerdict",
     "RulingSubject",
+    "append_ruling",
+    "build_pair_ruling",
     "build_ruling",
     "load_rulings",
     "record_demotion_ruling",
@@ -63,8 +65,9 @@ RULINGS_FILENAME = "demotion-rulings.jsonl"
 #: The record format stamp. A reader skips a line under any other stamp.
 RULING_FORMAT = "particles.demotion-ruling/1"
 
-#: What the operator ruled: the replacement was right, or both claims hold.
-Ruling = Literal["replacement", "coexist"]
+#: What the operator ruled: the replacement was right, both claims hold, or
+#: the replacement was wrong, a ``particle restore --replacement wrong``.
+Ruling = Literal["replacement", "coexist", "rejected"]
 
 
 class RulingClaim(BaseModel):
@@ -171,6 +174,34 @@ async def build_ruling(
     if pair is None:
         return None
     retired, replacement = pair
+    return await build_pair_ruling(
+        session,
+        retired,
+        replacement,
+        ruling,
+        actor=actor,
+        store=store,
+        card_key=card.key,
+        now=now,
+    )
+
+
+async def build_pair_ruling(
+    session: AsyncSession,
+    retired: Particle,
+    replacement: Particle,
+    ruling: Ruling,
+    *,
+    actor: str,
+    store: str,
+    card_key: str,
+    now: datetime | None = None,
+) -> DemotionRuling:
+    """The record for one ruling on a ``(retired, replacement)`` pair.
+
+    ``card_key`` names where the ruling was made: a demotion card's key, or the
+    restore verb's own label. ``retired`` must carry its demotion reason.
+    """
     subjects: list[RulingSubject] = []
     for sid in retired.subject_ids:
         subject = await get_subject(session, sid)
@@ -182,7 +213,8 @@ async def build_ruling(
     rows = await verdicts_for_pair(
         session, content_hash(retired.content), content_hash(replacement.content)
     )
-    assert retired.status_reason is not None  # _split_pair requires one
+    if retired.status_reason is None:
+        raise ValueError(f"{retired.id} carries no demotion reason")
     return DemotionRuling(
         ruling=ruling,
         reason=retired.status_reason.value,
@@ -204,8 +236,26 @@ async def build_ruling(
         actor=actor,
         store=store,
         recorded_at=now or datetime.now(UTC),
-        card_key=card.key,
+        card_key=card_key,
     )
+
+
+def append_ruling(record: DemotionRuling) -> str | None:
+    """Append one ruling to the fixture file; the disclosure when it could not be written.
+
+    ``None`` on success or when recording is switched off
+    (``benchmark.record_demotion_rulings``). A failed write is logged and
+    disclosed, never raised: the gesture that made the ruling has succeeded.
+    """
+    if not get_config().benchmark.record_demotion_rulings:
+        return None
+    path = rulings_path()
+    try:
+        _append(record, path)
+    except OSError as exc:
+        log.warning("Could not record demotion ruling to %s: %s", path, exc)
+        return f"Could not record the benchmark fixture ({exc})."
+    return None
 
 
 def _append(record: DemotionRuling, path: Path) -> None:

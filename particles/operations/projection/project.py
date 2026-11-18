@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -124,6 +124,7 @@ async def _select_section_particles(
     use_embeddings: bool,
     observer_project: str | None = None,
     exclude_source_tags: Collection[str] = (),
+    reference_withheld_out: set[str] | None = None,
 ) -> list[Selected]:
     """Select a derived section's candidate particles under the current-truth filter.
 
@@ -192,6 +193,8 @@ async def _select_section_particles(
             apply_owner=True,
             # only the agent-memory region passes source tags to drop.
             exclude_source_tags=exclude_source_tags,
+            # and only it admits standing memory alone.
+            reference_withheld_out=reference_withheld_out,
         )
         for particle, _sim, eff in scored:
             if particle.id not in merged:
@@ -621,7 +624,13 @@ async def _synthesised_section_body(
     return body, True
 
 
-def _render_block(block: MechanicalBlock, base_dir: Path, *, allow_outside_paths: bool) -> str:
+def _render_block(
+    block: MechanicalBlock,
+    base_dir: Path,
+    *,
+    allow_outside_paths: bool,
+    block_texts: Mapping[str, str] | None = None,
+) -> str:
     """Read a mechanical block's hand-authored fragment, spliced verbatim.
 
     The path is resolved relative to the manifest's directory and must stay
@@ -630,8 +639,16 @@ def _render_block(block: MechanicalBlock, base_dir: Path, *, allow_outside_paths
     ``FileNotFoundError`` when the fragment is missing — a manifest must not
     reference a block that does not exist — and ``ManifestPathError`` or
     ``LocalReadRefused`` when the path is refused.
+
+    With ``block_texts`` the fragment is the text a client read and sent,
+    looked up by the block's own string, and nothing is read from disk: a key
+    is never a path here. The caller has checked that every
+    block has an entry.
     """
-    text = read_block_text(block.block, base_dir=base_dir, allow_outside=allow_outside_paths)
+    if block_texts is not None:
+        text = block_texts[block.block]
+    else:
+        text = read_block_text(block.block, base_dir=base_dir, allow_outside=allow_outside_paths)
     return text.strip() + "\n"
 
 
@@ -794,6 +811,8 @@ async def project_splice_body(
     observer_project: str | None = None,
     exclude_source_tags: Collection[str] = (),
     allow_outside_paths: bool = False,
+    reference_withheld_out: set[str] | None = None,
+    block_texts: Mapping[str, str] | None = None,
 ) -> ProjectionResult:
     """Render a manifest's *body* for splicing into a sentinel region.
 
@@ -802,6 +821,11 @@ async def project_splice_body(
     project's view of the store. ``exclude_source_tags`` drops
     every candidate held only by sources with one of those tags; the
     agent-memory region passes ``rule-file``, every other caller nothing.
+    ``reference_withheld_out`` makes every derived section admit
+    standing memory only and collects the ids left out as reference; only the
+    agent-memory region passes it. ``block_texts`` supplies each
+    mechanical block's text in place of the disk read; only a remote memory
+    render passes it.
 
     Like :func:`project_document` but tailored for the block-splice write mode:
     it omits the document banner (the host file is hand-authored) and, for a
@@ -821,7 +845,14 @@ async def project_splice_body(
 
     for section in manifest.sections:
         if isinstance(section, MechanicalBlock):
-            parts.append(_render_block(section, base_dir, allow_outside_paths=allow_outside_paths))
+            parts.append(
+                _render_block(
+                    section,
+                    base_dir,
+                    allow_outside_paths=allow_outside_paths,
+                    block_texts=block_texts,
+                )
+            )
             continue
         header = "" if single_section else f"## {section.title}\n\n"
         part, used, backrefs = await _derived_section_part(
@@ -833,6 +864,7 @@ async def project_splice_body(
             backrefs=backrefs,
             observer_project=observer_project,
             exclude_source_tags=exclude_source_tags,
+            reference_withheld_out=reference_withheld_out,
         )
         any_synth = any_synth or used
         parts.append(part)
@@ -854,6 +886,7 @@ async def _derived_section_part(
     backrefs: dict[str, str] | None,
     observer_project: str | None = None,
     exclude_source_tags: Collection[str] = (),
+    reference_withheld_out: set[str] | None = None,
 ) -> tuple[str | _BulletSectionPart, bool, dict[str, str] | None]:
     """Render one derived section for a splice body.
 
@@ -870,6 +903,7 @@ async def _derived_section_part(
         use_embeddings=synthesize and not bullets,
         observer_project=observer_project,
         exclude_source_tags=exclude_source_tags,
+        reference_withheld_out=reference_withheld_out,
     )
     if bullets:
         if backrefs is None:

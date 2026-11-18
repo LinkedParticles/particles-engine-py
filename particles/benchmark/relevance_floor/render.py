@@ -14,6 +14,7 @@ prints with its numerator and denominator; an empty denominator prints
 
 from __future__ import annotations
 
+from particles.benchmark.ceiling import render_stopped
 from particles.benchmark.rot.schema import Rate
 
 from .schema import RelevanceFloorReport
@@ -37,8 +38,10 @@ def render_report(report: RelevanceFloorReport) -> str:
     sample = (
         f" (sample limit {sel.sample_limit}, seed {sel.sample_seed})" if sel.sample_limit else ""
     )
+    stopped = report.stopped_at_ceiling
     lines = [
-        "Relevance-floor benchmark — the query gate on real questions",
+        ("INCOMPLETE (stopped at the spend ceiling): " if stopped is not None else "")
+        + "Relevance-floor benchmark — the query gate on real questions",
         f"  held-out set   {sel.heldout_questions} questions{sample} [{sources}]",
         f"                 fingerprint {sel.heldout_fingerprint}",
         f"  store          {sel.store_active_particles:,} ACTIVE particles",
@@ -83,6 +86,28 @@ def render_report(report: RelevanceFloorReport) -> str:
                 f"{_rate(sweep_row.refused_were_answerable):<26}"
                 f"{_rate(sweep_row.passed_were_unanswerable):<26}"
                 f"{_marker(sweep_row.floor, sel.configured_floor)}"
+            )
+
+    if stopped is not None:
+        lines += render_stopped(stopped)
+
+    if report.responder is not None:
+        resp = report.responder
+        lines += [
+            "",
+            "RESPONDER REFUSALS — the answer step's own marker, gate off (judged)",
+            f"  refused by the responder           {_rate(resp.refused).strip()}",
+            f"  answerable → refused ↓             {_rate(resp.answerable_refused).strip()}",
+            f"  refused that were answerable ↓     {_rate(resp.refused_were_answerable).strip()}",
+        ]
+        for name in sorted(
+            set(resp.answerable_refused_by_source) | set(resp.refused_were_answerable_by_source)
+        ):
+            lines.append(
+                f"    {name:<14} answerable → refused "
+                f"{_rate(resp.answerable_refused_by_source.get(name, Rate())).strip()}   "
+                "refused that were answerable "
+                f"{_rate(resp.refused_were_answerable_by_source.get(name, Rate())).strip()}"
             )
 
     if report.quality_notes:

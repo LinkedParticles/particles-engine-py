@@ -78,6 +78,27 @@ class TestHashChunk:
         assert _hash_chunk("a") != _hash_chunk("b")
 
 
+class TestChunkReferenceDay:
+    """a chunk dated by a day mark carries the day in its key and call."""
+
+    def test_no_day_keeps_the_key_it_always_had(self) -> None:
+        chunk = ChunkUnit(chunk_id="c", chunk_text="Some turns.")
+        assert chunk.prompt_hash == _hash_chunk("Some turns.")
+        assert chunk.reference(None) is None
+
+    def test_a_day_changes_the_key_and_the_reference(self) -> None:
+        from datetime import UTC, date, datetime
+
+        plain = ChunkUnit(chunk_id="c", chunk_text="Some turns.")
+        nine = ChunkUnit(chunk_id="c", chunk_text="Some turns.", reference_day=date(2026, 9, 9))
+        ten = ChunkUnit(chunk_id="c", chunk_text="Some turns.", reference_day=date(2026, 9, 10))
+        assert len({plain.prompt_hash, nine.prompt_hash, ten.prompt_hash}) == 3
+        assert nine.prompt_text == plain.prompt_text
+        start = datetime(2026, 9, 1, 8, tzinfo=UTC)
+        assert nine.reference(start) == datetime(2026, 9, 9, tzinfo=UTC)
+        assert plain.reference(start) == start
+
+
 class TestExtractWithCarryForward:
     @pytest.mark.asyncio
     async def test_cache_hit_skips_llm_and_records_carry_forward(self, db_session: Any) -> None:

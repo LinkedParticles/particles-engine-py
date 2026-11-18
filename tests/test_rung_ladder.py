@@ -95,6 +95,29 @@ class TestDispatch:
         assert settled.decided_by == RungStamp("b", "1")
         assert settled.trail == ((RungStamp("b", "1"), V.NO),)
 
+    def test_applies_is_asked_of_the_input(self) -> None:
+        only_x: Rung[Item, ContradictionVerdict] = Rung(
+            name="only_x",
+            version="1",
+            cost=CostClass.PURE,
+            decide=lambda _: V.YES,
+            applies=lambda item: item[0] == "x",
+        )
+        ladder = _ladder(only_x, _rung("b", V.NO, cost=CostClass.LOCAL))
+        assert settle(ladder, ("x", "y")).decided_by == RungStamp("only_x", "1")
+        assert settle(ladder, ("a", "y")).decided_by == RungStamp("b", "1")
+
+    def test_an_all_abstaining_run_keeps_its_trail_and_shadow(self) -> None:
+        """Both feed the run tally, which counts abstentions too."""
+        ladder = _ladder(
+            _rung("watch", V.YES, shadow=True),
+            _rung("guard", V.ABSTAIN, cost=CostClass.LOCAL),
+        )
+        settled = settle(ladder, ("a", "b"))
+        assert (settled.verdict, settled.decided_by) == (V.ABSTAIN, None)
+        assert settled.trail == ((RungStamp("guard", "1"), V.ABSTAIN),)
+        assert settled.shadow == ((RungStamp("watch", "1"), V.YES),)
+
     def test_a_shadow_rung_is_recorded_and_never_returned(self) -> None:
         ladder = _ladder(
             _rung("candidate", V.YES, shadow=True),
@@ -121,6 +144,22 @@ class TestConfirmation:
     def test_the_confirming_rung_replaces_the_provisional_verdict(self) -> None:
         settled = settle(self._ladder(V.YES, V.NO), ("a", "b"))
         assert (settled.verdict, settled.decided_by) == (V.NO, RungStamp("reading", "1"))
+
+    def test_the_confirmation_joins_the_trail(self) -> None:
+        settled = settle(self._ladder(V.YES, V.NO), ("a", "b"))
+        assert settled.trail == (
+            (RungStamp("probe", "1"), V.YES),
+            (RungStamp("reading", "1"), V.NO),
+        )
+
+    def test_a_confirmation_of_another_verdict_is_passed_over(self) -> None:
+        ladder = _ladder(
+            _rung("probe", V.YES, cost=CostClass.MODEL),
+            _rung("on_no", V.YES, cost=CostClass.MODEL, confirms=frozenset({"no"})),
+            _rung("on_yes", V.NO, cost=CostClass.MODEL, confirms=frozenset({"yes"})),
+        )
+        settled = settle(ladder, ("a", "b"))
+        assert (settled.verdict, settled.decided_by) == (V.NO, RungStamp("on_yes", "1"))
 
     def test_the_confirming_rung_runs_only_on_its_named_verdict(self) -> None:
         settled = settle(self._ladder(V.NO, V.YES), ("a", "b"))
@@ -159,6 +198,49 @@ class TestConfirmation:
         settled = settle(_ladder(_rung("probe", V.YES, cost=CostClass.MODEL), reading), ("a", "b"))
         assert (settled.verdict, settled.decided_by) == (V.ABSTAIN, RungStamp("reading", "1"))
         assert len(settled.trail) == 1
+
+    @staticmethod
+    def _split(name: str, verdict: V, sees: str) -> Rung[Item, ContradictionVerdict]:
+        return Rung[Item, ContradictionVerdict](
+            name=name,
+            version="1",
+            cost=CostClass.MODEL,
+            decide=lambda _: verdict,
+            applies=lambda item: item[0] == sees,
+            confirms=frozenset({"yes"}),
+        )
+
+    def test_two_confirmations_split_the_inputs_between_them(self) -> None:
+        """the passage rung, and the claim-text rung for the assertion door."""
+        ladder = _ladder(
+            _rung("probe", V.YES, cost=CostClass.MODEL),
+            self._split("passage", V.NO, sees="sourced"),
+            self._split("claim_text", V.YES, sees="asserted"),
+        )
+        sourced = settle(ladder, ("sourced", "b"))
+        assert (sourced.verdict, sourced.decided_by) == (V.NO, RungStamp("passage", "1"))
+        asserted = settle(ladder, ("asserted", "b"))
+        assert (asserted.verdict, asserted.decided_by) == (V.YES, RungStamp("claim_text", "1"))
+        assert len(asserted.trail) == 2
+
+    def test_only_one_confirmation_answers(self) -> None:
+        ladder = _ladder(
+            _rung("probe", V.YES, cost=CostClass.MODEL),
+            self._split("passage", V.YES, sees="a"),
+            self._split("claim_text", V.NO, sees="a"),
+        )
+        settled = settle(ladder, ("a", "b"))
+        assert (settled.verdict, settled.decided_by) == (V.YES, RungStamp("passage", "1"))
+        assert len(settled.trail) == 2
+
+    def test_no_confirmation_applying_leaves_the_verdict_unconfirmed(self) -> None:
+        ladder = _ladder(
+            _rung("probe", V.YES, cost=CostClass.MODEL),
+            self._split("passage", V.YES, sees="x"),
+            self._split("claim_text", V.YES, sees="y"),
+        )
+        settled = settle(ladder, ("a", "b"))
+        assert (settled.verdict, settled.decided_by) == (V.ABSTAIN, RungStamp("passage", "1"))
 
     def test_a_confirmation_sorted_before_its_target_is_rejected(self) -> None:
         # A pure confirmer of a model rung's YES would be passed before any
@@ -217,11 +299,44 @@ class TestStamps:
         assert guarded.decide(("missing", "x")) is V.ABSTAIN
         assert not annotation_is_current(None, "structurer@2")
 
+    def test_a_guarded_rung_keeps_the_rung_it_guards(self) -> None:
+        def decide(item: Item) -> ContradictionVerdict:
+            return V.NO if item[1] == "x" else V.YES
+
+        for inner in (
+            Rung(
+                name="comparator",
+                version="3",
+                cost=CostClass.NETWORK,
+                decide=decide,
+                applies=lambda item: item[0] != "skip",
+                confirms=frozenset({"yes"}),
+                endpoint=("example.org", 443),
+                content_keyed=False,
+            ),
+            Rung(name="watcher", version="4", cost=CostClass.LOCAL, decide=decide, shadow=True),
+        ):
+            guarded = stamp_guarded(
+                inner, abstain=V.ABSTAIN, stamp_of=lambda _: "structurer@2", current="structurer@2"
+            )
+            fields = ("name", "version", "cost", "applies", "confirms", "shadow", "endpoint")
+            for name in (*fields, "content_keyed"):
+                assert getattr(guarded, name) == getattr(inner, name), name
+            assert guarded.decide is not None
+            assert guarded.decide(("fresh", "x")) is V.NO
+            assert guarded.decide(("fresh", "y")) is V.YES
+
     def test_a_stamp_round_trips(self) -> None:
         stamp = RungStamp("duplicate_key", "1")
         assert RungStamp.parse(str(stamp)) == stamp
         with pytest.raises(ValueError):
             RungStamp.parse("no-version")
+
+    def test_a_stamp_splits_at_its_last_at_and_needs_both_halves(self) -> None:
+        assert RungStamp.parse("judge@v@2") == RungStamp("judge@v", "2")
+        for text in ("judge@", "@2"):
+            with pytest.raises(ValueError):
+                RungStamp.parse(text)
 
 
 @pytest.mark.asyncio

@@ -753,3 +753,22 @@ class TestSubjectIdsPropagation:
         )
         inc.subject_ids.append("mutated")
         assert existing.subject_ids == ["subj-1"]
+
+
+def test_a_retired_twin_with_no_status_reason_names_its_status() -> None:
+    """The record names how A was retired: its reason, else its status."""
+    from particles.core.conflict_resolution import RETIRED_VALUE_KEY
+
+    retired = _particle(content="retired").model_copy(
+        update={"status": Status.RETRACTED, "status_reason": None}
+    )
+    record = build_inconsistency_particle(
+        retired,
+        _particle(content="again"),
+        corpus_entry_id="e",
+        snapshot_id="s",
+        retired_twin=True,
+    )
+    assert record.properties is not None
+    assert record.properties[RETIRED_VALUE_KEY] == Status.RETRACTED.value
+    assert f"retired by judgment ({Status.RETRACTED.value})" in record.content

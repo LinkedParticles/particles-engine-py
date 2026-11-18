@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from particles.config import get_config
@@ -419,10 +421,10 @@ class TestBehaviouralPrefilter:
             "p-b": np.array([1.0, 0.0], dtype=np.float32),  # aligned with actions
         }
 
-        async def fake_embeddings(*a: object, **k: object) -> list[object]:
-            return [(b, vecs[b.id]) for b in beliefs if b.id in vecs]
+        async def fake_embeddings(_s: object, ids: list[str]) -> dict[str, object]:
+            return {pid: vecs[pid] for pid in ids if pid in vecs}
 
-        monkeypatch.setattr(um, "load_active_candidates", fake_embeddings)
+        monkeypatch.setattr(um, "load_candidate_vectors", fake_embeddings)
 
         kept, excluded, ranked = await _prefilter_behavioural_candidates(
             db_session,  # type: ignore[arg-type]
@@ -471,10 +473,10 @@ class TestBehaviouralPrefilter:
         monkeypatch.setattr("particles.embeddings.get_embedding_model", _FakeEmbeddingModel)
         beliefs = [_belief("p-none", "no embedding"), _belief("p-vec", "embedded")]
 
-        async def fake_embeddings(*a: object, **k: object) -> list[object]:
-            return [(beliefs[1], np.array([1.0, 0.0], dtype=np.float32))]
+        async def fake_embeddings(_s: object, ids: list[str]) -> dict[str, object]:
+            return {"p-vec": np.array([1.0, 0.0], dtype=np.float32)} if "p-vec" in ids else {}
 
-        monkeypatch.setattr(um, "load_active_candidates", fake_embeddings)
+        monkeypatch.setattr(um, "load_candidate_vectors", fake_embeddings)
 
         kept, excluded, ranked = await _prefilter_behavioural_candidates(
             db_session,  # type: ignore[arg-type]
@@ -585,10 +587,10 @@ class TestBehaviouralPrefilter:
         ]
         vecs = {"p-near": np.array([1.0, 0.0], dtype=np.float32)}
 
-        async def fake_embeddings(*a: object, **k: object) -> list[object]:
-            return [(b, vecs[b.id]) for b in actives if b.id in vecs]
+        async def fake_embeddings(_s: object, ids: list[str]) -> dict[str, object]:
+            return {pid: vecs[pid] for pid in ids if pid in vecs}
 
-        monkeypatch.setattr(um, "load_active_candidates", fake_embeddings)
+        monkeypatch.setattr(um, "load_candidate_vectors", fake_embeddings)
         get_config().utility.mining.behavioural_matching = True
         get_config().utility.mining.behavioural_candidate_limit = 1
 
@@ -793,3 +795,47 @@ def test_the_use_judge_is_its_own_purpose_defaulting_to_sonnet() -> None:
     llm.default = ProviderSelection(model="claude-haiku-5-5")
     llm.semantic_lint = ProviderSelection(model="claude-haiku-5-5")
     assert llm.for_purpose("use_judge").model == "claude-sonnet-5-5"
+
+
+class TestUnansweredMineKeepsCredit:
+    """a mine in which no group was answered leaves the session's events alone."""
+
+    @pytest.mark.asyncio
+    async def test_no_answer_keeps_and_an_answer_replaces(self, db_session: object) -> None:
+        from sqlalchemy import select
+
+        from particles.operations.utility_mining import (
+            MatcherGroup,
+            SessionMine,
+            record_session_mine,
+        )
+        from particles.store.particle_store import insert_particle
+        from particles.store.utility_store import UtilityEventRow, record_utility_events
+
+        s: Any = db_session
+        old, new = _belief("p-old", "Old rule"), _belief("p-new", "New rule")
+        for p in (old, new):
+            await insert_particle(s, p)
+        await record_utility_events(s, "sess", {"p-old": "literal"})
+        await s.commit()
+
+        async def credited() -> set[str]:
+            rows = (await s.execute(select(UtilityEventRow.particle_id))).scalars()
+            return set(rows)
+
+        group = MatcherGroup(basis="behavioural", beliefs=(new,), listing="x")
+        mine = SessionMine(
+            session_id="sess", nominated={}, candidates=2, groups=[group], truncated=False
+        )
+        result = await record_session_mine(s, mine, [None])
+        assert result.behavioural_calls == 0
+        assert await credited() == {"p-old"}  # no ruling: the earlier credit stands
+
+        judge_off = SessionMine(
+            session_id="sess", nominated={}, candidates=2, groups=[], truncated=False
+        )
+        await record_session_mine(s, judge_off, [])
+        assert await credited() == {"p-old"}  # the judge off plans no group: still no change
+
+        await record_session_mine(s, mine, ["[1]"])
+        assert await credited() == {"p-new"}  # a ruling replaces the session's mined events

@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
 
 from particles.core.schema import PolicyProvenance, SourceRef, SourceRefType, SourceTrustStatement
+from particles.corpus.harvest_marks import HARNESS_URI_SCHEMES as HARNESS_URI_SCHEMES
 from particles.db import Base
 from particles.store.event_store import OperatorEventType, record_event
 
@@ -105,14 +106,6 @@ class SourceTrustRow(Base):
     rationale: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     asserted_by: Mapped[str] = mapped_column(String, nullable=False)
-
-
-#: The URI schemes a harness's own deposits use (``claude-code://session/<id>``).
-#: Such a URI names no web host (its netloc is a path segment), so no domain
-#: row, the ``*`` "unknown domain" default among them, scores it. An explicit
-#: list, not "anything but http": a source under any other scheme is still
-#: scored as an unknown domain (security review of PR 1203, S1).
-HARNESS_URI_SCHEMES = frozenset({"claude-code"})
 
 
 def domain_rows_apply(uri_r: str) -> bool:

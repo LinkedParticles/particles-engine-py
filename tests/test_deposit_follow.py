@@ -212,6 +212,45 @@ class TestDepositFollowIntegration:
         assert target_uri == article_url
 
     @pytest.mark.asyncio
+    async def test_a_followed_link_inherits_its_parents_reference_marker(
+        self, db_session: Any
+    ) -> None:
+        """a child of a reference deposit is reference too."""
+        from particles.core.observer_scope import REFERENCE_MARKER
+        from particles.corpus.deposit import deposit_url
+        from particles.corpus.store import get_entry, get_entry_by_uri
+
+        article_url = "https://www.theatlantic.com/article-y"
+        reddit_url = "https://www.reddit.com/r/news/comments/def456/title/"
+        article_resp = _make_http_response(b"<html><body><p>body</p></body></html>")
+        with (
+            patch(
+                "particles.ingest.importers.reddit._fetch_thread",
+                AsyncMock(return_value=_reddit_link_post_blob(url=article_url)),
+            ),
+            patch("particles.corpus.deposit.particles_client") as mock_client_ctx,
+        ):
+            mock_client = AsyncMock()
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            mock_client.get = AsyncMock(return_value=article_resp)
+            mock_client.stream = MagicMock(return_value=_stream_cm(article_resp))
+            mock_client_ctx.return_value = mock_client
+            primary_entry_id, _ = await deposit_url(
+                db_session,
+                reddit_url,
+                deposited_by="test",
+                tags=[REFERENCE_MARKER],
+                follow_post_links=True,
+            )
+            await db_session.commit()
+
+        primary = await get_entry(db_session, primary_entry_id)
+        child = await get_entry_by_uri(db_session, article_url)
+        assert primary is not None and REFERENCE_MARKER in primary.tags
+        assert child is not None and REFERENCE_MARKER in child.tags
+
+    @pytest.mark.asyncio
     async def test_explicit_no_follow_overrides_default(self, db_session: Any) -> None:
         """``--no-follow-post-links`` wins over Reddit's
         ``DEFAULT_FOLLOW_POST_LINKS=True``."""

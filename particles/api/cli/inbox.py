@@ -27,6 +27,7 @@ from typing import Any
 import typer
 
 from particles.api.cli import app, run
+from particles.api.cli._remote import refuse_remote_sync
 from particles.api.cli._terminal import terminal_echo
 from particles.db import session_scope
 
@@ -85,6 +86,7 @@ def inbox_process_cmd(
     pending URL is deposited and the inbox line is rewritten in place
     with the resulting ``entry_id``.
     """
+    refuse_remote_sync("inbox process")
     path = _resolved_inbox_or_exit()
     summary = run(_process_once(path, deposited_by))
     _print_summary(summary)
@@ -104,6 +106,7 @@ def inbox_watch_cmd(
     Uses mtime to skip the file read when nothing has changed since
     the last poll, cheap enough to leave running in a terminal tab.
     """
+    refuse_remote_sync("inbox watch")
     from particles.config import get_config
 
     path = _resolved_inbox_or_exit()

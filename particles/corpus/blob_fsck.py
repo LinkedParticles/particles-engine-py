@@ -211,6 +211,7 @@ async def audit_blobs(
     session: AsyncSession,
     *,
     search_dirs: Sequence[Path] = (),
+    blob_dir: Path | None = None,
 ) -> FsckReport:
     """Stat every blob the store references; classify present / elsewhere / missing.
 
@@ -222,13 +223,17 @@ async def audit_blobs(
         session: Session for the store to audit. Never written.
         search_dirs: Additional directories to look in for strays. Explicit
             operator input only; nothing is inferred or discovered.
+        blob_dir: The blob directory to audit against, in place of the
+            configured one. ``db backup`` passes the copy's own, so the audit
+            of a copy never looks in the live store's directory.
 
     Returns:
         A :class:`FsckReport`. ``present`` / ``elsewhere`` / ``missing`` are
         disjoint and cover every distinct hash; ``rejected`` annotates the
         subset of ``missing`` where a wrongly-named file was found.
     """
-    blob_dir = resolve_store_adjacent_path(get_config().storage.blob_dir)
+    if blob_dir is None:
+        blob_dir = resolve_store_adjacent_path(get_config().storage.blob_dir)
     # A search dir that *is* the blob dir would report every present blob as a
     # stray of itself; dedupe on the resolved path so `--search $(blob_dir)` is
     # harmless rather than confusing.
@@ -245,7 +250,7 @@ async def audit_blobs(
 
     for ref in sorted(await _blob_refs(session), key=lambda r: r.content_hash):
         try:
-            home = blob_path(ref.content_hash)
+            home = blob_path(ref.content_hash, blob_dir=blob_dir)
         except ValueError:
             # A malformed hash can never be located or re-homed; it is missing
             # in the only sense that matters to the operator.

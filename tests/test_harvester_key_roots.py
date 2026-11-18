@@ -23,6 +23,9 @@ import pytest
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
+from particles.host_identity import local_host_id
+from tests._corpus_rows import CLIENT_HOST_ID
+
 MEMORY_ROOT = "/home/u/.claude/projects"
 ARCHIVE_ROOT = "/home/u/.particles/claude-code/projects"
 MEMORY_URI = f"file://{MEMORY_ROOT}/repo/memory/notes.md"
@@ -89,7 +92,9 @@ def _hook(**roots: Any) -> str:
     from particles.api import _keys
     from particles.api._keys import Role
 
-    return _keys.mint(Role.AGENT, "claude-code-hook", reserved_ok=True, **roots)[0]
+    return _keys.mint(
+        Role.AGENT, "claude-code-hook", reserved_ok=True, **{"host_id": CLIENT_HOST_ID, **roots}
+    )[0]
 
 
 def _rooted() -> str:
@@ -318,10 +323,12 @@ def test_the_doctor_names_a_client_root_the_hook_key_lacks(
 ) -> None:
     from particles.api.cli import hook
     from particles.api.cli._claude_code import local_harvest_roots
+    from particles.api.cli._thin_client import client_rule_roots
     from particles.api.client import http
     from particles.config import get_config
 
     memory, archive = local_harvest_roots()
+    rule_roots, global_rule_roots = client_rule_roots()
     monkeypatch.setattr(get_config().engine, "base_url", "http://engine.test:8000")
     monkeypatch.setenv("PARTICLES_ENGINE_TOKEN", "ptk_agent_0123456789ab_" + "A" * 43)
     monkeypatch.setattr(hook, "_hook_pinned_tokens", lambda: [])
@@ -332,6 +339,9 @@ def test_the_doctor_names_a_client_root_the_hook_key_lacks(
             "role": "agent",
             "memory_roots": memory if recorded == "same" else [MEMORY_ROOT],
             "archive_roots": archive,
+            "host_id": local_host_id(),
+            "rule_roots": rule_roots,
+            "global_rule_roots": global_rule_roots,
         }
 
     monkeypatch.setattr(http.HttpBackend, "whoami", _whoami)
@@ -343,21 +353,15 @@ def test_the_doctor_names_a_client_root_the_hook_key_lacks(
         assert "⚠" in line and memory[0] in line and "--memory-root" in line
 
 
-def test_the_install_prints_the_hook_key_command_for_a_remote_engine(
-    home: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from particles.api.cli import init
+def test_the_install_prints_the_hook_key_command_for_a_remote_engine(home: Path) -> None:
+    # A thin-client install names this client's roots in the hooks' key command.
     from particles.api.cli._claude_code import local_harvest_roots
-    from particles.config import get_config
+    from particles.api.cli._thin_client import HOOKS, keys_create_commands
 
-    result: dict[str, Any] = {"next_steps": []}
-    init._note_harvest_key_command(result)
-    assert result["next_steps"] == []
-    monkeypatch.setattr(get_config().engine, "base_url", "http://engine.test:8000")
-    init._note_harvest_key_command(result)
-    (step,) = result["next_steps"]
     memory, archive = local_harvest_roots()
+    step = keys_create_commands("mcp:claude-code", memory, archive)[HOOKS]
     assert f"--memory-root {memory[0]}" in step and f"--archive-root {archive[0]}" in step
+    assert "--principal claude-code-hook --reserved-principal" in step
 
 
 def test_startup_names_a_harvester_key_with_no_roots(

@@ -49,6 +49,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.core.duplicate_key import content_hash as norm_content_hash
 from particles.core.equivalence import co_evidential_components
+from particles.core.ladders import TextPair
+from particles.core.rung_ladder import CostClass, DuplicateVerdict, QuestionKind, Rung
 from particles.core.schema import (
     CandidateCluster,
     CoEvidentialCandidate,
@@ -73,6 +75,7 @@ from particles.extraction.polarity import is_non_asserted
 from particles.ingest.duplicate_judge import (
     DUPLICATE_VERDICT,
     JUDGE_TOKENS_PER_PAIR,
+    duplicate_judge_stamp,
     judge_key,
     judge_max_tokens,
     judge_prompt,
@@ -81,6 +84,7 @@ from particles.ingest.duplicate_judge import (
     run_judge,
     tally_judge,
 )
+from particles.ingest.ladder_shell import report as report_rung
 from particles.operations._scope import pair_scope_tier
 from particles.operations.candidate_pairs import enumerate_candidate_pairs, is_pair_eligible
 from particles.operations.version_guard import active_stamps, written_by_newer_minor
@@ -130,6 +134,8 @@ async def suggest_co_evidential(
     mode: SuggestMode = SuggestMode.REPORT,
     confirmed: bool = False,
     scope_particle_ids: frozenset[str] | None = None,
+    withhold: Rung[TextPair, DuplicateVerdict] | None = None,
+    actor: str = "links-suggest",
 ) -> SuggestReport:
     """Propose (and optionally resolve) co-evidential candidate pairs.
 
@@ -153,6 +159,14 @@ async def suggest_co_evidential(
             a judge pass cut short (circuit breaker, transient LLM
             failures) has verdicted the intra-harvest pairs before spending on
             coincidental cross-pairs. ``None`` = judge/apply store-wide.
+        withhold: a pure duplicate rung asked of every enumerated pair before
+            the judge. A pair it calls ``DIFFERENT`` is left out of
+            ``clusters`` and the total, and counted under the rung's stamp in
+            ``withheld`` and in the run's rung tally. Curation passes
+            :data:`~particles.core.ladders.IDENTIFIER_CROSS`; every other
+            caller passes ``None`` and sees the finder's full candidate set.
+        actor: interface entry-point recorded on the ``RELATION_ADDED``
+            event each ``APPLY`` link writes.
 
     Returns:
         A ``SuggestReport`` with one ``CandidateCluster`` per Subject that has
@@ -233,6 +247,10 @@ async def suggest_co_evidential(
 
     clusters: list[CandidateCluster] = []
     seen_pairs: set[frozenset[str]] = set()
+    if withhold is not None and (withhold.decide is None or withhold.cost > CostClass.LOCAL):
+        raise ValueError(f"withhold takes a pure or local rung; {withhold.stamp} is neither")
+    decide = withhold.decide if withhold is not None else None
+    withheld = abstained = 0
 
     for subject in subjects:
         particles_with_embs = by_subject.get(subject.id, [])
@@ -255,6 +273,11 @@ async def suggest_co_evidential(
             if pair_key in seen_pairs:
                 continue
             seen_pairs.add(pair_key)
+            if decide is not None:
+                if decide((pair.a.content, pair.b.content)) is DuplicateVerdict.DIFFERENT:
+                    withheld += 1
+                    continue
+                abstained += 1
             candidates.append(
                 CoEvidentialCandidate(
                     particle_a=pair.a.id, particle_b=pair.b.id, similarity=pair.similarity
@@ -276,6 +299,21 @@ async def suggest_co_evidential(
         total_candidates=sum(len(c.candidates) for c in clusters),
         warnings=warnings,
     )
+    if withhold is not None:
+        report.withheld = {str(withhold.stamp): withheld}
+        # an admitted pure rung writes no ledger row; its load is
+        # the run tally's to carry.
+        report_rung(
+            QuestionKind.DUPLICATE, "rungs", withhold.stamp, DuplicateVerdict.DIFFERENT, withheld
+        )
+        report_rung(
+            QuestionKind.DUPLICATE, "rungs", withhold.stamp, DuplicateVerdict.ABSTAIN, abstained
+        )
+        # A withheld pair's question is settled here; an abstained one goes on
+        # to the judge, which counts its own outcome.
+        report_rung(
+            QuestionKind.DUPLICATE, "settled", withhold.stamp, DuplicateVerdict.DIFFERENT, withheld
+        )
 
     if mode is SuggestMode.REPORT:
         return report
@@ -334,6 +372,11 @@ async def suggest_co_evidential(
 
     from particles.store.relation_store import create_relation
 
+    # RA3: each link is a model verdict that pools the pair at query time, so
+    # each records a RELATION_ADDED event naming the judge's rung and this
+    # run, the key that finds every link one APPLY wrote.
+    run_id = str(uuid.uuid4())
+    decided_by = str(duplicate_judge_stamp())
     applied = 0
     for candidate in paraphrases:
         await create_relation(
@@ -343,6 +386,9 @@ async def suggest_co_evidential(
             RelationType.CO_EVIDENTIAL,
             RelationCreatedBy.LLM_JUDGE,
             confidence=candidate.similarity,
+            actor=actor,
+            decided_by=decided_by,
+            run_id=run_id,
         )
         candidate.applied = True
         applied += 1
@@ -975,6 +1021,13 @@ def plan_unmerge_group(event: OperatorEvent, by_id: Mapping[str, Particle]) -> U
         survivor_id=survivor_id,
         survivor_status=survivor.status.value if survivor else None,
         content_hash=payload.get("content_hash"),
+        # A re-read merge wrote its edges under its own tag, and the event's
+        # basis says which, so a revert withdraws only that merge's edges.
+        relation_tag=(
+            RelationCreatedBy.REREAD_DUPLICATE
+            if payload.get("basis") == "reread_judged"
+            else RelationCreatedBy.EXACT_DUPLICATE
+        ),
     )
     for loser_id in listed:
         loser = by_id.get(loser_id)
@@ -1083,13 +1136,6 @@ async def unmerge_exact_duplicates(
         group = planned
         survivor_id = group.survivor_id
         restorable = list(group.restored_ids)
-        # a re-read merge wrote its edges under its own tag; the
-        # event's basis says which, so only this merge's own edges are dropped.
-        edge_tag = (
-            RelationCreatedBy.REREAD_DUPLICATE
-            if payload.get("basis") == "reread_judged"
-            else RelationCreatedBy.EXACT_DUPLICATE
-        )
 
         if dry_run:
             # The edge is only withdrawn alongside the copy it belongs to, so
@@ -1105,7 +1151,7 @@ async def unmerge_exact_duplicates(
                     survivor_id,
                     loser_id,
                     RelationType.CO_EVIDENTIAL,
-                    created_by=edge_tag,
+                    created_by=group.relation_tag,
                     actor=actor,
                 ):
                     group.relations_deleted += 1

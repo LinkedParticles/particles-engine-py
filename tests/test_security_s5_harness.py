@@ -16,7 +16,6 @@ model call.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import time
@@ -132,29 +131,19 @@ def test_the_deposited_transcript_masks_the_token(tmp_path: Path) -> None:
     assert _TOKEN not in text
 
 
-def test_the_utility_miner_receives_a_masked_transcript(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The transcript the SessionEnd hook hands the utility miner (whose judge sends action
-    lines to a model) carries no credential the deposit would have masked."""
-    import particles.operations.utility_mining as mining
-    from particles.api.cli.hook import _mine_utility
+def test_the_session_end_hook_hands_the_miner_nothing() -> None:
+    """The utility judge sends action lines to a model, so it must read only masked text.
 
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    seen: dict[str, Any] = {}
+    Since the SessionEnd hook mines nothing: consolidation's pass 5
+    mines the transcript the harvest deposited, which the control above shows is
+    masked. The hook module keeps no path to the miner.
+    """
+    import inspect
 
-    async def recorder(store: str, transcript: str, session_id: str, **_: Any) -> Any:
-        seen["transcript"] = transcript
+    import particles.api.cli.hook as hook
 
-        class _R:
-            literal = behavioural = candidates = literal_nominated = behavioural_calls = 0
-
-        return _R()
-
-    monkeypatch.setattr(mining, "mine_session_from_transcript", recorder)
-    asyncio.run(_mine_utility("default", _transcript(tmp_path), "s", "proj"))
-    assert "[tool: Bash" in seen["transcript"]
-    assert _TOKEN not in seen["transcript"]
+    assert not hasattr(hook, "_mine_utility")
+    assert "mine_session_from_transcript" not in inspect.getsource(hook)
 
 
 # --- R18 ---------------------------------------------------------------------

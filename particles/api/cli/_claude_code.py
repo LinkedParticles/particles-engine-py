@@ -28,22 +28,39 @@ import shlex
 import stat
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from particles.api.cli._project_identity import (
+    claude_project_slug as claude_project_slug,
+)
+from particles.api.cli._project_identity import (
+    enclosing_work_tree as enclosing_work_tree,
+)
+from particles.api.cli._project_identity import (
+    find_repository_root as find_repository_root,
+)
+from particles.api.cli._project_identity import (
+    observer_for_policy,
+    record_identity_root,
+    recorded_identity_roots,
+)
+from particles.api.cli._project_identity import (
+    repository_root as repository_root,
+)
 from particles.config import (
     StorageConfig,
     get_config,
-    is_broad_root,
     sqlite_file_path,
     user_config_path,
 )
 from particles.core import bounded_yaml
+from particles.corpus.harvest_marks import HARNESS_SOURCES
 from particles.corpus.redaction import redact_secrets as redact_secrets
-from particles.corpus.worktree import is_unlinked_git_file
+from particles.extraction.day_marks import escape_mark_lines, format_turn_heading, mark_days
 from particles.render.markdown import find_projected_regions
 from particles.url_safety import url_without_userinfo
 
@@ -108,120 +125,6 @@ class SessionProject:
     #: the launch directory (``resolved_from == "repository"``); ``None`` for a
     #: key read off a directory name, whose path is not known.
     root: Path | None = None
-
-
-def claude_project_slug(path: Path | str) -> str:
-    """The ``~/.claude/projects/`` directory name Claude Code derives from a path.
-
-    Every character outside ``[A-Za-z0-9]`` becomes ``-``. The platform does
-    not document the rule; :func:`resolve_session_project` therefore never
-    trusts it blindly — it only re-keys a session whose transcript directory
-    this function reproduces.
-    """
-    return re.sub(r"[^A-Za-z0-9]", "-", str(path))
-
-
-def repository_root(cwd: Path) -> Path:
-    """The root Claude Code keys auto-memory on for a session launched in ``cwd``.
-
-    Walks up to the nearest ``.git`` entry, reading files only — no ``git``
-    subprocess, because this runs inside the hook deadline. A ``.git``
-    *directory* marks the root. A ``.git`` *file* is a linked worktree or a
-    submodule: its ``gitdir:`` names the per-checkout git directory, and a
-    ``commondir`` file there (worktrees have one, submodules do not) names the
-    shared ``.git``, whose parent is the main checkout. With no ``.git``
-    anywhere, ``cwd`` is its own root.
-
-    The walk does not require ``cwd`` to exist: a worktree created under its
-    own repository (Claude Code's ``.claude/worktrees/``) still resolves after
-    it has been removed, which is the state a catch-up harvest finds it in.
-    Paths are normalised, never symlink-resolved, so the slug still matches
-    the string the platform saw.
-    """
-    return find_repository_root(cwd) or cwd
-
-
-def find_repository_root(cwd: Path) -> Path | None:
-    """:func:`repository_root`, or ``None`` when no ``.git`` entry is found at all."""
-    for candidate in (cwd, *cwd.parents):
-        dot_git = candidate / ".git"
-        if dot_git.is_dir():
-            return candidate
-        if dot_git.is_file():
-            # A linked ``.git`` file repeats another checkout's claim (Q26).
-            if not is_unlinked_git_file(dot_git):
-                return candidate
-            return _main_checkout_of(candidate, dot_git) or candidate
-    return None
-
-
-def enclosing_work_tree(path: Path) -> Path | None:
-    """The nearest directory above ``path``'s resolved file that holds a ``.git`` entry, if any.
-
-    Read as the local refresh reads a store: the resolved path, so a name that
-    links into a clone counts, and no further up than the home directory or
-    another broad root, so a dotfiles repository there does not claim every
-    file under home (security review 2026-10-27-1, W16).
-    """
-    for parent in Path(os.path.realpath(path)).parents:
-        if is_broad_root(parent):
-            break
-        if os.path.lexists(parent / ".git"):
-            return parent
-    return None
-
-
-def _main_checkout_of(checkout: Path, dot_git_file: Path) -> Path | None:
-    """The main checkout a linked worktree belongs to, or ``None`` if it is not one.
-
-    A ``.git`` file is a claim, so it is checked against git's own layout before
-    the checkout is keyed on another directory (security review 2026-10-24-2,
-    P22): its ``gitdir:`` must name ``<common>/worktrees/<name>``, that
-    directory's ``commondir`` must lead back to ``<common>``, ``<common>`` must
-    be a real git directory, and the worktree's ``gitdir`` back-pointer, which
-    ``git worktree add`` writes, must name this very ``.git`` file. A planted
-    chain (an unpacked archive, a co-tenant's directory) fails one of these and
-    the checkout is its own root. A ``.git`` file that is a symbolic or hard
-    link is refused before any of this (security review 2026-10-25-1, Q26).
-    """
-    try:
-        first_line = dot_git_file.read_text(encoding="utf-8", errors="replace").splitlines()[0]
-        if not first_line.startswith("gitdir:"):
-            return None
-        git_dir = Path(os.path.normpath(checkout / first_line[len("gitdir:") :].strip()))
-        common_file = git_dir / "commondir"
-        if not common_file.is_file():
-            return None  # a submodule: its own root
-        common = Path(os.path.normpath(git_dir / common_file.read_text(encoding="utf-8").strip()))
-        if not _is_registered_worktree(git_dir, common, dot_git_file):
-            return None
-    except (OSError, IndexError):
-        return None
-    # A bare-repository worktree has no main checkout to key on.
-    return common.parent if common.name == ".git" else None
-
-
-def _is_registered_worktree(git_dir: Path, common: Path, dot_git_file: Path) -> bool:
-    """Whether ``git_dir`` is a worktree ``common`` registered for ``dot_git_file``."""
-    if git_dir.parent.name != "worktrees" or git_dir.parent.parent != common:
-        return False
-    if not (common / "HEAD").is_file() or not (common / "objects").is_dir():
-        return False
-    back_file = git_dir / "gitdir"
-    if not back_file.is_file():
-        return False
-    raw = back_file.read_text(encoding="utf-8", errors="replace").strip()
-    back = Path(os.path.normpath(git_dir / raw))  # an absolute raw ignores git_dir
-    own = Path(os.path.normpath(dot_git_file.absolute()))
-    if back == own:
-        return True
-    # The same inode under another spelling of its path (case, a symlinked
-    # ancestor). Sound only because ``own`` is neither a symlink nor
-    # hard-linked, so that inode has no other name a planter could hold (Q26).
-    try:
-        return is_unlinked_git_file(own) and os.path.samefile(back, own)
-    except OSError:
-        return False
 
 
 def _recorded_cwds(transcript_path: Path) -> list[str]:
@@ -338,9 +241,7 @@ def observer_project_for(project_key: str) -> str | None:
     An empty key — a session whose project could not be
     resolved — is never an observer.
     """
-    if get_config().claude_code.observer_scope != "project" or not project_key:
-        return None
-    return project_key
+    return observer_for_policy(project_key, get_config().claude_code.observer_scope)
 
 
 def transcript_project_key(transcript: Path) -> str:
@@ -392,12 +293,54 @@ def canonical_project_key(slug: str, projects_root: Path) -> str:
     return _strip_worktree_infix(slug)
 
 
+def project_transcript_dirs(transcript_dir: Path, project_key: str) -> list[Path]:
+    """Every transcript directory whose sessions belong to ``project_key``.
+
+    Claude Code keeps each working directory's transcripts in a directory of
+    its own, so a linked worktree's directory rarely sees a second session,
+    and a transcript whose SessionEnd never ran there was swept by nothing.
+    The catch-up sweep reads every directory beside ``transcript_dir`` that
+    stands for the same project, by the rule :func:`canonical_project_key`
+    applies: a directory named like a Claude Code worktree stands for the
+    repository its name folds to, which needs no read and agrees with the
+    transcripts' launch directories; any other name is read through
+    :func:`canonical_project_key`. A directory named like another project's
+    worktree is never read. ``transcript_dir`` comes first; an empty key, or a
+    projects root that cannot be listed, leaves it alone. Symlinked
+    directories are skipped, so a link cannot pull another tree into the
+    sweep. Observer scope is not read: the sweep is a harvest.
+    """
+    if not project_key:
+        return [transcript_dir]
+    root = transcript_dir.parent
+    try:
+        children = sorted(root.iterdir())
+    except OSError:
+        return [transcript_dir]
+    found = [transcript_dir]
+    for child in children:
+        try:
+            if child == transcript_dir or child.is_symlink() or not child.is_dir():
+                continue
+        except OSError:
+            continue
+        name = child.name
+        folded = _strip_worktree_infix(name)
+        if folded != name:
+            matches = folded == project_key
+        else:
+            matches = name == project_key or canonical_project_key(name, root) == project_key
+        if matches:
+            found.append(child)
+    return found
+
+
 def _strip_worktree_infix(slug: str) -> str:
     return slug.split(_CLAUDE_WORKTREE_INFIX, 1)[0] if _CLAUDE_WORKTREE_INFIX in slug else slug
 
 
 _MEMORY_URI_RE = re.compile(r"/projects/(?P<slug>[^/]+)/memory/")
-_SESSION_URI_PREFIX = "claude-code://session/"
+_SESSION_URI_PREFIX = HARNESS_SOURCES["claude-code"].session_prefix
 #: The shape of a Claude Code session id (a UUID in practice). Nothing else is
 #: looked up, so an id cannot name a parent directory or widen the glob.
 _SESSION_ID_RE = re.compile(r"[0-9A-Za-z][0-9A-Za-z_-]*")
@@ -663,6 +606,11 @@ def state_dir() -> Path:
     return Path(get_config().claude_code.state_dir).expanduser()
 
 
+def session_end_spool_dir() -> Path:
+    """Where the SessionEnd hand-off leaves each ended session for the worker."""
+    return state_dir() / "session-end"
+
+
 def local_harvest_roots() -> tuple[list[str], list[str]]:
     """The directories this host's harvest writes from: ``(memory roots, archive roots)``.
 
@@ -800,10 +748,37 @@ def read_hook_log_tail(n: int) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class HandOff:
+    """How the installed SessionEnd command hands the session to the worker.
+
+    ``python`` runs the stdlib-only ``launcher`` in isolated mode; ``spool``
+    and ``log`` are the resolved spool directory and hook log.
+    """
+
+    python: str
+    launcher: str
+    spool: str
+    log: str
+
+
+def default_hand_off() -> HandOff:
+    """The hand-off this install writes: its own interpreter and launcher, resolved now."""
+    import sys
+
+    return HandOff(
+        python=str(Path(sys.executable).absolute()),
+        launcher=str((Path(__file__).parent / "_claude_launcher.py").resolve()),
+        spool=str(session_end_spool_dir().absolute()),
+        log=str(hook_log_path().absolute()),
+    )
+
+
 def build_hook_commands(
     command_base: str,
     store: str,
     env: Mapping[str, str] | None = None,
+    hand_off: HandOff | None = None,
 ) -> dict[str, str]:
     """The hook command strings for a given base + store handle.
 
@@ -813,13 +788,31 @@ def build_hook_commands(
     a leading ``env KEY=VALUE …`` prefix so the store the hook resolves is
     CWD-independent (see :func:`render_env_prefix`). An empty /
     absent ``env`` reproduces the original bare command exactly.
+
+    With ``hand_off``, SessionEnd runs the stdlib-only launcher, which spools
+    the payload and starts ``<command_base> hook session-end-worker`` detached;
+    the worker inherits the same ``env`` pins. Without it,
+    SessionEnd runs the harvest inline, as installs before did.
     """
     prefix = render_env_prefix(env)
+    session_end = f"{prefix}{command_base} hook session-end --store {store}"
+    if hand_off is not None:
+        q = shlex.quote
+        session_end = (
+            f"{prefix}{q(hand_off.python)} -I -S {q(hand_off.launcher)} "
+            f"--spool {q(hand_off.spool)} --log {q(hand_off.log)} "
+            f"-- {command_base} hook session-end-worker --store {store}"
+        )
     commands = {
         "SessionStart": f"{prefix}{command_base} hook session-start --store {store}",
-        "SessionEnd": f"{prefix}{command_base} hook session-end --store {store}",
+        "SessionEnd": session_end,
     }
     return commands
+
+
+def session_end_hands_off(command: str) -> bool:
+    """Whether an installed SessionEnd command hands off to the worker."""
+    return "hook session-end-worker" in command
 
 
 def render_env_prefix(env: Mapping[str, str] | None) -> str:
@@ -1050,6 +1043,34 @@ def _turn_parts(entry_type: str, content: Any) -> list[str]:
     return parts
 
 
+#: The distilled format's version (§ Composition point).
+#:
+#: * **1**: speaker turns under ``## User`` / ``## Assistant``, tool calls as
+#:   one-line summaries, no timestamps.
+#: * **2**: a turn whose UTC day is later than the day in force carries it,
+#:   ``## User · 2026-09-14``, and a body line shaped like such a heading is
+#:   escaped with a leading backslash. Nothing else changed. A transcript whose
+#:   turns all fall on its first day, with no body line shaped like a mark,
+#:   distills byte-identically under both versions, and for any transcript
+#:   ``reduce_marks(v2)`` is the version-1 text, which is what lets the
+#:   append-only delta read treat a first marked snapshot as an extension of an
+#:   unmarked one. The version is not stored: the text shows whether it
+#:   carries marks.
+DISTILLER_VERSION = 2
+
+
+def _record_timestamp(entry: dict[str, Any]) -> datetime | None:
+    """A transcript record's ``timestamp`` as an aware datetime, or ``None``."""
+    value = entry.get("timestamp")
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+
 def distill_transcript(
     jsonl_text: str,
     session_id: str | None = None,
@@ -1061,7 +1082,14 @@ def distill_transcript(
     to one-line summaries, tool results and thinking blocks dropped, malformed
     lines skipped. The output format is **stable input** for a future
     conversation-aware extractor (§ Composition point) — change it
-    only with a distiller version story.
+    only with a distiller version story (:data:`DISTILLER_VERSION`).
+
+    A turn whose UTC day is later than the day in force carries that day in
+    its heading. The day in force starts at the day of the
+    transcript's first timestamp, the instant :func:`transcript_started_at`
+    returns and the deposit records as the snapshot's date, so the first day's
+    turns carry no mark. It never moves backward, and a turn with no timestamp
+    keeps it. A line of a turn's own text shaped like a mark is escaped.
 
     A ``user`` record Claude Code marks ``isMeta`` is left out too: the
     harness injected it (a loaded skill's body, a local-command caveat, an
@@ -1072,6 +1100,7 @@ def distill_transcript(
     out: list[str] = []
     if session_id:
         out.append(f"# Claude Code session {session_id}")
+    day_in_force = None
     for raw_line in jsonl_text.splitlines():
         raw_line = raw_line.strip()
         if not raw_line:
@@ -1082,6 +1111,11 @@ def distill_transcript(
             continue
         if not isinstance(entry, dict):
             continue
+        stamp = _record_timestamp(entry)
+        day = stamp.astimezone(UTC).date() if stamp is not None else None
+        if day_in_force is None:
+            day_in_force = day
+            day = None
         entry_type = entry.get("type")
         if entry_type not in ("user", "assistant"):
             continue
@@ -1094,9 +1128,24 @@ def distill_transcript(
         if not parts:
             continue
         speaker = "User" if entry_type == "user" else "Assistant"
-        out.append(f"## {speaker}")
-        out.append("\n\n".join(parts))
+        mark = None
+        if day is not None and day_in_force is not None and day > day_in_force:
+            mark = day_in_force = day
+        out.append(format_turn_heading(speaker, mark))
+        out.append(escape_mark_lines("\n\n".join(parts)))
     return ("\n\n".join(out) + "\n") if out else ""
+
+
+def transcript_days(jsonl_text: str) -> list[date]:
+    """The UTC days a transcript's distilled turns fall on, in order.
+
+    The day of its first timestamp, then each day a mark names. These are the
+    days a ``session`` claim of the session may legitimately carry.
+    """
+    start = transcript_started_at(jsonl_text)
+    days = [start.astimezone(UTC).date()] if start is not None else []
+    days.extend(day for _, day in mark_days(distill_transcript(jsonl_text)))
+    return days
 
 
 def _is_particles_server(server: Any) -> bool:
@@ -1198,8 +1247,15 @@ def plan_mcp_registration(
     executable: str,
     env: Mapping[str, str],
     replace_config_pin: bool = False,
+    thin: bool = False,
 ) -> tuple[McpRegistration, McpRegistration | None] | None:
     """What ``init claude-code`` registers, as ``(wanted, replaced)``; ``None`` if unchanged.
+
+    ``thin`` (a thin-client install): when the registration pins
+    the wanted config, a ``DATABASE_URL`` it carries is dropped, since a server
+    with ``engine.base_url`` opens no local store, and the two token pins are
+    written as given (``PARTICLES_ENGINE_TOKEN`` empty, the token file's path),
+    which also replaces a key pinned there in plaintext.
 
     With no Particles server, a new ``particles`` entry runs this install's
     executable with the hooks' env pins. An existing one keeps its name and
@@ -1259,6 +1315,11 @@ def plan_mcp_registration(
         and new_env.get("PARTICLES_CONFIG") == wanted_config
     ):
         new_env["PARTICLES_ENGINE_BASE_URL"] = env["PARTICLES_ENGINE_BASE_URL"]
+    if thin and new_env.get("PARTICLES_CONFIG") == wanted_config:
+        new_env.pop("DATABASE_URL", None)
+        for key in ("PARTICLES_ENGINE_TOKEN", "PARTICLES_ENGINE_TOKEN_FILE"):
+            if key in env:
+                new_env[key] = env[key]
     args = current.args if current.bound else (*current.args, *PROJECT_OBSERVER_ARGS)
     if args == current.args and new_env == current.env:
         return None
@@ -1421,11 +1482,25 @@ def session_started_at(
     return None
 
 
+def session_turn_days(uri_r: str | None, projects_root: Path, *, flat: bool = False) -> list[date]:
+    """The UTC days a ``claude-code://session/<id>`` session's turns fall on.
+
+    :func:`transcript_days` of the transcript :func:`session_started_at` would
+    read; empty when the transcript is gone.
+    """
+    for transcript in session_transcripts(uri_r, projects_root, flat=flat):
+        try:
+            return transcript_days(transcript.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+    return []
+
+
 def transcript_started_at(jsonl_text: str) -> datetime | None:
     """The first ``timestamp`` a Claude Code transcript records, or ``None``.
 
     The session's start, which use mining reads exposure as of.
-    The distilled transcript keeps no timestamps, so this reads the raw JSONL.
+    The distilled transcript keeps only day marks, so this reads the raw JSONL.
     Malformed lines and unparseable values are skipped.
     """
     for raw_line in jsonl_text.splitlines():
@@ -1506,34 +1581,13 @@ def project_roots_path(key: str) -> Path:
 
 
 def recorded_project_roots(key: str) -> list[str]:
-    """The repository roots recorded for ``key``, sorted; ``[]`` when none or unreadable."""
-    if not _PROJECT_KEY_RE.fullmatch(key):
-        return []
-    try:
-        data = json.loads(project_roots_path(key).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return []
-    if not isinstance(data, list):
-        return []
-    return sorted({item for item in data if isinstance(item, str)})
+    """Legacy API for the cross-harness diagnostic root union."""
+    return recorded_identity_roots(key)
 
 
 def record_project_root(key: str, root: Path) -> list[str]:
-    """Add ``root`` to the roots recorded for ``key``; return the whole set, sorted.
-
-    A set union, never a removal: a repository that has since
-    moved stays listed, because the beliefs harvested from it still carry the
-    key. Two or more roots mean two repositories whose paths differ only in
-    punctuation share one key, and so one observer scope. The file is written
-    owner-only: it names the operator's repositories.
-    """
-    if not _PROJECT_KEY_RE.fullmatch(key):
-        return []
-    known = recorded_project_roots(key)
-    roots = sorted({*known, str(root)})
-    if roots != known:
-        write_private_text(project_roots_path(key), json.dumps(roots, indent=2) + "\n")
-    return roots
+    """Record a Claude root without granting any refresh/enrolment authority."""
+    return record_identity_root(key, root)
 
 
 def project_key_collision_note(key: str, roots: Sequence[str]) -> str:
@@ -1662,6 +1716,15 @@ def _pinned_config_engine_url(config_path: Path) -> str | None:
     engine = tree.get("engine") if tree is not None else None
     value = engine.get("base_url") if isinstance(engine, dict) else None
     return value if isinstance(value, str) else None
+
+
+def pinned_config_engine_url(config_path: Path) -> str | None:
+    """The ``engine.base_url`` a config file names, read from the file alone.
+
+    The installer's thin-client choice reads the file it pins, never this
+    process's environment, which may carry an inherited override.
+    """
+    return _pinned_config_engine_url(config_path)
 
 
 def _pinned_config_dsn(config_path: Path, handle: str) -> str | None:
@@ -2472,7 +2535,13 @@ def enable_memory_store_text(yaml_text: str, handle: str, dsn: str) -> str:
                     [f"{' ' * item}{handle}: {dsn}  {_INIT_MARKER_COMMENT}"],
                 )
 
-    # -- mcp.write.enabled_stores ------------------------------------------
+    lines = _with_enabled_store(lines, tree, handle)
+
+    return _verify("\n".join(lines) + "\n", expected)
+
+
+def _with_enabled_store(lines: list[str], tree: dict[str, Any], handle: str) -> list[str]:
+    """``lines`` with ``handle`` appended to ``mcp.write.enabled_stores`` (when absent)."""
     mcp = tree.get("mcp")
     write = mcp.get("write") if isinstance(mcp, dict) else None
     enabled = write.get("enabled_stores") if isinstance(write, dict) else None
@@ -2507,6 +2576,68 @@ def enable_memory_store_text(yaml_text: str, handle: str, dsn: str) -> str:
             else:
                 lines = _add_enabled_store_item(lines, write_idx, handle)
 
+    return lines
+
+
+def enable_write_store_text(yaml_text: str, handle: str) -> str:
+    """Append ``handle`` to ``mcp.write.enabled_stores`` only (a thin client).
+
+    A thin client's store lives on the engine, so no ``storage.stores`` entry
+    is written; the local MCP server still reads ``enabled_stores`` to decide
+    which write tools it offers. Same parse-preserve-append discipline as
+    :func:`enable_memory_store_text`.
+    """
+    tree = _parse_yaml_mapping(yaml_text)
+    expected = copy.deepcopy(tree)
+    write = expected.setdefault("mcp", {}).setdefault("write", {})
+    enabled = write.setdefault("enabled_stores", [])
+    if not isinstance(enabled, list):
+        raise ConfigEditError("mcp.write.enabled_stores is not a list")
+    if handle in enabled:
+        return yaml_text
+    enabled.append(handle)
+    lines = _with_enabled_store(yaml_text.splitlines(), tree, handle)
+    return _verify("\n".join(lines) + "\n", expected)
+
+
+def set_engine_base_url_text(yaml_text: str, url: str) -> str:
+    """Set ``engine.base_url`` to ``url`` in config.yaml text.
+
+    Replaces a plain ``base_url:`` line inside the ``engine:`` block, adds one
+    when the block has none, or appends the block. The value is written
+    double-quoted, and the result is verified by re-parse; any layout the
+    surgeon does not understand raises :class:`ConfigEditError`.
+    """
+    tree = _parse_yaml_mapping(yaml_text)
+    engine = tree.get("engine")
+    if engine is not None and not isinstance(engine, dict):
+        raise ConfigEditError("the 'engine:' section is not a mapping")
+    expected = copy.deepcopy(tree)
+    expected.setdefault("engine", {})["base_url"] = url
+    if tree == expected:
+        return yaml_text
+    quoted = json.dumps(url)
+    lines = yaml_text.splitlines()
+    if engine is None:
+        lines += ["", _INIT_MARKER_COMMENT, "engine:", f"  base_url: {quoted}"]
+    else:
+        engine_idx = _top_level_key_line(lines, "engine")
+        if engine_idx is None:
+            raise ConfigEditError("could not locate the 'engine:' block")
+        pattern = re.compile(r"^(\s+)base_url:(\s.*)?$")
+        found = None
+        for i in range(engine_idx + 1, _block_end(lines, engine_idx)):
+            if pattern.match(lines[i]):
+                found = i
+                break
+        if found is not None:
+            indent = _indent_of(lines[found])
+            lines[found] = f"{' ' * indent}base_url: {quoted}  {_INIT_MARKER_COMMENT}"
+        else:
+            child = _child_indent(lines, engine_idx, 2)
+            lines = _insert_after(
+                lines, engine_idx, [f"{' ' * child}base_url: {quoted}  {_INIT_MARKER_COMMENT}"]
+            )
     return _verify("\n".join(lines) + "\n", expected)
 
 

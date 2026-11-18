@@ -252,6 +252,13 @@ The check is a two-step ladder, so a sweep over a large vault stays cheap:
 
 There is no network involved: no DNS, no redirects, no SSRF surface.
 
+Only this host's files are checked. Each `file://` entry records the machine
+whose disk its path names, and an entry another machine deposited (a client
+whose hooks write to this engine) is never read here, even when the same path
+exists on this machine: `corpus refresh` counts those entries and leaves them to
+the machine that owns them. See
+[Remote engine → Files on the client stay the client's](remote-engine.md#files-on-the-client-stay-the-clients).
+
 !!! note "An unchanged mtime is a heuristic, not proof"
     Every ordinary editor, `git` operation, and formatter moves a file's mtime,
     and the comparison treats *any* difference (including one that moves

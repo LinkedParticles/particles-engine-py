@@ -6,6 +6,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Any
+
 import pytest
 
 from particles.core.duplicate_key import normalize_content
@@ -15,15 +18,18 @@ from particles.core.ladders import (
     GENERIC_GUARD,
     POPULATION_QUANTIFIER,
     NormalizedForms,
+    UpdatePair,
     candidate_ladder,
     contradiction_ladder,
     duplicate_key_rung,
+    restatement_ladder,
     update_ladder,
 )
 from particles.core.rung_ladder import (
     CandidateVerdict,
     ContradictionVerdict,
     CostClass,
+    QuestionKind,
     RungStamp,
     UpdateVerdict,
     settle,
@@ -142,11 +148,63 @@ class TestLadders:
         assert offered == ["adjudicability", "generic_guard", "duplicate_key"]
         assert run.settled().decided_by == RungStamp("duplicate_key", "2")
 
+    # Each case passes a factory, so the ladder is built inside the test rather
+    # than at collection.
+    @pytest.mark.parametrize(
+        ("build", "kind", "models"),
+        [
+            (
+                lambda: contradiction_ladder("p", "s"),
+                QuestionKind.CONTRADICTION,
+                {"contradiction_probe": "p", "second_reading": "s"},
+            ),
+            (
+                lambda: update_ladder("h"),
+                QuestionKind.UPDATE,
+                {"update_slot": "h", "update_slot_passage": "h", "update_slot_second": "h"},
+            ),
+            (lambda: candidate_ladder("j"), QuestionKind.ENTAILMENT, {"entailment_judge": "j"}),
+            (lambda: restatement_ladder("v"), QuestionKind.DUPLICATE, {"duplicate_judge": "v"}),
+        ],
+    )
+    def test_each_ladder_stamps_its_model_rungs_with_the_version_given(
+        self, build: Callable[[], Any], kind: QuestionKind, models: dict[str, str]
+    ) -> None:
+        """A model rung's stamp is what a verdict's ``decided_by`` records."""
+        ladder = build()
+        assert ladder.kind is kind
+        assert {r.name: r.version for r in ladder.rungs if r.cost is CostClass.MODEL} == models
+
     def test_the_update_ladder_confirms_changes_only(self) -> None:
         ladder = update_ladder("h")
-        second = ladder.rung("update_slot_second")
-        assert second.confirms == frozenset({UpdateVerdict.CHANGES.value})
-        assert second.cost is CostClass.MODEL
+        for name in ("update_slot_passage", "update_slot_second"):
+            rung = ladder.rung(name)
+            assert rung.confirms == frozenset({UpdateVerdict.CHANGES.value})
+            assert rung.cost is CostClass.MODEL
+
+    def test_only_the_passage_reading_is_not_content_keyed(self) -> None:
+        """The passage rung reads the pair's source passages as well as its two texts.
+
+        Two pairs with one text and different passages need not share its
+        verdict, so it may not be keyed on the texts alone. The second reading
+        sees the texts only.
+        """
+        ladder = update_ladder("h")
+        assert not ladder.rung("update_slot_passage").content_keyed
+        assert ladder.rung("update_slot_second").content_keyed
+
+    def test_a_sourced_pair_is_confirmed_on_its_passages(self) -> None:
+        """the claim-text confirmation is the assertion door's alone."""
+        ladder = update_ladder("h")
+        for sourced, name in ((True, "update_slot_passage"), (False, "update_slot_second")):
+            run = ladder.start(UpdatePair("A.", "B.", sourced=sourced))
+            first = run.next_rung()
+            assert first is not None and first.name == "update_slot"
+            run.record(first, UpdateVerdict.CHANGES)
+            confirm = run.next_rung()
+            assert confirm is not None and confirm.name == name
+            run.record(confirm, UpdateVerdict.CHANGES)
+            assert run.next_rung() is None
 
     def test_the_candidate_ladder_settles_on_the_pre_check_alone(self) -> None:
         ladder = candidate_ladder("j")

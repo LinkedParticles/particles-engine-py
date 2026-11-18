@@ -211,7 +211,9 @@ What holds today, and what does not:
   of a contradiction between sources of different trust) and return held
   claims to active; a document that declares it replaces another retires the
   claims of the one it names, within a collection an operator key can name;
-  each of these is recorded in the event log; and the beliefs it extracts are
+  when an operator applies `links suggest`, its paraphrase verdicts link two
+  claims as one, so a query shows the higher-ranked of the pair with their
+  pooled confidence; each of these is recorded in the event log; and the beliefs it extracts are
   written into Claude Code's `MEMORY.md`, which an agent with tools reads as
   instructions. The exporters write stored text, and the article prose the
   model writes, with its markup inert. An injection can distort claims, and a

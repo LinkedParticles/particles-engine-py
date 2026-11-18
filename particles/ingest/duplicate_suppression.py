@@ -192,15 +192,17 @@ IMPORTED_BY = "interchange-import"
 
 
 async def _status_came_with_a_bundle(session: AsyncSession, particle: Particle) -> bool:
-    """Whether ``particle``'s non-ACTIVE status is the one an import kept, not this store's.
+    """Whether ``particle``'s non-ACTIVE status is no judgment this store made about it.
 
-    An import keeps each unit's lifecycle status, so a bundle's
-    author chose it, and its reason names nobody's judgment here. Such a row
-    was stored non-ACTIVE and never left ACTIVE in this store, so it carries no
-    ``retired_at``; an imported claim this store later retired does (security
-    review 2026-10-31-3, AF3). A hold this store's reconciliation opened on an
-    imported unit is born the same way and is left out too: a re-assertion
-    then meets the claim the unit was held behind, and is held again there.
+    An import admits ACTIVE units only, and the rule reads
+    provenance, not status: the import's asserter and no ``retired_at``, so the
+    row never left ACTIVE in this store; an imported claim this store later
+    retired carries one (security review 2026-10-31-3, AF3). Two kinds of row
+    match. One is a row an import stored non-ACTIVE before, when a
+    bundle's author chose the status and its reason named nobody's judgment
+    here. The other is a hold this store's reconciliation opened on an
+    imported claim, born non-ACTIVE the same way: a re-assertion then meets
+    the claim the import was held behind, and is held again there.
     """
     return (
         particle.asserted_by == IMPORTED_BY and await get_retired_at(session, particle.id) is None

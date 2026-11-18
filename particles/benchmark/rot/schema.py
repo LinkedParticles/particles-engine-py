@@ -144,6 +144,8 @@ class RotWorld(BaseModel):
     #: SHA-256 over the canonical event log + session texts; pinned by the
     #: unit tests so a generator change cannot silently re-baseline reports.
     fingerprint: str = ""
+    #: The size profile: ``full`` or ``quick``.
+    profile: str = "full"
 
 
 class SlotState(BaseModel):
@@ -348,6 +350,8 @@ class RotRunSelection(BaseModel):
     seeds: list[int]
     days: int
     checkpoints: list[int]
+    #: The world's size profile; ``full`` on every earlier report.
+    profile: str = "full"
     top_k: int
     trust_policy: bool
     untrusted_domain_trust: float

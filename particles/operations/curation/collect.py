@@ -19,8 +19,16 @@ from datetime import UTC, datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import get_config
-from particles.core.schema import LintFinding, Particle, ProvenanceRefType, SuggestMode
-from particles.corpus.store import get_entry_uri_map
+from particles.core.equivalence import co_evidential_components
+from particles.core.ladders import IDENTIFIER_CROSS
+from particles.core.schema import (
+    LintFinding,
+    Particle,
+    ProvenanceRefType,
+    RelationType,
+    SuggestMode,
+)
+from particles.corpus.store import get_entry_uri_map, get_snapshot_captured_at
 from particles.operations.abstraction import pending_candidate_events
 from particles.operations.contradiction_disclosure import covered_pair_set
 from particles.operations.deposit_suggest import suggest_deposits
@@ -35,14 +43,17 @@ from particles.operations.rank_lift_monitor import (
 from particles.operations.reanchor import pending_unrestated_events
 from particles.operations.subject_relink import plan_gated_relink
 from particles.store.particle_store import get_particles_by_ids, get_recorded_demotions
+from particles.store.relation_store import get_all_relations
 
 from .cards import (
     CardKind,
     CurationCard,
+    DuplicateEdge,
     DuplicateVerdict,
     gestures_for,
 )
-from .suppression import dismissed_members, suppressed_keys
+from .duplicate_groups import ElectionKey, election_key, group_pairs, pair_withheld
+from .suppression import dismissed_members, group_rulings, suppressed_keys
 
 # Lint finding_type → the card kind it produces. Only per-record findings (those
 # carrying a particle_id) become cards; the rest of lint's INFO/aggregate
@@ -125,6 +136,7 @@ def _conflict_card(f: LintFinding) -> CurationCard:
         diagnostic=f.detail,
         suggested_gestures=gestures_for(CardKind.INCONSISTENCY),
         inconsistency_id=f.particle_id,
+        conflict_note=f.conflict_note,
     )
 
 
@@ -257,6 +269,7 @@ async def collect_cards(
     duplicate_mode: SuggestMode | None = None,
     contradiction_probe: ContradictionProbeControl | None = None,
     duplicate_scope_ids: frozenset[str] | None = None,
+    withheld: dict[str, int | None] | None = None,
 ) -> list[CurationCard]:
     """Gather every curation card from the existing finders.
 
@@ -284,6 +297,10 @@ async def collect_cards(
     ``LLM_JUDGE`` verdict pass is bounded to pairs touching this harvest. The
     audit sets it to harvest-scope the ``--judge`` cost; it is ``None`` (no
     bound) for ``particles curate`` and re-audits.
+
+    ``withheld``, when given, is filled with the duplicate candidate pairs each
+    withholding rung kept out of the queue, keyed by its stamp:
+    ``{"identifier_cross@1": 1160}``, or ``None`` for a rung switched off.
     """
     cards: list[CurationCard] = []
 
@@ -321,11 +338,19 @@ async def collect_cards(
         if duplicate_mode is not None
         else (SuggestMode.LLM_JUDGE if semantic else SuggestMode.REPORT)
     )
+    # the identifier-cross rung withholds a pair whose claims name
+    # different identifiers, before the judge and before grouping.
+    withhold = IDENTIFIER_CROSS if get_config().curation.identifier_cross.enabled else None
     suggest = await suggest_co_evidential(
-        session, mode=dup_mode, scope_particle_ids=duplicate_scope_ids
+        session, mode=dup_mode, scope_particle_ids=duplicate_scope_ids, withhold=withhold
     )
+    if withheld is not None:
+        withheld.update(suggest.withheld if withhold else {str(IDENTIFIER_CROSS.stamp): None})
+    # one card per connected group of the finder's pairs.
+    edges: list[DuplicateEdge] = []
+    subject_names: dict[str, str] = {}
     for cluster in suggest.clusters:
-        name = cluster.subject_name or cluster.subject_id
+        subject_names[cluster.subject_id] = cluster.subject_name or cluster.subject_id
         for c in cluster.candidates:
             verdict = (
                 DuplicateVerdict(
@@ -335,16 +360,16 @@ async def collect_cards(
                 if c.verdict is not None
                 else None
             )
-            cards.append(
-                CurationCard(
-                    kind=CardKind.DUPLICATE_PAIR,
-                    particle_ids=[c.particle_a, c.particle_b],
-                    subject_ids=[cluster.subject_id],
-                    diagnostic=f"Possible duplicate in '{name}' (similarity {c.similarity:.2f})",
-                    suggested_gestures=gestures_for(CardKind.DUPLICATE_PAIR),
+            edges.append(
+                DuplicateEdge(
+                    a=c.particle_a,
+                    b=c.particle_b,
+                    similarity=c.similarity,
+                    subject_id=cluster.subject_id,
                     verdict=verdict,
                 )
             )
+    cards.extend(await duplicate_group_cards(session, edges, subject_names=subject_names))
 
     # --- uncited URLs: undeposited-but-frequently-cited (already snooze-filtered) ---
     deposits = await suggest_deposits(session)
@@ -451,6 +476,80 @@ async def collect_cards(
         cards.append(refused)
 
     return cards
+
+
+async def duplicate_group_cards(
+    session: AsyncSession,
+    edges: list[DuplicateEdge],
+    *,
+    subject_names: Mapping[str, str] | None = None,
+) -> list[CurationCard]:
+    """Gather what :func:`group_pairs` decides over, then group.
+
+    A pair is withheld by a standing group ruling (§5) or by a standing
+    ruling on its old ``duplicate_pair:<a>|<b>`` key: a permanent dismissal,
+    or a snooze until it lapses.
+    """
+    if not edges:
+        return []
+    rulings = await group_rulings(session)
+    withheld = pair_withheld(await suppressed_keys(session), rulings)
+    linked = await linked_components(session)
+    ids = sorted({pid for e in edges for pid in (e.a, e.b)})
+    return group_pairs(
+        edges,
+        linked=linked,
+        withheld=withheld,
+        rank=await election_ranks(session, ids),
+        rulings=rulings,
+        subject_names=subject_names,
+    )
+
+
+async def linked_components(session: AsyncSession) -> dict[str, frozenset[str]]:
+    """Each linked claim's ``CO_EVIDENTIAL`` component, read once.
+
+    The finder's own reading of "already linked" (no confidence floor), so a
+    group never shows two members the finder would not pair.
+    """
+    return co_evidential_components(
+        await get_all_relations(session, RelationType.CO_EVIDENTIAL), 0.0
+    )
+
+
+async def election_ranks(session: AsyncSession, ids: list[str]) -> dict[str, ElectionKey]:
+    """Each claim's survivor-election key.
+
+    Subject-linked first, then the first reading: the earliest
+    capture among the snapshots its ``SOURCE`` refs cite, then
+    ``asserted_at`` and id. An id not in the store is left out.
+    """
+    particles = await get_particles_by_ids(session, ids)
+    snapshot_ids = {
+        r.snapshot_id
+        for p in particles.values()
+        for r in p.provenance
+        if r.type == ProvenanceRefType.SOURCE and r.snapshot_id
+    }
+    captured = {
+        sid: (at if at.tzinfo else at.replace(tzinfo=UTC))
+        for sid, at in (await get_snapshot_captured_at(session, snapshot_ids)).items()
+    }
+    out: dict[str, ElectionKey] = {}
+    for pid, p in particles.items():
+        reads = [
+            captured[r.snapshot_id]
+            for r in p.provenance
+            if r.type == ProvenanceRefType.SOURCE and r.snapshot_id in captured
+        ]
+        asserted = p.asserted_at if p.asserted_at.tzinfo else p.asserted_at.replace(tzinfo=UTC)
+        out[pid] = election_key(
+            pid,
+            subject_linked=bool(p.subject_ids),
+            first_read=min(reads) if reads else None,
+            asserted_at=asserted,
+        )
+    return out
 
 
 async def rank_lift_card(session: AsyncSession) -> CurationCard | None:

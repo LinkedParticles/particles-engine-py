@@ -41,6 +41,7 @@ import stat
 import sys
 import tempfile
 import time
+import uuid
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
@@ -48,14 +49,14 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 
-from particles.config import get_config
+from particles.config import get_config, is_broad_root
 from particles.core.observer_scope import (
     canonical_project_key,
     hides_a_character,
     lookalike_reason,
     names_a_project,
 )
-from particles.corpus.harvest_marks import HARVEST_DEPOSITORS
+from particles.corpus.harvest_marks import HARNESS_SOURCES, HARVEST_DEPOSITORS
 from particles.corpus.operator_only import (
     AclState,
     NodeFacts,
@@ -63,6 +64,7 @@ from particles.corpus.operator_only import (
     gather_write_facts,
     ownership_ignored,
 )
+from particles.host_identity import local_host_id
 
 log = logging.getLogger(__name__)
 
@@ -73,16 +75,22 @@ class Role(StrEnum):
     READER = "reader"
     AGENT = "agent"
     OPERATOR = "operator"
+    CODEX_CAPTURE = "codex-capture"
 
 
 #: The role's spelling in a key's prefix.
-ROLE_PREFIX: dict[Role, str] = {Role.READER: "read", Role.AGENT: "agent", Role.OPERATOR: "op"}
+ROLE_PREFIX: dict[Role, str] = {
+    Role.READER: "read",
+    Role.AGENT: "agent",
+    Role.OPERATOR: "op",
+    Role.CODEX_CAPTURE: "codex",
+}
 _PREFIX_ROLE = {prefix: role for role, prefix in ROLE_PREFIX.items()}
 
 #: What every per-client key starts with.
 KEY_PREFIX = "ptk_"
 
-_TOKEN = re.compile(r"^ptk_(read|agent|op)_([0-9a-f]{12})_([A-Za-z0-9_-]{43})$")
+_TOKEN = re.compile(r"^ptk_(read|agent|op|codex)_([0-9a-f]{12})_([A-Za-z0-9_-]{43})$")
 
 #: The longest a cached copy of the file is trusted without a re-read.
 _RELOAD_SECONDS = 10.0
@@ -126,6 +134,14 @@ class KeyRecord:
     #: URI; never empty.
     memory_roots: tuple[str, ...] | None = None
     archive_roots: tuple[str, ...] | None = None
+    #: A harvester key's client host id: the origin every
+    #: ``file://`` entry it deposits records. ``None`` names no ``file://`` URI.
+    host_id: str | None = None
+    #: A harvester key's client rule roots: each one project's
+    #: root, under which the key may push that project's rule files, and the
+    #: client's ``~/.claude``, whose two files directly in it are global.
+    rule_roots: tuple[str, ...] | None = None
+    global_rule_roots: tuple[str, ...] | None = None
 
     @property
     def live(self) -> bool:
@@ -416,6 +432,9 @@ def _parse(path: Path, raw: str) -> dict[str, KeyRecord]:
                     )
                 project = canonical_project_key(project)
             roots = {name: _parse_roots(item, name) for name in _ROOT_FIELDS}
+            host_id = item.get("host_id")
+            if host_id is not None and not isinstance(host_id, str):
+                raise ValueError(f"key {item.get('key_id')!r} has a host_id that is not a string")
             record = KeyRecord(
                 key_id=str(item["key_id"]),
                 principal=str(item["principal"]),
@@ -428,6 +447,9 @@ def _parse(path: Path, raw: str) -> dict[str, KeyRecord]:
                 reserved_ok=reserved_ok,
                 memory_roots=roots["memory_roots"],
                 archive_roots=roots["archive_roots"],
+                host_id=host_id,
+                rule_roots=roots["rule_roots"],
+                global_rule_roots=roots["global_rule_roots"],
             )
             out[record.key_id] = record
         return out
@@ -620,6 +642,8 @@ def record_rule_refusal(record: KeyRecord) -> str | None:
     principal = record.principal.strip()
     if not principal or principal != record.principal:
         return "has a blank or padded principal"
+    if _codex_role_mismatch(record.role, principal):
+        return "must pair the codex-capture role with the codex-hook principal"
     operator_identity = get_config().curation.operator_identity
     if record.role is Role.OPERATOR and principal != operator_identity:
         # check_mint gives every operator key the one operator principal; a
@@ -633,7 +657,7 @@ def record_rule_refusal(record: KeyRecord) -> str | None:
         return f"holds the operator's name {principal!r} under the {record.role.value} role"
     if principal == "api-user":
         return "holds the anonymous depositor label 'api-user'"
-    if record.project is not None and record.role is not Role.AGENT:
+    if record.project is not None and record.role not in {Role.AGENT, Role.CODEX_CAPTURE}:
         return f"binds a project under the {record.role.value} role"
     for name in _ROOT_FIELDS:
         roots = getattr(record, name)
@@ -649,6 +673,16 @@ def record_rule_refusal(record: KeyRecord) -> str | None:
                     return f"records {name} entry {root!r}, which is not in normalised form"
             except ValueError as exc:
                 return f"records {name} entry {root!r}: {exc}"
+    overlap = _rule_roots_overlap(
+        list(record.rule_roots or ()) + list(record.global_rule_roots or ())
+    )
+    if overlap is not None:
+        return f"records rule root {overlap[1]!r} under rule root {overlap[0]!r}"
+    if record.host_id is not None:
+        if not is_harvester(record.role, principal):
+            return "records a host_id under a key that is not a harvester's"
+        if normalised_host_id(record.host_id) != record.host_id:
+            return f"records host_id {record.host_id!r}, which is not a host id"
     return None
 
 
@@ -741,12 +775,20 @@ def reserved_principals() -> frozenset[str]:
     )
 
 
+def _codex_role_mismatch(role: Role, principal: str) -> bool:
+    return (role is Role.CODEX_CAPTURE) != (principal == HARNESS_SOURCES["codex"].depositor)
+
+
 def check_mint(role: Role, principal: str, project: str | None, *, reserved_ok: bool) -> None:
     """Refuse a key the rules forbid (rule 5, §4). Raises :class:`KeyRuleError`."""
     operator_identity = get_config().curation.operator_identity
     principal = principal.strip()
     if not principal:
         raise KeyRuleError("--principal must name the caller, e.g. mcp:claude-code")
+    if _codex_role_mismatch(role, principal):
+        raise KeyRuleError(
+            "the codex-capture role requires the codex-hook principal and vice versa"
+        )
     if role is Role.OPERATOR:
         if principal != operator_identity:
             raise KeyRuleError(
@@ -767,9 +809,9 @@ def check_mint(role: Role, principal: str, project: str | None, *, reserved_ok: 
             "to mint it on purpose"
         )
     if project is not None:
-        if role is not Role.AGENT:
+        if role not in {Role.AGENT, Role.CODEX_CAPTURE}:
             raise KeyRuleError(
-                "--project binds an agent key's writes; reader and operator keys take none"
+                "--project binds an agent or codex-capture key; reader and operator keys take none"
             )
         if not names_a_project(project):
             raise KeyRuleError(
@@ -787,7 +829,7 @@ def check_mint(role: Role, principal: str, project: str | None, *, reserved_ok: 
 # --- harvester roots -------------------------------------------------
 
 #: The key-record fields that hold a harvester key's client directories.
-_ROOT_FIELDS = ("memory_roots", "archive_roots")
+_ROOT_FIELDS = ("memory_roots", "archive_roots", "rule_roots", "global_rule_roots")
 
 
 def is_harvester(role: Role, principal: str) -> bool:
@@ -814,6 +856,70 @@ def normalised_root(raw: str) -> str:
     if any(segment in {"", ".", ".."} for segment in segments):
         raise ValueError("a root holds an empty, '.' or '..' segment")
     return "/" + "/".join(segments)
+
+
+def normalised_host_id(raw: str) -> str | None:
+    """``raw`` as a recorded host id (a lower-case UUID), or ``None`` when it is not one."""
+    try:
+        return str(uuid.UUID(raw.strip()))
+    except ValueError:
+        return None
+
+
+def _mint_host_id(role: Role, principal: str, host_id: str | None) -> str | None:
+    """The host id ``keys create`` records, refused unless a harvester's."""
+    if host_id is None:
+        return None
+    if not is_harvester(role, principal):
+        raise KeyRuleError(
+            "--host-id names a harvester key's client host; only an agent key under "
+            f"{' or '.join(sorted(HARVEST_DEPOSITORS))} takes it"
+        )
+    value = normalised_host_id(host_id)
+    if value is None:
+        raise KeyRuleError(
+            f"--host-id {host_id!r} is not a host id; the client's `particles hook doctor` "
+            "or `particles init claude-code` prints it"
+        )
+    if value == local_host_id():
+        # keys create runs on the engine host, and a harness there deposits in
+        # process: a key carrying the engine's id could only write over HTTP onto
+        # files the engine refreshes from its own disk.
+        raise KeyRuleError(
+            "--host-id is this engine host's own id; a harness on the engine's host deposits "
+            "in process and needs no key for its files. Give the client's host id."
+        )
+    return value
+
+
+def _rule_roots_overlap(roots: Sequence[str]) -> tuple[str, str] | None:
+    """Two rule roots of which one lies under the other, or ``None``."""
+    split = sorted((root, root.split("/")[1:]) for root in roots)
+    for outer, outer_segments in split:
+        for inner, inner_segments in split:
+            if inner != outer and inner_segments[: len(outer_segments)] == outer_segments:
+                return outer, inner
+    return None
+
+
+def _check_rule_roots(rules: tuple[str, ...] | None, global_rules: tuple[str, ...] | None) -> None:
+    """A rule root is one project's root (owner ruling 2, 2026-11-07).
+
+    A common parent such as ``~/src`` is refused as a root nested in another
+    would be: either would let the key push rule files for paths the client
+    never worked in. A broad root (the engine host's filesystem root, home and
+    their ancestors) is refused too.
+    """
+    every = list(rules or ()) + list(global_rules or ())
+    overlap = _rule_roots_overlap(every)
+    if overlap is not None:
+        raise KeyRuleError(
+            f"rule root {overlap[1]!r} lies under rule root {overlap[0]!r}; name each "
+            "project's own root, never a directory that holds several"
+        )
+    for root in every:
+        if is_broad_root(Path(root)):
+            raise KeyRuleError(f"rule root {root!r} is too broad to name one project's files")
 
 
 def _parse_roots(item: dict[str, object], name: str) -> tuple[str, ...] | None:
@@ -869,6 +975,8 @@ def _serialise(records: dict[str, KeyRecord]) -> str:
                 del item[name]
             else:
                 item[name] = list(item[name])
+        if item["host_id"] is None:
+            del item["host_id"]
         keys.append(item)
     return json.dumps({"version": _FORMAT_VERSION, "keys": keys}, indent=2) + "\n"
 
@@ -962,19 +1070,28 @@ def mint(
     reserved_ok: bool = False,
     memory_roots: Sequence[str] | None = None,
     archive_roots: Sequence[str] | None = None,
+    host_id: str | None = None,
+    rule_roots: Sequence[str] | None = None,
+    global_rule_roots: Sequence[str] | None = None,
 ) -> tuple[str, KeyRecord]:
     """Create a key and record it. Returns ``(token, record)``; the token is shown once.
 
     ``memory_roots`` and ``archive_roots`` are a harvester key's client
     directories; a harvester key minted with neither names no
     ``file://`` URI. ``keys create`` fills them with the minting host's own
-    roots when no flag names any.
+    roots when no flag names any. ``host_id`` is the client host the key
+    deposits for; a harvester key minted without one names no
+    ``file://`` URI.
     """
     principal = principal.strip()
     project = canonical_project_key(project) if project is not None else None
     check_mint(role, principal, project, reserved_ok=reserved_ok)
     memory = _mint_roots(role, principal, "memory_roots", memory_roots)
     archive = _mint_roots(role, principal, "archive_roots", archive_roots)
+    client_host = _mint_host_id(role, principal, host_id)
+    rules = _mint_roots(role, principal, "rule_roots", rule_roots)
+    global_rules = _mint_roots(role, principal, "global_rule_roots", global_rule_roots)
+    _check_rule_roots(rules, global_rules)
     path = keys_file_path()
     with _file_lock(path):
         reset_key_cache()
@@ -995,6 +1112,9 @@ def mint(
             reserved_ok=role is not Role.OPERATOR and principal in reserved_principals(),
             memory_roots=memory,
             archive_roots=archive,
+            host_id=client_host,
+            rule_roots=rules,
+            global_rule_roots=global_rules,
         )
         records[key_id] = record
         _write(path, records)

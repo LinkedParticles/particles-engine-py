@@ -23,10 +23,10 @@ from particles.core.status import Status
 from particles.corpus.store import count_entries, count_snapshots_by_extraction_status
 from particles.ingest.refusal_hold import held_snapshots
 from particles.observability import traced
-from particles.operations.curation.precision import curation_precision
 from particles.operations.llm_spend import store_llm_spend
 from particles.store.particle_store import (
     count_active_particles_by_calibration_source,
+    count_active_particles_without_embedding,
     count_particles_by_status,
     count_structured_claim_coverage,
 )
@@ -75,13 +75,20 @@ async def get_quality_report(session: AsyncSession) -> QualityReport:
     llm_spend = await store_llm_spend(session)
     # queue precision over the default window, read from the gesture
     # log and the retained collections; ``None`` when there is nothing to measure.
+    # defer: cycle — the curation package's ``collect`` imports this module, so
+    # a module-top import fails whenever this module is imported first.
+    from particles.operations.curation.precision import curation_precision
+
     precision = await curation_precision(session)
     # PENDING snapshots a current refusal holds.
     held = await held_snapshots(session)
+    # beliefs semantic query cannot reach, because they carry no vector.
+    unembedded = await count_active_particles_without_embedding(session)
 
     return QualityReport(
         active_particles=active_particles,
         inconsistency_particles=inconsistency_particles,
+        active_without_embedding=unembedded,
         calibration=calibration,
         extractor_direct_fraction=extractor_direct_fraction,
         total_entries=total_entries,

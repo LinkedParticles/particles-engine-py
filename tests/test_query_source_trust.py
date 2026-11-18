@@ -60,12 +60,13 @@ class TestTrustPolicyEvaluate:
         policy = _policy(domain_scores={"*": 0.3})
         assert policy.evaluate("e1", "PDF", "file:///tmp/doc.pdf") is None
 
-    def test_harness_uri_gets_no_domain_baseline(self) -> None:
+    @pytest.mark.parametrize("scheme", ["claude-code", "codex"])
+    def test_harness_uri_gets_no_domain_baseline(self, scheme: str) -> None:
         # The wildcard is the unknown-web-domain default; it halved transcript
         # beliefs while a memory file (file://) stayed neutral. The netloc of a
         # session URI is "session", which no host row may name either.
         policy = _policy(domain_scores={"*": 0.5, "session": 0.2})
-        assert policy.evaluate("e1", "CONVERSATION", "claude-code://session/abc123") is None
+        assert policy.evaluate("e1", "CONVERSATION", f"{scheme}://session/abc123") is None
 
     @pytest.mark.parametrize("uri", ["inbox://note/1", "urn:isbn:0451450523", "ftp://x.example/f"])
     def test_other_schemes_keep_the_domain_baseline(self, uri: str) -> None:
@@ -74,12 +75,13 @@ class TestTrustPolicyEvaluate:
         policy = _policy(domain_scores={"*": 0.5})
         assert policy.evaluate("e1", "CONVERSATION", uri) == pytest.approx(0.5)
 
-    def test_harness_uri_still_takes_an_explicit_pattern(self) -> None:
+    @pytest.mark.parametrize("scheme", ["claude-code", "codex"])
+    def test_harness_uri_still_takes_an_explicit_pattern(self, scheme: str) -> None:
         policy = _policy(
             domain_scores={"*": 0.5},
-            url_patterns=((re.compile(r"^claude-code://session/"), -0.3),),
+            url_patterns=((re.compile(rf"^{re.escape(scheme)}://session/"), -0.3),),
         )
-        rank = policy.evaluate("e1", "CONVERSATION", "claude-code://session/abc123")
+        rank = policy.evaluate("e1", "CONVERSATION", f"{scheme}://session/abc123")
         assert rank == pytest.approx(0.7)
 
     def test_missing_uri_is_none(self) -> None:
@@ -181,6 +183,7 @@ class TestTrustPolicyEvaluate:
         "https://x.example/p",
         "http://session/p",
         "claude-code://session/abc123",
+        "codex://session/abc123",
         "inbox://note/1",
         "urn:isbn:0451450523",
     ],

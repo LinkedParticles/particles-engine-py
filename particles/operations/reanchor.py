@@ -81,6 +81,7 @@ from particles.db import write_transaction
 from particles.embeddings import cosine_similarity, get_embedding_model
 from particles.ingest.observer_gate import ObserverGate
 from particles.ingest.pipeline import ConflictWatermark, read_conflict_watermark
+from particles.ingest.retirement_cap import restored_to_hold
 from particles.ingest.update_supersession import (
     is_extractor_asserted,
     is_reconcilable,
@@ -658,6 +659,9 @@ async def _candidates(
         if await _is_restatement(session, particle):
             continue
         if await _already_examined(session, particle.id, retired.id):
+            continue
+        if await restored_to_hold(session, particle.id):
+            # The operator restored it ruling both claims hold.
             continue
         if retired_scope is not None and (
             await gate.verdict(session, retired_scope, particle) is not PairPrecondition.RECONCILE

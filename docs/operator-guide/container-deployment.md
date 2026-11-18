@@ -84,7 +84,54 @@ The web UI at `http://localhost:8000/app` is the exception: its static shell
 loads with no header so a browser can reach it, and the app then
 asks you for the bearer. See [The web UI](#the-web-ui).
 
-To build the image on its own, from the repo root:
+### Build the image at a release tag
+
+An engine and its clients must run the same release.
+When no published image matches the release your client runs, build that
+release's image yourself. From a checkout of the development repository:
+
+```bash
+uv run python scripts/build_engine_image.py --tag vX.Y.Z
+```
+
+The script builds the tag's own tree (a `git archive` of the tag, so your
+working tree does not matter) with that tag's `deploy/Dockerfile`, the same
+runtime stage and the same build arguments and OCI labels the publish
+workflow uses, and tags the result `particles-engine:vX.Y.Z`. It never
+pushes. With no `--tag` it builds the release your client is pinned to: the
+tag that the source checkout run by the Claude Code hooks and the Particles
+MCP server is detached at (`--runtime DIR` names a checkout explicitly).
+When `HF_TOKEN` (or the older `HUGGING_FACE_HUB_TOKEN`) is set in its environment, the script passes it to the
+encoder download as a BuildKit secret, which no layer or image history
+records; without it the download is anonymous. A tag older than this change
+builds its own `deploy/Dockerfile`, which reads no secret, so its download
+stays anonymous.
+After the build it reads the image's version label and runs the image once,
+with no network, to read the version of the code inside; both must be the
+tag's, or it exits non-zero.
+
+The one difference from the published image is where the code comes from.
+The published image installs the released distributions from PyPI
+(`SOURCE=pypi`); the local build installs the tag's own locked dependency
+closure (`SOURCE=tree`), because a tag that was never published has nothing
+on PyPI to install. For a version that is on PyPI, `--source pypi` builds the
+published recipe exactly, closure cutoff included. Either way the code is the
+release.
+
+To check an image, or a running container, against the client's pin without
+building anything:
+
+```bash
+uv run python scripts/build_engine_image.py --check particles-engine:vX.Y.Z
+```
+
+A mismatch names both versions and exits 1. `--dry-run` prints the
+`docker build` command the script would run.
+
+### Build from the working tree
+
+To build the image from the current checkout instead, for development, from
+the repo root:
 
 ```bash
 docker build -f deploy/Dockerfile --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" --build-arg VCS_REF="$(git rev-parse --short HEAD)" --build-arg VERSION="$(grep -m1 '^version' pyproject.toml | cut -d'"' -f2)" -t ghcr.io/linkedparticles/engine:dev .
@@ -95,6 +142,7 @@ I made?*; see [Which image is this?](#which-image-is-this). They are
 optional: without them the build succeeds and produces an image that declines
 to say. The build context is a strict allowlist that does not admit `.git`, so
 the revision cannot be discovered during the build; it has to be passed in.
+The release-tag build above always passes all three.
 
 !!! note "The published image, and what still builds locally"
     `ghcr.io/linkedparticles/engine` is a placeholder: the repos are public
@@ -103,8 +151,9 @@ the revision cannot be discovered during the build; it has to be passed in.
     repository's `publish-image.yml` workflow pushes it after each PyPI
     publish, built from the released distributions. Version tags are
     immutable by policy; `latest` follows the newest release. Locally built
-    images (this section) remain the development path and are never pushed
-    from here.
+    images (this section) remain the development path, and the release-tag
+    build is how a deployment runs a release that has no published image;
+    neither is ever pushed from here.
 
 ## The one volume
 
@@ -129,6 +178,73 @@ write. The engine refuses a key file in a group-writable directory unless
 `api.keys_dir_group` names that group, which the Helm chart sets from its
 `fsGroup`; leave it unset for a bind mount. [SECURITY.md](https://github.com/LinkedParticles/particles-engine-py/blob/main/SECURITY.md#deployment-posture-authentication-and-the-read-surface)
 says which protections that keeps.
+
+## Backing up and moving the store
+
+`particles db backup DIR` writes a directory laid out like the volume:
+`DIR/particles.db` and `DIR/corpus_blobs/`. It copies a running store without
+stopping it and verifies the copy before it exits; [Store consolidation](store-consolidation.md#backup-and-rollback)
+says how. The volume's other files are not part of the store: `/data/host-id`
+is this host's own identity and is never copied to another host,
+`/data/state` holds a lockfile, and `/data/engine-keys.json` is copied
+separately if you want the keys kept (they can be minted again).
+
+**Back up the volume** from inside the container, into the volume, then copy
+the result to the host:
+
+```bash
+docker compose exec engine particles db backup /data/backups/2026-11-07
+```
+
+```bash
+docker compose cp engine:/data/backups/2026-11-07 ~/particles/backups/
+```
+
+```bash
+docker compose exec engine rm -r /data/backups/2026-11-07
+```
+
+The engine keeps serving while the first command runs.
+
+**Move a host store into a volume.** On the machine that holds the store
+today, back it up into a new directory; sessions can keep running while it
+does:
+
+```bash
+particles db backup ~/particles/import
+```
+
+Create the container and its volume without starting the engine, so nothing
+opens the store before the copy lands, then copy the backup into the volume
+and give it to the image's user (uid `10001`):
+
+```bash
+docker compose create
+```
+
+```bash
+docker run --rm -v particles_particles-data:/data -v ~/particles/import:/src:ro alpine sh -c 'cp -a /src/. /data/ && mkdir -p /data/state && chown -R 10001:10001 /data'
+```
+
+Compose prefixes the volume with the project name, hence
+`particles_particles-data`. The image's config already names
+`/data/particles.db` and `/data/corpus_blobs`, so nothing needs editing: the
+snapshot rows' old absolute `archive_path` strings are never read for a
+location, and every blob is found by its hash under `/data/corpus_blobs`.
+Start the engine and check the copy in place:
+
+```bash
+docker compose up -d
+```
+
+```bash
+docker compose exec engine particles corpus fsck
+```
+
+A backup holds what was committed when it began. For a rehearsal, take it
+while sessions run. For the final move, stop every local writer first (quit
+the Claude Code sessions, unload the consolidation job), then take the
+backup, so nothing written in between is left behind on the old host.
 
 ## The key is mandatory
 
@@ -168,8 +284,11 @@ list the store and read the raw deposited bytes (`GET /corpus/blob/{selector}`,
 `0.0.0.0`.
 
 Every client already sends its key on every call: the CLI's remote backend
-(`PARTICLES_ENGINE_TOKEN`), the web UI (the token in its settings), and the
-Obsidian plugin. A script that read the engine with a bare `curl` now gets a
+(`PARTICLES_ENGINE_TOKEN`, or the file `PARTICLES_ENGINE_TOKEN_FILE` names),
+the Claude Code hooks and MCP server that `particles init claude-code --engine`
+installs (see [Remote engine → Installing Claude Code as a thin
+client](remote-engine.md#installing-claude-code-as-a-thin-client)), the web UI
+(the token in its settings), and the Obsidian plugin. A script that read the engine with a bare `curl` now gets a
 `401` and needs `-H "Authorization: Bearer <key>"`, a reader key when it only
 reads.
 
@@ -441,15 +560,27 @@ Secrets are never read from `config.yaml`; they come from the environment
 (`PARTICLES_API_KEY`, `ANTHROPIC_API_KEY`, …). Do not put them in a mounted
 config.
 
+Observability is configured the same way: an `observability` block in the
+mounted file, or the `PARTICLES_OBSERVABILITY_*` overrides. Its endpoint must
+be a collector the container can reach, which `localhost` is not; see
+[Observability, in a container](observability.md#in-a-container).
+
 ## What is in the image
 
 - Python 3.11-slim, the wheel, and its locked dependency closure
-  (`uv sync --frozen --no-dev`) in an image you build from a checkout. The
+  (`uv sync --frozen --no-dev --extra otel`) in an image you build from a checkout. The
   published image installs the released pair from PyPI instead, with its
   dependencies resolved at build time under a date cutoff and not
   hash-locked; its SBOM lists what was resolved.
 - The committed web-UI bundle, so `/app` always registers; the wheel excludes
   it, the image must not.
+- **The `otel` extra** (the OpenTelemetry SDK, the OTLP exporter and the
+  FastAPI, httpx, SQLAlchemy and logging instrumentation), with observability
+  **off** in the baked config. The image sends no telemetry until
+  your config turns it on, and turning it on needs no rebuild: see
+  [Observability, in a container](observability.md#in-a-container). The extra
+  adds about 20 MB, and the build fails if the SDK does not import. Images
+  built from releases before the extra was added do not carry it.
 - **The embedding encoder, baked at build time** (`all-MiniLM-L6-v2`).
   This resolves the question routed here in favour of
   baking: a predictable cold start, air-gap friendliness, and the observation

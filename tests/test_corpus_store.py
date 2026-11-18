@@ -389,7 +389,7 @@ class TestOwedSinceOrdering:
         delta reads and rule 4 need the oldest first.
         """
         from particles.corpus.store import list_pending_snapshots_for_catchup
-        from particles.operations.consolidation import _one_per_entry
+        from particles.operations.consolidation import _entry_heads
 
         session = db_session
         self._entry(session, "chat", Mutability.APPEND_ONLY)
@@ -402,7 +402,7 @@ class TestOwedSinceOrdering:
 
         assert [p.snapshot_id for p in listed] == ["z-oldest", "m-middle", "a-newest"]
         assert len({p.waiting_since for p in listed}) == 1
-        assert _one_per_entry(listed, 20) == [("chat", "z-oldest")]
+        assert [(p.entry_id, p.snapshot_id) for p in _entry_heads(listed)] == [("chat", "z-oldest")]
 
     @pytest.mark.asyncio
     async def test_attempts_still_sort_ahead_of_owed_since(self, db_session: object) -> None:

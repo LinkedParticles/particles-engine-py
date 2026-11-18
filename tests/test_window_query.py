@@ -505,7 +505,9 @@ class TestMcpWindow:
             return QueryResponse(answer="ok", particles=[], effective_confidences=[])
 
         with patch("particles.operations.query.query", new=_fake):
-            out = await mcp_query("q?", during_start="2026-10-10", during_end="2026-10-16")
+            out = await mcp_query(
+                "q?", during_start="2026-10-10", during_end="2026-10-16", detail="full"
+            )
             await mcp_query(on="2026-10-12")
         assert captured[0].window is not None
         assert captured[0].window.start == D(2026, 10, 10)

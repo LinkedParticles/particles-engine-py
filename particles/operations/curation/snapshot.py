@@ -40,10 +40,11 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
+from typing import Any
 
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -53,6 +54,7 @@ from particles.core.schema import SuggestMode
 from particles.core.status import Status
 from particles.db import write_transaction
 from particles.operations._llm import llm_circuit_open
+from particles.operations.episode import shadow_for_cards
 from particles.operations.lint import ContradictionProbeControl
 from particles.operations.lint.contradictions import contradiction_partner
 from particles.store.curation_snapshot_store import (
@@ -74,7 +76,13 @@ log = logging.getLogger(__name__)
 #: 3: subjectless beliefs of one source share a
 #: ``subjectless_source`` card. A format-2 collection is served as it stands
 #: until the next build; its per-belief ``no_subject`` keys stay valid.
-BLOB_FORMAT = 3
+#: 4: duplicate candidates share one ``duplicate_group`` card per
+#: connected group. A format-3 collection is served as it stands, pair cards
+#: and all, until the next build; its ``duplicate_pair`` keys stay valid.
+#: 5: the envelope records ``withheld``, the duplicate candidate
+#: pairs each withholding rung kept out, by stamp. An earlier blob reads as no
+#: count.
+BLOB_FORMAT = 5
 
 #: The kinds whose finder the cycle runs **delta-scoped**, and which
 #: therefore carry forward instead of being replaced.
@@ -149,6 +157,14 @@ class CurationQueueResult(BaseModel):
     #: keeps the date of the build that last ran its finder, and is absent when
     #: no build on record ran it. Empty on a live collection.
     kind_as_of: dict[str, datetime] = Field(default_factory=dict)
+    #: The duplicate candidate pairs each withholding rung kept out of this
+    #: collection, by stamp; ``None`` for a rung switched off.
+    #: Empty for a collection built before the count was recorded.
+    withheld: dict[str, int | None] = Field(default_factory=dict)
+    #: What the episode fold would withhold on this collection, in shadow,
+    #: by ``(stratum, stamp combination)`` entry (§6). ``None``
+    #: on a live collection or one built before the count existed.
+    episode_shadow: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -179,9 +195,14 @@ class Resolved:
             return True
         if card.kind is CardKind.INCONSISTENCY:
             return card.inconsistency_id in self.records
-        if card.kind in (CardKind.GATED_SUBJECTS, CardKind.SUBJECTLESS_SOURCE):
+        if card.kind in (
+            CardKind.GATED_SUBJECTS,
+            CardKind.SUBJECTLESS_SOURCE,
+            CardKind.DUPLICATE_GROUP,
+        ):
             # A batch card is suppressed by its key when a relink ran;
-            # a source card loses the touched members instead.
+            # a source card loses the touched members instead, and
+            # a duplicate group is regrouped over its links and rulings.
             return False
         return any(pid in self.particle_ids for pid in card.particle_ids)
 
@@ -223,6 +244,10 @@ class PriorCollection:
     #: Per kind, when its finder last ran for these cards (see ``kind_as_of``).
     kind_as_of: dict[str, datetime] = field(default_factory=dict)
     built_at: datetime | None = None
+    #: The build's withheld-pair counts.
+    withheld: dict[str, int | None] = field(default_factory=dict)
+    #: The episode shadow the build recorded, when it did.
+    episode: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -261,40 +286,60 @@ def per_kind_scope_for(scope: CollectionScope, *, semantic: bool) -> dict[str, C
 
 
 def _dump(
-    cards: list[CurationCard], first_seen: dict[str, str], kind_as_of: dict[str, datetime]
+    cards: list[CurationCard],
+    first_seen: dict[str, str],
+    kind_as_of: dict[str, datetime],
+    withheld: Mapping[str, int | None] | None = None,
+    episode: dict[str, Any] | None = None,
 ) -> str:
-    """Serialise a collection, its per-card origin stamps, and each kind's as-of date."""
-    return json.dumps(
-        {
-            "format": BLOB_FORMAT,
-            "cards": [c.model_dump(mode="json") for c in cards],
-            "first_seen": first_seen,
-            "kind_as_of": {k: v.isoformat() for k, v in kind_as_of.items()},
-        }
-    )
+    """Serialise a collection, its origin stamps, each kind's as-of date and the withheld counts.
+
+    ``episode`` is the build's episode shadow, an additive key
+    an older reader ignores.
+    """
+    envelope: dict[str, Any] = {
+        "format": BLOB_FORMAT,
+        "cards": [c.model_dump(mode="json") for c in cards],
+        "first_seen": first_seen,
+        "kind_as_of": {k: v.isoformat() for k, v in kind_as_of.items()},
+        "withheld": dict(withheld or {}),
+    }
+    if episode is not None:
+        envelope["episode"] = episode
+    return json.dumps(envelope)
 
 
 def _load(blob: str) -> tuple[list[CurationCard], dict[str, str]]:
     """Decode a collection blob's cards and origin stamps (see :func:`_decode`)."""
-    cards, first_seen, _ = _decode(blob)
+    cards, first_seen, _, _, _ = _decode(blob)
     return cards, first_seen
 
 
-def _decode(blob: str) -> tuple[list[CurationCard], dict[str, str], dict[str, datetime] | None]:
+def _decode(
+    blob: str,
+) -> tuple[
+    list[CurationCard],
+    dict[str, str],
+    dict[str, datetime] | None,
+    dict[str, int | None],
+    dict[str, Any] | None,
+]:
     """Decode a collection blob, tolerating an unreadable one as empty.
 
     A cache that cannot be read is a cache miss, never an error: the caller
     rebuilds. Returning empty keeps a corrupt row from taking the curation
     surface down with it. The third value is ``None`` for a blob written
-    before the envelope carried ``kind_as_of``.
+    before the envelope carried ``kind_as_of``; the fourth is the withheld
+    counts, empty for a blob written before the envelope carried them; the
+    fifth is the episode shadow, ``None`` for a blob without one.
     """
     try:
         raw = json.loads(blob)
     except (TypeError, ValueError):
         log.warning("curation snapshot: unreadable cards_json; treating as a cache miss")
-        return [], {}, {}
+        return [], {}, {}, {}, None
     if not isinstance(raw, dict):
-        return [], {}, {}
+        return [], {}, {}, {}, None
     cards: list[CurationCard] = []
     for item in raw.get("cards") or ():
         try:
@@ -312,7 +357,26 @@ def _decode(blob: str) -> tuple[list[CurationCard], dict[str, str], dict[str, da
             parsed = _parse_stamp(stamp if isinstance(stamp, str) else None)
             if parsed is not None:
                 as_of[str(kind)] = parsed
-    return cards, first_seen if isinstance(first_seen, dict) else {}, as_of
+    withheld = _withheld_from(raw.get("withheld"))
+    episode = raw.get("episode")
+    return (
+        cards,
+        first_seen if isinstance(first_seen, dict) else {},
+        as_of,
+        withheld,
+        episode if isinstance(episode, dict) else None,
+    )
+
+
+def _withheld_from(value: object) -> dict[str, int | None]:
+    """The envelope's withheld counts, keeping only well-formed entries."""
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(stamp): n
+        for stamp, n in value.items()
+        if n is None or (isinstance(n, int) and not isinstance(n, bool) and n >= 0)
+    }
 
 
 def _row_built_at(row: CurationSnapshotRow) -> datetime:
@@ -333,12 +397,14 @@ def _legacy_kind_as_of(row: CurationSnapshotRow) -> dict[str, datetime]:
 
 def read_prior(row: CurationSnapshotRow) -> PriorCollection:
     """Decode a stored collection into the merge's plain-value input."""
-    cards, first_seen, as_of = _decode(row.cards_json)
+    cards, first_seen, as_of, withheld, episode = _decode(row.cards_json)
     return PriorCollection(
         cards=cards,
         first_seen=first_seen,
         kind_as_of=as_of if as_of is not None else _legacy_kind_as_of(row),
         built_at=_row_built_at(row),
+        withheld=withheld,
+        episode=episode,
     )
 
 
@@ -410,10 +476,13 @@ def stamp_from(
     *,
     now: datetime | None = None,
     kind_as_of: dict[str, datetime] | None = None,
+    withheld: dict[str, int | None] | None = None,
+    episode: dict[str, Any] | None = None,
 ) -> CurationQueueResult:
     """Build the §5 staleness stamp for a stored collection (no cards yet).
 
-    ``kind_as_of`` is the row's decoded per-kind as-of map when the caller has
+    ``kind_as_of``, ``withheld`` and ``episode`` are the row's decoded
+    per-kind as-of map, withheld counts and episode shadow when the caller has
     already read the blob (:func:`read_prior`); otherwise the blob is decoded
     here.
     """
@@ -423,8 +492,11 @@ def stamp_from(
     moment = now or datetime.now(UTC)
     built = _row_built_at(row)
     age = (moment - built).total_seconds()
-    if kind_as_of is None:
-        kind_as_of = read_prior(row).kind_as_of
+    if kind_as_of is None or withheld is None:
+        prior = read_prior(row)
+        kind_as_of = prior.kind_as_of if kind_as_of is None else kind_as_of
+        withheld = prior.withheld if withheld is None else withheld
+        episode = prior.episode if episode is None else episode
     limit = stale_after_hours(
         cfg.snapshot_max_age_hours,
         census_enabled=census.enabled,
@@ -441,7 +513,22 @@ def stamp_from(
         semantic=row.semantic,
         semantic_degraded=row.semantic_degraded,
         kind_as_of=dict(kind_as_of),
+        withheld=dict(withheld),
+        episode_shadow=episode,
     )
+
+
+async def _episode_block(session: AsyncSession, cards: list[CurationCard]) -> dict[str, Any] | None:
+    """The episode shadow of one collection (§6); ``None`` if it cannot be read.
+
+    A count, never a gate: a failure here is logged and the build goes on.
+    """
+    try:
+        shadow = await shadow_for_cards(session, [(c.kind.value, c.particle_ids) for c in cards])
+    except Exception as exc:  # noqa: BLE001 - a shadow count never fails a build
+        log.warning("curation snapshot: episode shadow not counted: %s", exc)
+        return None
+    return dict(shadow.as_dict())
 
 
 async def collect_and_persist(
@@ -455,12 +542,17 @@ async def collect_and_persist(
     cards: list[CurationCard] | None = None,
     built_at: datetime | None = None,
     covered_pairs: frozenset[frozenset[str]] = frozenset(),
+    withheld: Mapping[str, int | None] | None = None,
+    episode_sink: dict[str, Any] | None = None,
 ) -> tuple[list[CurationCard], str]:
     """Run the finders (or take a supplied collection), score, merge, persist.
 
     ``cards`` lets the pass-4 caller hand over the collection it
     already paid for — the whole point of that seam — instead of collecting a
-    second time. Returns the merged collection and the new ``snapshot_id``.
+    second time, with ``withheld``, the counts that collection recorded.
+    Returns the merged collection and the new ``snapshot_id``.
+    ``episode_sink``, when given, receives the build's episode shadow,
+    so the consolidation run records the count the collection stores.
 
     ``covered_pairs`` are the contradiction pairs a census record now discloses:
     a carried-forward CONTRADICTION card for one of them is
@@ -477,6 +569,7 @@ async def collect_and_persist(
     from .collect import collect_cards
     from .leverage import contested_ids_from, score_cards
 
+    counts: dict[str, int | None] = dict(withheld or {})
     fresh = (
         list(cards)
         if cards is not None
@@ -486,6 +579,7 @@ async def collect_and_persist(
             duplicate_mode=duplicate_mode,
             contradiction_probe=contradiction_probe,
             duplicate_scope_ids=duplicate_scope_ids,
+            withheld=counts,
         )
     )
     # Score before merging: a carried-forward card keeps the leverage it was
@@ -516,6 +610,10 @@ async def collect_and_persist(
         evidence=evidence,
     )
 
+    episode = await _episode_block(session, result.cards)
+    if episode_sink is not None and episode is not None:
+        episode_sink.update(episode)
+
     # writer lock around the **insert and its commit** — never around the
     # collection above, which is minutes of pure reads and would block every
     # other writer for its duration. A lost race is harmless by
@@ -524,7 +622,7 @@ async def collect_and_persist(
     async with write_transaction(session):
         snapshot_id = await write_snapshot(
             session,
-            cards_json=_dump(result.cards, result.first_seen, result.kind_as_of),
+            cards_json=_dump(result.cards, result.first_seen, result.kind_as_of, counts, episode),
             card_count=len(result.cards),
             scope=scope,
             per_kind_scope={k: v.value for k, v in per_kind.items()},

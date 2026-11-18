@@ -538,7 +538,7 @@ VERDICT: YES or VERDICT: NO
 """
 
 
-def _source_line(c: ClaimContext) -> str:
+def source_line(c: ClaimContext) -> str:
     """How the observed-state reading names one claim's source."""
     if c.kind is SourceKind.RECORD:
         what = "session transcript" if c.source_type == SourceType.CONVERSATION else "record"
@@ -566,7 +566,7 @@ def _verify_request(
     def block(c: ClaimContext) -> str:
         passage = c.passage or "(not found)"
         if observed:
-            return f"claim: {c.content}\n{_source_line(c)}\npassage: {passage}"
+            return f"claim: {c.content}\n{source_line(c)}\npassage: {passage}"
         return f"claim: {c.content}\nnote: {c.source} (dated {c.date})\npassage: {passage}"
 
     user = (

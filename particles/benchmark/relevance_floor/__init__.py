@@ -19,7 +19,13 @@ from .harvest import (
     question_id,
     write_heldout,
 )
-from .metrics import floor_sweep, refusal_curve, sample_questions, similarity_quantiles
+from .metrics import (
+    floor_sweep,
+    refusal_curve,
+    responder_refusals,
+    sample_questions,
+    similarity_quantiles,
+)
 from .render import render_report
 from .runner import (
     JudgedStageEstimate,
@@ -29,10 +35,13 @@ from .runner import (
     estimate_judged_stage,
     floor_disabled,
     judge_prompt,
+    judges_refusals,
+    refusal_judge_prompt,
     render_estimate,
     replay_retrieval,
     reuse_replay,
     run_judged,
+    stop_calls,
 )
 from .schema import (
     FloorRow,
@@ -41,6 +50,7 @@ from .schema import (
     QuestionSource,
     RefusalRow,
     RelevanceFloorReport,
+    ResponderRow,
     RunSelection,
 )
 
@@ -55,6 +65,7 @@ __all__ = [
     "RefusalRow",
     "RelevanceFloorError",
     "RelevanceFloorReport",
+    "ResponderRow",
     "RunSelection",
     "build_report",
     "build_selection",
@@ -64,15 +75,19 @@ __all__ = [
     "harvest_transcripts",
     "heldout_fingerprint",
     "judge_prompt",
+    "judges_refusals",
     "load_heldout",
     "question_id",
     "refusal_curve",
+    "refusal_judge_prompt",
     "render_estimate",
     "render_report",
     "replay_retrieval",
+    "responder_refusals",
     "reuse_replay",
     "run_judged",
     "sample_questions",
+    "stop_calls",
     "similarity_quantiles",
     "write_heldout",
 ]

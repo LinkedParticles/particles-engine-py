@@ -270,6 +270,29 @@ class TestDelta:
         assert await _claim_tags(db_session, entry_id, s2) == sorted(tags)
 
     @pytest.mark.asyncio
+    async def test_a_day_marked_transcript_keeps_and_skips_the_same_later_chunks(
+        self, db_session: AsyncSession, llm: FakeLLM
+    ) -> None:
+        # a chunk shown after a day mark carries the day in its
+        # key, and the retry's plan keys it the same way, so the verified later
+        # chunk is still recognised and skipped.
+        marked = "## User \u00b7 2026-09-02\n\n" + FIRST
+        entry_id, s1 = await _deposit(db_session, marked)
+        await _extract(db_session, entry_id, s1)
+        tags = ("Pone", "Ptwo", "Pthr", "Pfou", "Pfiv", "Psix")
+        _, s2 = await _deposit(db_session, marked + "\n" + _paras(*tags))
+        llm.reset()
+        llm.fail = {"Pthr", "Pfiv"}
+        _, outcome = await _extract(db_session, entry_id, s2)
+        assert (outcome.kept_calls, outcome.rebilled_calls) == (3, 1)
+
+        llm.reset()
+        llm.fail = set()
+        await _extract(db_session, entry_id, s2)
+        assert llm.sent == ["Pthr", "Pfiv", "Psix"]
+        assert await _claim_tags(db_session, entry_id, s2) == sorted(tags)
+
+    @pytest.mark.asyncio
     async def test_a_failed_first_chunk_with_nothing_to_keep_writes_nothing(
         self, db_session: AsyncSession, llm: FakeLLM
     ) -> None:

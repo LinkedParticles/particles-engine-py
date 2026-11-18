@@ -280,3 +280,60 @@ class TestWidenVerb:
     ) -> None:
         result = runner.invoke(app, ["memory", "widen", "--entry", "nope"])
         assert result.exit_code == 2 and "No corpus entry" in result.output
+
+
+async def _operator_deposit(text: str, *, standing: bool = False) -> str:
+    from particles.api.client.local import LocalBackend
+    from particles.db import DEFAULT_STORE
+
+    entry_id, _ = await LocalBackend().deposit_text(
+        text=text, tags=[], store=DEFAULT_STORE, deposited_by="operator", standing=standing
+    )
+    return entry_id
+
+
+class TestMarkReferenceVerb:
+    """`--mark-reference` previews, `--apply` writes, `--unmark-reference` reverses."""
+
+    def test_preview_then_apply_then_unmark(
+        self, runner: CliRunner, cli_db: Path, home: Path
+    ) -> None:
+        from particles.core.observer_scope import REFERENCE_MARKER
+
+        kept = asyncio.run(_operator_deposit("my lunch write-up", standing=True))
+        other = asyncio.run(_operator_deposit("a second standing note", standing=True))
+
+        preview = runner.invoke(app, ["memory", "rescope", "--mark-reference"])
+        assert preview.exit_code == 0, preview.output
+        assert "would mark 2" in preview.output and "nothing was written" in preview.output
+        assert asyncio.run(_tags(kept)) == []
+
+        applied = runner.invoke(
+            app, ["memory", "rescope", "--mark-reference", "--except", kept, "--apply"]
+        )
+        assert applied.exit_code == 0, applied.output
+        assert "1 kept global, marked 1" in applied.output
+        assert asyncio.run(_tags(kept)) == []
+        assert asyncio.run(_tags(other)) == [REFERENCE_MARKER]
+
+        undone = runner.invoke(app, ["memory", "rescope", "--unmark-reference", other])
+        assert undone.exit_code == 0 and "global again" in undone.output
+        assert asyncio.run(_tags(other)) == []
+
+    def test_its_flags_need_mark_reference_and_are_a_separate_step(
+        self, runner: CliRunner, cli_db: Path, home: Path
+    ) -> None:
+        stray = runner.invoke(app, ["memory", "rescope", "--apply"])
+        assert stray.exit_code == 2 and "only with --mark-reference" in stray.output
+        both = runner.invoke(
+            app, ["memory", "rescope", "--mark-reference", "--unmark-reference", "e"]
+        )
+        assert both.exit_code == 2 and "separate steps" in both.output
+
+    def test_an_unknown_except_is_refused(
+        self, runner: CliRunner, cli_db: Path, home: Path
+    ) -> None:
+        result = runner.invoke(
+            app, ["memory", "rescope", "--mark-reference", "--except", "no-such-entry"]
+        )
+        assert result.exit_code == 2 and "does not list" in result.output

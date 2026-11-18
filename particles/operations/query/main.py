@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -44,6 +44,7 @@ from particles.core.schema import (
     ContestedBadge,
     ContestednessReading,
     CoverageGapKind,
+    HitSource,
     ObserverScopeNote,
     Particle,
     ParticleType,
@@ -56,6 +57,7 @@ from particles.core.schema import (
     WindowHit,
 )
 from particles.core.scoring.confidence import compute_effective_confidence
+from particles.core.scoring.exact_token import identifier_tokens, token_share
 from particles.core.stance import has_stance_marker
 from particles.db import DEFAULT_STORE, StoreHandle, session_scope
 from particles.embeddings import cosine_similarities
@@ -65,7 +67,10 @@ from particles.extraction.scope import is_excluded_document_meta
 from particles.observability import traced
 from particles.operations.abstraction import stale_support_discounts
 from particles.operations.version_guard import assert_store_schema_current
-from particles.store.candidate_cache import load_active_candidates
+from particles.store.candidate_cache import (
+    load_active_candidate_particles,
+    load_active_candidates,
+)
 from particles.store.extractor_store import (
     get_cached_trust_weight,
     get_trust_weight_map,
@@ -84,12 +89,13 @@ from .observer_scope import filter_visible, merged_scope_note
 from .rank import RANKING_DEGRADED_NO_ENCODER, _collapse_co_evidential_top_k, _embed
 from .respond import (
     _generate_response,
+    answer_dates,
     fallback_listing,
     generation_error_cause,
     generation_error_reason,
     strip_refusal_marker,
 )
-from .source_info import load_source_rows
+from .source_info import hit_source, load_source_rows
 from .source_tags import excluded_by_source_tags
 from .source_trust import TrustPolicy, load_trust_policy
 from .structural import claim_filters_from_request, structural_query, structural_query_federated
@@ -103,6 +109,10 @@ from .window import (
 log = logging.getLogger(__name__)
 
 _SCHEMA_VERSION_CURRENT = SCHEMA_VERSION
+
+#: The stand-in vector a candidate carries when the query compares none.
+_NO_VECTOR: np.ndarray = np.zeros(0, dtype=np.float32)
+_NO_VECTOR.flags.writeable = False
 
 #: (particle, cosine_sim, effective_confidence)
 Scored = tuple[Particle, float, float]
@@ -140,6 +150,7 @@ def _rank_score(
     s: Scored,
     code_symbol_weight: float = 1.0,
     precedence_demoted: frozenset[str] = frozenset(),
+    exact_lift: Mapping[str, float] | None = None,
 ) -> float:
     """Combined score with the per-type, code-symbol, and
     document-precedence rank weights applied.
@@ -154,6 +165,11 @@ def _rank_score(
     decision surfaces first. All three are rank-time only — the reported
     ``effective_confidence`` (``s[2]``) is untouched, so confidence stays truthful
     and ``min_confidence`` is not perturbed.
+
+    ``exact_lift`` maps a candidate id to its ``μ · X(p, q)``, from
+    :func:`_exact_token_lift`. It is added after the three weights, so none of
+    them scales it and ``μ`` means the same for every belief. Absent or empty,
+    the score is exactly the combined score with its weights.
     """
     particle, sim, eff_conf = s
     score = _combined(sim, eff_conf)
@@ -163,7 +179,31 @@ def _rank_score(
         score *= code_symbol_weight
     if particle.id in precedence_demoted:
         score *= get_config().document_precedence.rank_penalty
+    if exact_lift:
+        score += exact_lift.get(particle.id, 0.0)
     return score
+
+
+def _exact_token_lift(question: str | None, scored: list[Scored]) -> dict[str, float]:
+    """``μ · X(p, q)`` for each candidate the question's identifier tokens reach.
+
+    Keyed by particle id; a candidate with ``X = 0`` is absent. Computed once
+    per candidate before the sort, never inside the sort key. Empty, and so
+    inert, when ``query.exact_token_weight`` is 0 or the question carries no
+    identifier token: the ranking is then exactly the dense one.
+    """
+    cfg = get_config().query
+    if cfg.exact_token_weight == 0.0 or not question:
+        return {}
+    tokens = identifier_tokens(question, cfg.exact_token_min_length)
+    if not tokens:
+        return {}
+    lift: dict[str, float] = {}
+    for particle, _, _ in scored:
+        share = token_share(particle.content, tokens)
+        if share:
+            lift[particle.id] = cfg.exact_token_weight * share
+    return lift
 
 
 async def _expand_narratives(
@@ -197,10 +237,17 @@ async def _gather_scored(
     *,
     scope_notes: list[ObserverScopeNote] | None = None,
     window_out: WindowGather | None = None,
+    sources_out: dict[str, HitSource | None] | None = None,
+    reference_withheld_out: set[str] | None = None,
 ) -> tuple[
     list[Scored], dict[str, datetime | None], dict[str, AsOfNote], int, tuple[int, int] | None
 ]:
     """Load, filter, and score one store's candidate particles.
+
+    ``reference_withheld_out`` is set only by the agent-memory region, an
+    unqueried surface: the observer filter then admits standing
+    memory only, with or without an observer, and the ids it left out as
+    reference are added to the set.
 
     Does **not** sort, truncate, collapse, populate the trust cache, or load
     the trust / decay policies — the caller owns those (the extractor trust
@@ -238,10 +285,20 @@ async def _gather_scored(
         # Fast path — the ACTIVE-only plan, read through the per-process
         # candidate cache, which returns exactly what the loader would. The
         # particles in it are shared, so nothing below may mutate one; the
-        # callers copy the ones they return (``_detach``).
-        candidates = await load_active_candidates(
-            session, request.min_confidence, subject_id=request.subject_id
-        )
+        # callers copy the ones they return (``_detach``). With no query
+        # vector nothing below compares one, so none is read: the projection
+        # and digest renders rank by confidence alone.
+        if query_emb is None:
+            candidates = [
+                (p, _NO_VECTOR)
+                for p in await load_active_candidate_particles(
+                    session, request.min_confidence, subject_id=request.subject_id
+                )
+            ]
+        else:
+            candidates = await load_active_candidates(
+                session, request.min_confidence, subject_id=request.subject_id
+            )
     else:
         view = await load_as_of_view(session, request.as_of)
         widened = await get_particles_with_embeddings_as_of(
@@ -348,21 +405,29 @@ async def _gather_scored(
     # set. It sits after every other candidate filter and before scoring, top_k
     # and the relevance floor, so a project's results are never starved by
     # beliefs it cannot see. No observer, no work.
-    if request.observer_project is not None:
+    standing_only = reference_withheld_out is not None
+    if request.observer_project is not None or standing_only:
         scope = await filter_visible(
             session,
             [p for p, _ in candidates],
             request.observer_project,
             as_of=request.as_of,
+            standing_only=standing_only,
         )
         candidates = [(p, emb) for p, emb in candidates if p.id in scope.visible_ids]
-        if scope_notes is not None:
+        if scope_notes is not None and request.observer_project is not None:
             scope_notes.append(scope.note(request.observer_project))
+        if reference_withheld_out is not None:
+            reference_withheld_out.update(scope.withheld_ids)
 
     # Batch-load (content_published_at, source_type, entry_id, uri_r,
     # author_id) for all candidate particles — recency decay + the trust-policy
     # inputs, including the §6.4 AUTHOR tier.
     source_info = await load_source_rows(session, [p for p, _ in candidates])
+    # the same rows, readable, for ``QueryResponse.sources``; no
+    # extra read.
+    if sources_out is not None:
+        sources_out.update({pid: hit_source(row) for pid, row in source_info.items()})
 
     # keep-ACTIVE-and-discount for derived particles whose
     # premise set changed since the last revalidation. Applied before the
@@ -422,34 +487,50 @@ async def _gather_scored(
     return scored, pub_at_by_id, as_of_notes, excluded_undatable, claim_stats
 
 
-def _truncation_warning(scored: list[Scored], top: list[Scored], top_k: int) -> str | None:
-    """Warn when the top-k cutoff likely excluded relevant particles.
+def _truncation_warning(
+    scored: list[Scored],
+    top: list[Scored],
+    top_k: int,
+    exact_lift: Mapping[str, float] | None = None,
+) -> str | None:
+    """Warn when the top-k cutoff fell inside a plateau of equally good hits.
 
     ``scored`` is the full sorted candidate list; ``top`` is the rendered
-    (post-collapse) result. The thresholds (minimum score gap, near-cutoff
-    margin and count) come from ``config.query``.
+    (post-collapse) result. It fires only when the last rendered hit scores
+    within ``query.truncation_plateau_drop`` of the first and more than
+    ``query.truncation_near_count`` excluded hits score as well: the head has
+    not fallen away from its best hit, so where the cut landed is arbitrary. A
+    store's scores are continuous, so the tail just below any cutoff is dense;
+    counting near-ties there fired on every query. The advice names a top_k
+    that would take in the plateau, or a narrower question when none can.
     """
     if not (top and len(scored) > top_k):
         return None
     cfg = get_config().query
     # Use the rank score (with the NARRATIVE demotion) so the warning
     # heuristic matches the order the result was actually sorted by.
-    last_score = _rank_score(top[-1])
-    next_score = _rank_score(scored[top_k])
-    gap = last_score - next_score
-    near_cutoff = sum(
-        1 for s in scored[top_k:] if _rank_score(s) >= last_score - cfg.truncation_near_margin
+    first_score = _rank_score(top[0], exact_lift=exact_lift)
+    last_score = _rank_score(top[-1], exact_lift=exact_lift)
+    if first_score <= 0.0:
+        # The floor below is a fraction of the best score, which is a lower
+        # bound only for a positive one; a best hit at or below zero is not a
+        # plateau worth widening (security review of PR 1225, not security).
+        return None
+    floor = first_score * (1.0 - cfg.truncation_plateau_drop)
+    if last_score < floor:
+        return None
+    plateau = sum(1 for s in scored[top_k:] if _rank_score(s, exact_lift=exact_lift) >= floor)
+    if plateau <= cfg.truncation_near_count:
+        return None
+    drop = f"{cfg.truncation_plateau_drop:.0%}"
+    head = (
+        f"top_k={top_k} cut a plateau: the last result scores within {drop} of the "
+        f"first, and {plateau} more particles score as well."
     )
-    if gap < cfg.truncation_min_gap or near_cutoff > cfg.truncation_near_count:
-        # 200 is the QueryRequest.top_k schema ceiling, not a tuneable.
-        suggested_k = min(top_k * 3, 200)
-        return (
-            f"top_k={top_k} may be too low: {near_cutoff} additional particles "
-            f"scored within {cfg.truncation_near_margin} of the cutoff "
-            f"(gap to next: {gap:.3f}). "
-            f"Try --top-k {suggested_k} for a more complete answer."
-        )
-    return None
+    # 200 is the QueryRequest.top_k schema ceiling, not a tuneable.
+    if top_k + plateau <= 200:
+        return f"{head} Try --top-k {top_k + plateau} for a more complete answer."
+    return f"{head} No top_k takes them all in; a narrower question or a subject filter will."
 
 
 def _confidence_note(top_particles: list[Particle], top_eff_confs: list[float]) -> str:
@@ -505,20 +586,39 @@ def _relevance_note(top: list[Scored], embeddings_used: bool) -> RelevanceNote |
     return RelevanceNote(max_similarity=max_sim, floor=floor, below_floor=max_sim < floor)
 
 
-def _below_floor_answer(request: QueryRequest, note: RelevanceNote, hit_count: int) -> str:
+def _withheld_sentence(count: int) -> str:
+    """The server-built sentence a refusal carries when its hits are withheld.
+
+    The plain-text half of ``withheld_candidates``: a consumer
+    that reads only ``answer`` learns what was withheld and how to ask for it.
+    """
+    return (
+        f"{count} nearest belief(s) were withheld as likely unrelated; "
+        "request them with `include_refused_candidates`."
+    )
+
+
+def _below_floor_answer(
+    request: QueryRequest, note: RelevanceNote, hit_count: int, *, withheld: bool
+) -> str:
     """The deterministic no-LLM refusal for a below-floor query.
 
     Server-built prose: cannot be argued out of by a crafted question, costs
     zero tokens, and is reproducible in tests. With ``as_of`` set the sentence
-    keeps the tense.
+    keeps the tense. ``withheld`` says whether the hits leave the
+    envelope, which decides the closing sentence.
     """
     detail = (
         f"(nearest belief similarity {note.max_similarity:.2f}, "
         f"below the relevance floor {note.floor:.2f})"
     )
     tail = (
-        f" The {hit_count} nearest belief(s) are listed for transparency; "
-        f"they are likely unrelated to the question."
+        f" {_withheld_sentence(hit_count)}"
+        if withheld
+        else (
+            f" The {hit_count} nearest belief(s) are listed for transparency; "
+            f"they are likely unrelated to the question."
+        )
     )
     if request.as_of is not None:
         return (
@@ -547,6 +647,7 @@ async def _build_response(
     observer_scope: ObserverScopeNote | None = None,
     window_hits_by_id: dict[str, WindowHit] | None = None,
     window_coverage: WindowCoverage | None = None,
+    sources_by_id: dict[str, HitSource | None] | None = None,
 ) -> QueryResponse:
     """Render the final NL answer + envelope from a ranked, collapsed result.
 
@@ -569,6 +670,10 @@ async def _build_response(
     top_particles = [p for p, _, _ in top]
     top_eff_confs = [ec for _, _, ec in top]
     top_pub_ats = [pub_at_by_id.get(p.id) for p in top_particles]
+    # parallel to particles, from the ranker's source rows.
+    top_sources: list[HitSource | None] = (
+        [sources_by_id.get(p.id) for p in top_particles] if sources_by_id is not None else []
+    )
     # the parallel-list pattern of effective_confidences — entry i
     # annotates particles[i]; None for a hit still ACTIVE today.
     as_of_notes: list[AsOfNote | None] = (
@@ -599,8 +704,8 @@ async def _build_response(
             )
 
     # the question-level relevance verdict. Below the floor the
-    # answer is deterministic — no LLM call — and the hits remain in the
-    # envelope as nearest-but-likely-unrelated transparency.
+    # answer is deterministic — no LLM call. The hits leave the envelope on
+    # any refusal unless the request asked for them.
     relevance = _relevance_note(top, embeddings_used)
     # with no encoder there is no semantic retrieval to disclose a
     # floor for — `sim` was aliased to effective confidence, so these are the
@@ -621,8 +726,11 @@ async def _build_response(
         if grounded and top_particles
         else None
     )
+    withhold = not request.include_refused_candidates
     if relevance is not None and relevance.below_floor:
-        answer = _below_floor_answer(request, relevance, len(top_particles))
+        answer = _below_floor_answer(
+            request, relevance, len(top_particles), withheld=withhold and bool(top_particles)
+        )
         answer_refused = True
     else:
         try:
@@ -636,11 +744,21 @@ async def _build_response(
                 narrative_constituents=narrative_constituents,
                 as_of=request.as_of,
                 handles=handles,
+                dates=(
+                    answer_dates(
+                        composed_particles(top_particles, narrative_constituents),
+                        pub_at_by_id,
+                    )
+                    if get_config().query.answer_dates
+                    else None
+                ),
             )
             # the responder leads a non-bearing refusal with the
             # NO_RELEVANT_KNOWLEDGE marker — strip it, keep the prose, record
             # the machine-readable flag.
             answer, answer_refused = strip_refusal_marker(answer)
+            if answer_refused and withhold and top_particles:
+                answer = f"{answer.rstrip()}\n\n{_withheld_sentence(len(top_particles))}"
             if handles is not None and not answer_refused:
                 # every cited handle checked against what the
                 # composer was shown; the uncited units keep the composer's
@@ -682,16 +800,32 @@ async def _build_response(
     if answer_refused:
         truncation_warning = None
 
+    # a refused answer withholds its candidates unless the request
+    # asked for them. Every parallel list empties with ``particles``, so none is
+    # ever longer than it; what describes the question (``relevance``, the
+    # coverage fields, the observer scope) stays. Ranking, stance and narrative
+    # expansion have already run, so withholding moves no score and no order.
+    withheld_candidates = 0
+    if answer_refused and withhold and top_particles:
+        withheld_candidates = len(top_particles)
+        top_particles, top_eff_confs, top_pub_ats, top_sources = [], [], [], []
+        agreement_distributions, agreement_caveat = None, None
+        contestedness, contested = None, None
+        narrative_constituents = {}
+        as_of_notes, window_hits = [], []
+
     return QueryResponse(
         answer=answer,
         answer_generation_error=answer_generation_error,
         answer_generation_error_cause=answer_generation_error_cause,
         ranking_degraded=ranking_degraded,
         answer_refused=answer_refused,
+        withheld_candidates=withheld_candidates,
         answer_attribution=answer_attribution,
         particles=top_particles,
         effective_confidences=top_eff_confs,
         content_published_ats=top_pub_ats,
+        sources=top_sources,
         coverage_gaps=coverage_gaps,
         subject_coverage_gaps=subject_coverage_gaps,
         truncation_warning=truncation_warning,
@@ -759,6 +893,7 @@ async def query(
     query_emb = _embed(request.question)
     scope_notes: list[ObserverScopeNote] = []
     window_gather = WindowGather() if request.window is not None else None
+    sources_by_id: dict[str, HitSource | None] = {}
     scored, pub_at_by_id, as_of_notes_by_id, as_of_excluded, claim_stats = await _gather_scored(
         session,
         request,
@@ -767,17 +902,20 @@ async def query(
         decay_policy,
         scope_notes=scope_notes,
         window_out=window_gather,
+        sources_out=sources_by_id,
     )
     claim_coverage = await _claim_coverage_for_stats(session, claim_stats)
     window_coverage = await window_gather.coverage(session) if window_gather is not None else None
 
     # Rank by combined score, then collapse CO_EVIDENTIAL groups in the top-k
     # (§6.10) — see _collapse_co_evidential_top_k for the noisy-OR merge.
-    scored.sort(key=_rank_score, reverse=True)
+    # the exact identifier-token addend joins before the cut.
+    exact_lift = _exact_token_lift(request.question, scored)
+    scored.sort(key=lambda s: _rank_score(s, exact_lift=exact_lift), reverse=True)
     top = scored[: request.top_k]
     top = _detach(await _collapse_co_evidential_top_k(session, top))
 
-    truncation_warning = _truncation_warning(scored, top, request.top_k)
+    truncation_warning = _truncation_warning(scored, top, request.top_k, exact_lift)
     coverage_gaps = await _find_coverage_gaps(session)
     subject_coverage_gaps = await _find_subject_coverage_gaps(session, request.subject_id, len(top))
 
@@ -841,6 +979,7 @@ async def query(
         observer_scope=merged_scope_note(scope_notes),
         window_hits_by_id=window_gather.hits if window_gather is not None else None,
         window_coverage=window_coverage,
+        sources_by_id=sources_by_id,
     )
 
 
@@ -889,6 +1028,7 @@ async def retrieve_ranked(
     apply_utility: bool = False,
     apply_owner: bool = False,
     exclude_source_tags: Collection[str] = (),
+    reference_withheld_out: set[str] | None = None,
 ) -> list[Scored]:
     """Select + rank one store's candidate particles — no NL answer generated.
 
@@ -928,6 +1068,10 @@ async def retrieve_ranked(
     ``top_k`` cut, every candidate held only by corpus entries carrying one of
     those tags (:mod:`.source_tags`). Only the agent-memory region passes it.
 
+    ``reference_withheld_out`` (default ``None`` = inert) makes
+    the read admit standing memory only and collects the ids it left out as
+    reference. Only the agent-memory region passes it.
+
     All these signals are rank-time only — stored confidence and the returned
     ``effective_confidence`` are untouched.
     """
@@ -944,7 +1088,12 @@ async def retrieve_ranked(
     # neither are the claim-prefilter stats (this path sets no
     # structural filter).
     scored, pub_at_by_id, _as_of_notes, _as_of_excluded, _claim_stats = await _gather_scored(
-        session, request, query_emb, trust_policy, decay_policy
+        session,
+        request,
+        query_emb,
+        trust_policy,
+        decay_policy,
+        reference_withheld_out=reference_withheld_out,
     )
 
     # on the projection / digest path (never `query`, which scores
@@ -975,8 +1124,10 @@ async def retrieve_ranked(
             scored = [s for s in scored if s[0].id not in dropped]
 
     demoted = await _precedence_demotions(session, scored, pub_at_by_id, conflict_pairs)
+    # the exact identifier-token addend, before the cut like the others.
+    exact_lift = _exact_token_lift(request.question, scored)
     scored.sort(
-        key=lambda s: _rank_score(s, code_symbol_rank_weight, demoted),
+        key=lambda s: _rank_score(s, code_symbol_rank_weight, demoted, exact_lift),
         reverse=True,
     )
     top = scored[: request.top_k]
@@ -1084,6 +1235,7 @@ async def query_federated(
 
     merged: list[Scored] = []
     pub_at_by_id: dict[str, datetime | None] = {}
+    sources_by_id: dict[str, HitSource | None] = {}
     store_by_id: dict[str, StoreHandle] = {}
     coverage_gaps: list[str] = []
     # the viewer's single as_of (on the shared request) applies to
@@ -1112,6 +1264,7 @@ async def query_federated(
                 decay_policy,
                 scope_notes=scope_notes,
                 window_out=window_gather,
+                sources_out=sources_by_id,
             )
             if window_gather is not None:
                 window_hits_by_id.update(window_gather.hits)
@@ -1138,13 +1291,16 @@ async def query_federated(
                 store_by_id[p.id] = store
             coverage_gaps.extend(await _find_coverage_gaps(s))
 
-    merged.sort(key=_rank_score, reverse=True)
+    # the viewer's μ over the whole union, before it is cut; a member
+    # store's own configuration is never read.
+    exact_lift = _exact_token_lift(request.question, merged)
+    merged.sort(key=lambda s: _rank_score(s, exact_lift=exact_lift), reverse=True)
     top = merged[: request.top_k]
     top = await _collapse_federated(top, store_by_id)
-    top.sort(key=_rank_score, reverse=True)
+    top.sort(key=lambda s: _rank_score(s, exact_lift=exact_lift), reverse=True)
     top = _detach(top)
 
-    truncation_warning = _truncation_warning(merged, top, request.top_k)
+    truncation_warning = _truncation_warning(merged, top, request.top_k, exact_lift)
     return await _build_response(
         request,
         top,
@@ -1159,6 +1315,7 @@ async def query_federated(
         observer_scope=merged_scope_note(scope_notes),
         window_hits_by_id=window_hits_by_id if request.window is not None else None,
         window_coverage=window_coverage,
+        sources_by_id=sources_by_id,
     )
 
 

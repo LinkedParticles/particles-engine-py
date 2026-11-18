@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING
 import typer
 
 from particles.api.cli import app, run
+from particles.api.cli._remote import refuse_remote_sync
 from particles.db import session_scope
 
 if TYPE_CHECKING:
@@ -174,6 +175,7 @@ def export_cmd(
     ),
 ) -> None:
     """Write a store-export bundle (manifest + particles/subjects members)."""
+    refuse_remote_sync("interchange export")
     if format not in ("jsonl", "yaml"):
         typer.echo(f"Unknown --format {format!r}; expected 'jsonl' or 'yaml'.", err=True)
         raise typer.Exit(2)
@@ -197,6 +199,7 @@ def import_cmd(
     store: str = typer.Option("default", "--store", help="Target store handle"),
 ) -> None:
     """Import a store-export bundle into a store (single-store writes, §6.6)."""
+    refuse_remote_sync("interchange import")
     if not bundle.is_dir():
         typer.echo(f"Bundle directory {bundle!r} not found.", err=True)
         raise typer.Exit(1)
@@ -235,7 +238,26 @@ async def _import(bundle: Path, store: str) -> None:
         f"{summary.dropped} dropped."
     )
     _echo_neutralised(summary, "imported")
+    _echo_lifecycle(summary)
     _echo_dropped_keys(summary.dropped_keys)
+
+
+def _echo_lifecycle(summary: ImportSummary) -> None:
+    """Name the units an import set aside for their status, and the reasons it cleared."""
+    if summary.skipped_status:
+        listed = ", ".join(
+            f"{status} ({count})" for status, count in sorted(summary.skipped_status.items())
+        )
+        typer.echo(
+            f"Set aside {sum(summary.skipped_status.values())} unit(s) that were not ACTIVE: "
+            f"{listed}. An import admits active claims only; restore into an empty "
+            "store keeps lifecycle state."
+        )
+    if summary.reason_cleared:
+        typer.echo(
+            f"{summary.reason_cleared} particle(s) carried a status reason from their source "
+            "store; imported with none, since this store's ladder decides their lifecycle."
+        )
 
 
 def _echo_neutralised(summary: ImportSummary | RestoreSummary, verb: str) -> None:
@@ -295,6 +317,7 @@ def restore_cmd(
     holds is restored as attribution, exactly as ``import`` treats it, so a
     bundle you are handed cannot become the memory-server facade's own memory.
     """
+    refuse_remote_sync("interchange restore")
     if not bundle.exists():
         typer.echo(f"Bundle path {str(bundle)!r} not found.", err=True)
         raise typer.Exit(1)

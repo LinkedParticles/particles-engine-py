@@ -606,3 +606,28 @@ async def test_a_record_naming_one_particle_twice_stores_one_edge_for_it(
     assert sorted(edges) == sorted(["particle-a", other])
     stored = await get_particle(db_session, record.id)
     assert stored is not None and len(stored.provenance) == 3
+
+
+@pytest.mark.asyncio
+async def test_active_particles_by_ids_keep_the_status_listing_order(db_session: Any) -> None:
+    """The scoped read lists what get_particles_by_status lists, in its order, for those ids."""
+    from sqlalchemy import update
+
+    from particles.store.particle_store import get_active_particles_by_ids, get_particles_by_status
+
+    made = []
+    for i in range(6):
+        p = _particle().model_copy(update={"id": f"p-{5 - i}", "content": f"claim {i}"})
+        await insert_particle(db_session, p)
+        made.append(p)
+    await db_session.execute(
+        update(ParticleRow).where(ParticleRow.id == "p-2").values(status=Status.RETRACTED.value)
+    )
+    await db_session.commit()
+
+    wanted = ["p-0", "p-2", "p-3", "p-5", "p-missing", "p-3"]
+    scoped = await get_active_particles_by_ids(db_session, wanted)
+    listing = [p for p in await get_particles_by_status(db_session, Status.ACTIVE)]
+    assert [p.id for p in scoped] == [p.id for p in listing if p.id in set(wanted)]
+    assert [p.id for p in scoped] == ["p-5", "p-3", "p-0"]  # insertion (rowid) order
+    assert await get_active_particles_by_ids(db_session, []) == []

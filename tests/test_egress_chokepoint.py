@@ -387,6 +387,22 @@ _DYNAMIC = "<dynamic>"
 # vetted (``particles.url_safety.resolve_and_pin``), or it falls in one of
 # 1's three exemption classes.
 _SUBPROCESS_EGRESS_ALLOWLIST: dict[tuple[str, str, str], tuple[int, str]] = {
+    ("api/cli/_claude_launcher.py", "start_worker", _DYNAMIC): (
+        1,
+        "exemption class 3, local-only: the installer-pinned `particles hook "
+        "session-end-worker` command, started detached; nothing in it comes from the "
+        "hook payload",
+    ),
+    ("api/cli/_codex_launcher.py", "handoff", _DYNAMIC): (
+        2,
+        "exemption class 3, local-only: installer-pinned particles worker and recall "
+        "children, no shell, local backend only; no model calls in either child",
+    ),
+    ("api/cli/_codex_schedule.py", "run_command", _DYNAMIC): (
+        1,
+        "exemption class 3, local-only: launchctl/plutil/crontab inventory and owned "
+        "job registration, plus Codex --version; never executes discovered commands",
+    ),
     ("extraction/reddit.py", "_fetch_with_curl", "curl"): (
         1,
         "resolve_and_pin → curl --resolve",
@@ -415,11 +431,42 @@ _SUBPROCESS_EGRESS_ALLOWLIST: dict[tuple[str, str, str], tuple[int, str]] = {
         "exemption class 3, local-only: the doctor's rev-parse / "
         "describe / tag --list over the install's own checkout; never fetches",
     ),
+    ("api/cli/_thin_client.py", "exclude_from_backups", _DYNAMIC): (
+        1,
+        "exemption class 3, local-only: `tmutil addexclusion` marks "
+        "the installer's own token directory for Time Machine; it "
+        "reads and fetches nothing",
+    ),
     ("api/cli/init.py", "_claude_mcp", _DYNAMIC): (
         1,
         "exemption class 3, local-only: `claude mcp add` / `remove` "
         "edits the user's own Claude Code registration file; it "
         "starts no server and fetches nothing",
+    ),
+    ("benchmark/rot/particles_door.py", "__init__", _DYNAMIC): (
+        1,
+        "exemption class 3, local-only: starts this interpreter "
+        "(sys.executable -m the SDK's own door child) for one isolated rot door "
+        "build; the child's own calls go through the "
+        "SDK's checked transports under the operator's network.egress, copied "
+        "into its config",
+    ),
+    ("benchmark/rot/contract.py", "__init__", _DYNAMIC): (
+        2,
+        "exemption class 1, operator-configured: the door arm's "
+        "competitor adapter (the interpreter of the operator's pinned adebench "
+        "clone running the SDK's stdlib shim) and its per-build server, both named "
+        "in the operator's arms manifest (§4); a competitor's own "
+        "connections are that memory's, outside the SDK's transports by nature, "
+        "and the SDK passes it only the variables its entry names plus the base "
+        "set (PATH, locale, temp dirs), with HOME set to the build's own scratch "
+        "directory",
+    ),
+    ("benchmark/rot/door_runner.py", "factory", _DYNAMIC): (
+        1,
+        "exemption class 1, operator-configured: a `prepare` "
+        "command from the operator's arms manifest, run in the build's own "
+        "store directory before a competitor starts",
     ),
     ("benchmark/update_gate/case.py", "run_one", _DYNAMIC): (
         1,

@@ -33,6 +33,12 @@ def quality_cmd() -> None:
     terminal_echo(f"  Active:          {report.active_particles:>6,}")
     if report.inconsistency_particles:
         terminal_echo(f"  Inconsistency:   {report.inconsistency_particles:>6,}  (needs review)")
+    if report.active_without_embedding:
+        # semantic query scores only embedded beliefs.
+        terminal_echo(
+            f"  No embedding:    {report.active_without_embedding:>6,}"
+            "  (not retrieved until a consolidation run embeds them)"
+        )
     terminal_echo("  Calibration:")
     for bucket in report.calibration:
         flag = (

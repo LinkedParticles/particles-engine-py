@@ -176,6 +176,18 @@ class TestParseExtractionResponse:
         candidates, notes = _parse_extraction_response(raw)
         assert len(candidates) == 1
 
+    @pytest.mark.parametrize(
+        "tail",
+        ["\n\nI extracted one claim.", "\n```\nThat is every claim.", '\n[{"content": "x"}]'],
+    )
+    def test_text_after_the_array_is_ignored_not_fatal(self, tail: str) -> None:
+        # json.loads raised "Extra data" here, and the whole reply was read as
+        # unusable: a retry, and no claims when the retry did the same.
+        body = '[{"content": "Test.", "confidence_value": 0.8, "uncertainty_nature": "EPISTEMIC"}]'
+        candidates, notes = _parse_extraction_response("```json\n" + body + tail)
+        assert [c.content for c in candidates] == ["Test."]
+        assert any("after its JSON array" in n for n in notes)
+
     def test_invalid_json(self) -> None:
         candidates, notes = _parse_extraction_response("not json")
         assert candidates == []
@@ -397,8 +409,8 @@ class TestCallLlmFencing:
         captured = await self._capture_call(source)
 
         # the trusted system turn is now split into a cached prefix
-        # (the invariant instructions) and an uncached remainder (the per-source
-        # reference date + schema + fence clause). Both stay in the system turn,
+        # (the invariant instructions and schema) and an uncached remainder (the
+        # per-source reference date + fence clause). Both stay in the system turn,
         # so F3 is unchanged — assert on the effective system (prefix + remainder).
         cache_prefix = captured["kwargs"].get("cache_prefix") or ""
         remainder = captured["kwargs"]["system"]
@@ -471,6 +483,16 @@ class TestCallLlmFencing:
         assert "2023-01-02" not in a.request.cache_prefix
         assert "2024-06-15" in b.request.system
 
+        # 0.21.0: the date is the instructions' last line, so every rule and the
+        # whole output schema are in the cached prefix, and the uncached
+        # remainder is only the date line and the fence clause.
+        assert "JSON array" in a.request.cache_prefix
+        assert '"confidence_value"' in a.request.cache_prefix
+        remainder = a.request.system
+        assert remainder.startswith("2023-01-02.")
+        assert "SECURITY" in remainder
+        assert len(remainder) < 1000
+
         # Content-preserving: prefix + remainder reproduces the full fenced system
         # a non-caching adapter would send, and the F3 nonce fencing the user turn
         # is present in that system.
@@ -498,8 +520,9 @@ class TestReferenceResolutionRule:
             structure_enabled=flag_on,
         )
         assert REFERENCE_RULE in prompt
-        # Exactly one date anchor: the validity rule's, or the standalone line.
+        # Exactly one date anchor, the prompt's last line (0.21.0).
         assert prompt.count("{reference_date}") == 1
+        assert prompt.endswith("published/captured on {reference_date}.")
 
     def test_reference_date_filled_with_validity_off(self) -> None:
         from particles.config import get_config

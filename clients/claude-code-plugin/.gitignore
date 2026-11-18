@@ -1,0 +1,4 @@
+node_modules/
+# Laid by Claude Code when it loads the mod; never committed.
+.claude-plugin/types/
+tsconfig.json

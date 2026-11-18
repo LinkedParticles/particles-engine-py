@@ -23,7 +23,9 @@ from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
+from particles.benchmark.ceiling import STOP_EXCLUSION, StoppedAtCeiling
 from particles.benchmark.rot.schema import Rate
+from particles.benchmark.spend import RunSpend
 
 # ---------------------------------------------------------------------------
 # Held-out set
@@ -73,9 +75,19 @@ EXCLUSION_BUDGET = "budget"
 EXCLUSION_ANSWER = "answer_failed"
 #: The store returned no candidate at all (the floor is inert on an empty result).
 EXCLUSION_EMPTY = "empty"
-EXCLUSION_KINDS = (EXCLUSION_INFRA, EXCLUSION_BUDGET, EXCLUSION_ANSWER, EXCLUSION_EMPTY)
+#: The run's spend stop left a call of this question unstarted.
+EXCLUSION_CEILING = STOP_EXCLUSION
+EXCLUSION_KINDS = (
+    EXCLUSION_INFRA,
+    EXCLUSION_BUDGET,
+    EXCLUSION_ANSWER,
+    EXCLUSION_EMPTY,
+    EXCLUSION_CEILING,
+)
 #: Causes a re-run should try again: never checkpointed, never restored.
-RETRYABLE_EXCLUSIONS = frozenset({EXCLUSION_INFRA, EXCLUSION_BUDGET, EXCLUSION_ANSWER})
+RETRYABLE_EXCLUSIONS = frozenset(
+    {EXCLUSION_INFRA, EXCLUSION_BUDGET, EXCLUSION_ANSWER, EXCLUSION_CEILING}
+)
 
 
 class QuestionResult(BaseModel):
@@ -105,6 +117,10 @@ class QuestionResult(BaseModel):
     #: judged stage's cost projection is measured from. Sizes, never text.
     context_chars: int = 0
     question_chars: int = 0
+    #: Sentences in the composed answer, by the leakage harness's splitter;
+    #: ``None`` when no answer was composed. A count, never text; a stopped
+    #: run compares its finished and interrupted answers by it.
+    answer_sentences: int | None = None
     #: Audit trail. Suppressed at production under
     #: ``benchmark.record_claim_text: false``; ids are kept regardless.
     question: str = ""
@@ -141,6 +157,23 @@ class FloorRow(BaseModel):
     passed_were_unanswerable: Rate = Field(default_factory=Rate)
 
 
+class ResponderRow(BaseModel):
+    """The responder's own refusals, judged (judge protocol 2 on).
+
+    With the floor off, the only refusal left is the answer step's own marker.
+    The same two conditionings as :class:`FloorRow`, over one gate instead of a
+    floor sweep: of the answerable questions, the share the responder refused
+    (its false-refusal rate); of what it refused, the share that was answerable.
+    """
+
+    #: Of the judged questions, the share the responder refused.
+    refused: Rate = Field(default_factory=Rate)
+    answerable_refused: Rate = Field(default_factory=Rate)
+    refused_were_answerable: Rate = Field(default_factory=Rate)
+    answerable_refused_by_source: dict[str, Rate] = Field(default_factory=dict)
+    refused_were_answerable_by_source: dict[str, Rate] = Field(default_factory=dict)
+
+
 class RunSelection(BaseModel):
     """The run tuple — what a number is comparable under."""
 
@@ -173,5 +206,15 @@ class RelevanceFloorReport(BaseModel):
     #: Empty until the judged stage has run.
     sweep: list[FloorRow] = Field(default_factory=list)
     answerable: Rate = Field(default_factory=Rate)
+    #: The responder's judged refusals; ``None`` under a protocol that does not
+    #: judge them (protocol 1 labels a refusal unanswerable unjudged).
+    responder: ResponderRow | None = None
     excluded: dict[str, int] = Field(default_factory=dict)
     quality_notes: list[str] = Field(default_factory=list)
+    #: The judged stage's projection beside the usage the providers reported
+    #: for it. ``None`` for a replay-only run, and on a report
+    #: written before the field existed.
+    spend: RunSpend | None = None
+    #: Set when the judged stage stopped at its spend ceiling,
+    #: ``None`` on a complete report. A stopped run is not a result to quote.
+    stopped_at_ceiling: StoppedAtCeiling | None = None

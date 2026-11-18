@@ -34,6 +34,7 @@ from particles.core.schema import CorpusEntry, FetchPolicy, Mutability
 from particles.corpus import fetch, operator_only, rule_roots
 from particles.corpus.rule_roots import record_rule_source_roots
 from particles.corpus.store import CorpusEntryRow
+from tests._corpus_rows import local_entry_row
 
 DARWIN = sys.platform == "darwin"
 _ORIGINAL_EUID = rule_roots.effective_uid
@@ -365,7 +366,7 @@ async def _lazy_entry(session: Any, path: Path) -> CorpusEntryRow:
         mutability=Mutability.MUTABLE,
         deposited_by="rule-sync",
     )
-    row = CorpusEntryRow.from_model(entry)
+    row = local_entry_row(entry)
     session.add(row)
     await session.flush()
     return row
@@ -1176,7 +1177,7 @@ async def _entry_by(session: Any, path: Path, deposited_by: str) -> CorpusEntryR
         mutability=Mutability.MUTABLE,
         deposited_by=deposited_by,
     )
-    row = CorpusEntryRow.from_model(entry)
+    row = local_entry_row(entry)
     session.add(row)
     await session.flush()
     return row

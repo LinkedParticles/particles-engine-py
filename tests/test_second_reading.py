@@ -442,6 +442,8 @@ async def _two_sessions(session: AsyncSession) -> Any:
             source_type=SourceType.CONVERSATION,
             mutability=Mutability.STABLE,
             content_published_at=T0 + timedelta(days=day),
+            # One project: a session's lineage is its project.
+            tags=["project:-Users-o-src-app"],
         )
         await session.commit()
         await extract_snapshot(

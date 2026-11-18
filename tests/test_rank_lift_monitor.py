@@ -25,6 +25,7 @@ from particles.core.scoring.utility import (
     OUT_OF_BAND,
     LiftRanker,
     MonitorThresholds,
+    RankLiftBand,
     SweepRow,
     evaluate_rank_lift_monitor,
     plan_alert,
@@ -138,6 +139,74 @@ def test_floor_above_ceiling_is_no_band() -> None:
     assert head.verdict == "no_band"
 
 
+def test_a_head_full_of_entrants_is_no_band_with_its_entry_share() -> None:
+    """The cohort enters with sixteen used peers that leave four unused slots of twenty."""
+    used = [_row(f"u{i:02d}", 0.69, 1.0) for i in range(16)]
+    head = _judge(_plateau() + used, 0.1, cohort={"u00", "u01", "u02"})
+
+    assert head.verdict == "no_band"
+    assert head.captured == 3 and head.cohort_size == 3
+    assert head.entry_share == 0.2
+    assert head.band == RankLiftBand(low=None, high=None, contiguous=True)
+    assert head.floor.low is not None and head.ceiling.high is not None
+    assert head.ceiling.high < head.floor.low
+
+
+# ------------------------------------------------------------ the retention
+
+
+def test_retention_is_the_ten_most_used_beliefs() -> None:
+    """Of twelve used beliefs the top ten by R are the cohort; the head holds eight."""
+    used = [_row(f"r{i:02d}", 0.5, float(i)) for i in range(1, 13)]
+    head = _judge(_plateau() + used, 0.12, cohort=set())
+
+    # 0.5 + 0.12·ln(1 + R) clears the 0.7 plateau from R = 5 up; R = 3..12 are retained.
+    assert head.retention_size == 10
+    assert head.retained == 8
+
+
+def test_retention_counts_only_used_beliefs() -> None:
+    """Any R above zero is use, however small; R = 0 is not."""
+    used = [_row(f"r{i:02d}", 0.5, float(i)) for i in range(8, 13)] + [_row("h", 0.5, 0.5)]
+    head = _judge(_plateau() + used + [_row("q", 0.5)], 0.12, cohort=set())
+
+    assert head.retention_size == 6
+    # 0.5 + 0.12·ln 1.5 stays under the plateau, so the lightly used belief is not held.
+    assert head.retained == 5
+
+
+# ------------------------------------------------------------ head sizes
+
+
+def test_no_head_sizes_reads_nothing() -> None:
+    assert (
+        evaluate_rank_lift_monitor(
+            _plateau() + _cohort(),
+            cohort_ids=set(COHORT_R),
+            grid=GRID,
+            head_sizes=[],
+            configured_rank_lift=0.1,
+            thresholds=DEFAULT,
+        )
+        == ()
+    )
+
+
+def test_a_zero_head_size_is_dropped_and_repeats_are_read_once() -> None:
+    heads = evaluate_rank_lift_monitor(
+        _plateau() + _cohort(),
+        cohort_ids=set(COHORT_R),
+        grid=GRID,
+        head_sizes=[0, 1, 1],
+        configured_rank_lift=0.1,
+        thresholds=DEFAULT,
+    )
+
+    assert [h.head_size for h in heads] == [1]
+    # At λ = 0.1 the most used cohort belief, c0 (R = 8), heads the view.
+    assert heads[0].captured == 1 and heads[0].distinct_contents == 1
+
+
 # ------------------------------------------------- the three excursion shapes
 
 
@@ -206,6 +275,13 @@ def test_a_reading_that_turns_cold_clears_the_alert() -> None:
     )
 
 
+def test_a_target_entering_a_head_is_a_transition() -> None:
+    current = {"a": [20], "b": [20, 60], "c": []}
+    previous = {"b": [60], "c": []}
+
+    assert target_transitions(current, previous, [20, 60]) == [("b", 20, "entered")]
+
+
 def test_a_target_new_to_the_record_has_no_transition() -> None:
     assert target_transitions({"t": [60]}, {}, [60]) == []
     assert target_transitions({"t": [60]}, None, [60]) == []
@@ -231,6 +307,13 @@ def test_the_fast_ranker_orders_exactly_as_the_sweep_does() -> None:
         assert [r.particle_id for r in LiftRanker(rows).ordered(lam)] == [
             r.particle_id for r in brute
         ]
+
+
+def test_the_fast_ranker_stops_at_its_limit() -> None:
+    rows = _plateau(5) + _cohort()
+    ordered = LiftRanker(rows).ordered(0.1, 2)
+
+    assert [r.particle_id for r in ordered] == ["c0", "c1"]
 
 
 # ----------------------------------------------------- the Engine half

@@ -53,6 +53,7 @@ from particles.benchmark.memory.runner import (
 )
 from particles.benchmark.rot.generator import (
     GENERATOR_VERSION,
+    PROFILES,
     UNTRUSTED_DOMAIN,
     generate_world,
     render_session,
@@ -336,6 +337,7 @@ def estimate_rot_run(
     days: int,
     checkpoints: list[int],
     real_pairs: Path | None = None,
+    profile: str = "full",
 ) -> RotRunEstimate:
     """Project calls, tokens, and — when every model is priced — dollars.
 
@@ -359,7 +361,7 @@ def estimate_rot_run(
     session_chars = 0
     events = 0
     for seed in seeds:
-        world = generate_world(seed, days=days, checkpoints=checkpoints)
+        world = generate_world(seed, days=days, checkpoints=checkpoints, profile=profile)
         est.sessions += len(world.sessions)
         events += len(world.events)
         session_chars += sum(len(render_session(s, "2026-01-01")) for s in world.sessions)
@@ -540,6 +542,7 @@ async def run_rot_benchmark(  # noqa: PLR0913 — the run tuple is the API
     attribute: str | None = None,
     progress: Callable[[str], None] | None = None,
     real_pairs: Path | None = None,
+    profile: str = "full",
 ) -> RotBenchmarkReport:
     """Run the memory-rot benchmark and return the report of record.
 
@@ -550,6 +553,8 @@ async def run_rot_benchmark(  # noqa: PLR0913 — the run tuple is the API
     ``real_pairs`` names an operator rulings file: on the ``probe``
     and ``live`` arms each ruled pair is re-asked through the live update
     checks and scored in ``report.real_pairs``, apart from the world metrics.
+    ``profile`` sizes the world; a non-full profile brings its
+    own checkpoints unless ``checkpoints`` is given.
     """
     if arm not in ARMS:
         raise RotArmError(f"unknown arm {arm!r}; expected one of {', '.join(ARMS)}")
@@ -562,13 +567,14 @@ async def run_rot_benchmark(  # noqa: PLR0913 — the run tuple is the API
     cfg = get_config().benchmark_rot
     seeds = list(seeds) if seeds else list(cfg.seeds)
     days = days if days is not None else cfg.days
-    cps = list(checkpoints) if checkpoints else [c for c in cfg.checkpoints if c <= days]
+    default_cps = cfg.checkpoints if profile == "full" else PROFILES[profile].checkpoints
+    cps = list(checkpoints) if checkpoints else [c for c in default_cps if c <= days]
     top_k = top_k if top_k is not None else cfg.top_k
     today = run_date if run_date is not None else datetime.now(UTC).date()
     started = datetime.now(UTC)
     refused: dict[str, int] = {}
 
-    probe_world = generate_world(seeds[0], days=days, checkpoints=cps)
+    probe_world = generate_world(seeds[0], days=days, checkpoints=cps, profile=profile)
     with _arm_routing(arm, probe_world, refused):
         extraction_id, lint_id = _resolved_models(arm)
 
@@ -585,6 +591,7 @@ async def run_rot_benchmark(  # noqa: PLR0913 — the run tuple is the API
                         arm=arm,
                         days=days,
                         cps=cps,
+                        profile=profile,
                         top_k=top_k,
                         trust_policy=trust_policy,
                         epoch=datetime.combine(today - timedelta(days=days), time(0), UTC),
@@ -618,6 +625,7 @@ async def run_rot_benchmark(  # noqa: PLR0913 — the run tuple is the API
         seeds=seeds,
         days=days,
         checkpoints=cps,
+        profile=profile,
         top_k=top_k,
         trust_policy=trust_policy,
         untrusted_domain_trust=cfg.untrusted_domain_trust,
@@ -667,6 +675,7 @@ async def _run_seed(  # noqa: PLR0913 — one world's slice of the run tuple
     arm: str,
     days: int,
     cps: list[int],
+    profile: str,
     top_k: int,
     trust_policy: bool,
     epoch: datetime,
@@ -678,7 +687,7 @@ async def _run_seed(  # noqa: PLR0913 — one world's slice of the run tuple
     progress: Callable[[str], None] | None,
 ) -> WorldResult:
     """Build one seed's world and run it under the arm's routing, pins enforced."""
-    world = generate_world(seed, days=days, checkpoints=cps)
+    world = generate_world(seed, days=days, checkpoints=cps, profile=profile)
     with _arm_routing(arm, world, refused):
         now_ids = _resolved_models(arm)
         if now_ids != pinned:

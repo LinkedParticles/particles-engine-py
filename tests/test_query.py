@@ -291,6 +291,24 @@ async def test_query_federated_merges_stores(tmp_path, monkeypatch) -> None:  # 
         # Higher-confidence default-store particle ranks first.
         assert result.particles[0].content == "Default store fact."
         assert result.answer == "merged answer"
+
+        # the federated path shares the envelope builder, so a
+        # refusal of the merged answer withholds the merged top-k.
+        monkeypatch.setattr(
+            qmain,
+            "_generate_response",
+            AsyncMock(return_value="NO_RELEVANT_KNOWLEDGE\nNothing relevant."),
+        )
+        refused = await qmain.query_federated([DEFAULT_STORE, "other"], req)
+        assert refused.answer_refused is True
+        assert refused.particles == []
+        assert refused.withheld_candidates == 2
+        kept = await qmain.query_federated(
+            [DEFAULT_STORE, "other"],
+            req.model_copy(update={"include_refused_candidates": True}),
+        )
+        assert len(kept.particles) == 2
+        assert kept.withheld_candidates == 0
     finally:
         ep.set_embedding_model(original_model)
         for handle in (DEFAULT_STORE, "other"):
@@ -314,24 +332,45 @@ class TestRankingConfigKnobs:
         assert _combined(1.0, 0.0) == pytest.approx(0.9)
         assert _combined(0.0, 1.0) == pytest.approx(0.1)
 
-    def test_truncation_warning_honors_configured_thresholds(self) -> None:
+    def test_truncation_warning_fires_on_a_plateau(self) -> None:
         from particles.config import get_config
         from particles.operations.query.main import _truncation_warning
 
-        # Two near-identical scores straddle a top_k=1 cutoff → small gap →
-        # warning with the defaults (gap < 0.05).
-        scored = [
-            (_make_active_particle("a"), 0.90, 0.90),
-            (_make_active_particle("b"), 0.89, 0.89),
-        ]
+        # Every hit scores the same: the cut at top_k=1 is arbitrary.
+        scored = [(_make_active_particle(f"c{i}"), 0.90, 0.90) for i in range(8)]
         top = scored[:1]
-        assert _truncation_warning(scored, top, 1) is not None
+        warning = _truncation_warning(scored, top, 1)
+        assert warning is not None
+        assert "7 more particles" in warning and "--top-k 8" in warning
 
-        # Tightening the gap threshold below the actual gap (and keeping the
-        # near-count above the near-cutoff tally) silences the warning.
-        get_config().query.truncation_min_gap = 0.001
-        get_config().query.truncation_near_count = 5
+        # Raising the count above the plateau silences it.
+        get_config().query.truncation_near_count = 7
         assert _truncation_warning(scored, top, 1) is None
+
+    def test_a_dense_tail_below_a_falling_head_does_not_warn(self) -> None:
+        from particles.operations.query.main import _truncation_warning
+
+        # A clear best hit, then hundreds of near-ties at the cutoff: the
+        # store's ordinary shape, which the old near-margin test always flagged.
+        best = [(_make_active_particle("best"), 0.90, 0.90)]
+        tail = [(_make_active_particle(f"t{i}"), 0.50, 0.50) for i in range(400)]
+        scored = best + tail
+        assert _truncation_warning(scored, scored[:40], 40) is None
+
+    def test_a_best_score_at_or_below_zero_does_not_warn(self) -> None:
+        from particles.operations.query.main import _truncation_warning
+
+        for score in (0.0, -0.2):
+            scored = [(_make_active_particle(f"c{i}"), score, score) for i in range(10)]
+            assert _truncation_warning(scored, scored[:2], 2) is None
+
+    def test_a_plateau_no_top_k_can_take_in_asks_for_a_narrower_question(self) -> None:
+        from particles.operations.query.main import _truncation_warning
+
+        scored = [(_make_active_particle(f"c{i}"), 0.90, 0.90) for i in range(400)]
+        warning = _truncation_warning(scored, scored[:40], 40)
+        assert warning is not None
+        assert "--top-k" not in warning and "narrower question" in warning
 
 
 class TestConfidenceNote:
@@ -699,7 +738,7 @@ def _mock_llm_client(answer: str) -> MagicMock:
 @pytest.mark.asyncio
 async def test_query_below_relevance_floor_refuses_without_llm(db_session: object) -> None:
     """Max top-k cosine below the floor → deterministic refusal, no LLM call,
-    hits still returned, RelevanceNote populated (§3)."""
+    RelevanceNote populated (§3), hits withheld and counted."""
     import numpy as np
 
     from particles import embeddings as ep
@@ -728,8 +767,15 @@ async def test_query_below_relevance_floor_refuses_without_llm(db_session: objec
 
     assert result.answer.startswith("The store holds no beliefs relevant to this question")
     mock_client.messages.create.assert_not_called()
-    # Hits stay in the envelope as nearest-but-likely-unrelated transparency.
-    assert len(result.particles) == 1
+    # the hits leave the envelope, every parallel list with them,
+    # and the count and the answer say so.
+    assert result.particles == []
+    assert result.effective_confidences == []
+    assert result.content_published_ats == []
+    assert result.withheld_candidates == 1
+    assert "1 nearest belief(s) were withheld as likely unrelated" in result.answer
+    assert "include_refused_candidates" in result.answer
+    assert "listed for transparency" not in result.answer
     assert result.relevance is not None
     assert result.relevance.below_floor is True
     assert result.relevance.max_similarity == 0.0
@@ -796,7 +842,7 @@ async def test_query_llm_refusal_marker_is_stripped_and_flagged(db_session: obje
             session, _make_active_particle(f"An unrelated engineering fact {i}.", 0.9), emb
         )
     await session.commit()  # type: ignore[union-attr]
-    get_config().query.truncation_min_gap = 0.5  # tied scores → gap 0 < 0.5 → would warn
+    get_config().query.truncation_near_count = 0  # tied scores, a plateau → would warn
 
     mock_model = MagicMock()
     mock_model.encode = MagicMock(return_value=[np.ones(4, dtype=np.float32)])
@@ -813,9 +859,17 @@ async def test_query_llm_refusal_marker_is_stripped_and_flagged(db_session: obje
         ep.set_embedding_model(original_model)
         set_client(None)
 
-    assert result.answer == "The knowledge base holds nothing relevant to watermelons."
+    assert result.answer == (
+        "The knowledge base holds nothing relevant to watermelons.\n\n"
+        "2 nearest belief(s) were withheld as likely unrelated; "
+        "request them with `include_refused_candidates`."
+    )
     assert result.answer_refused is True
     assert result.truncation_warning is None
+    # a marker refusal withholds exactly as the floor does.
+    assert result.particles == []
+    assert result.effective_confidences == []
+    assert result.withheld_candidates == 2
     # The numeric verdict is untouched — this refusal came from the responder,
     # not the floor.
     assert result.relevance is not None
@@ -854,6 +908,94 @@ async def test_query_marker_mid_answer_is_not_a_refusal(db_session: object) -> N
 
     assert result.answer == answer_text
     assert result.answer_refused is False
+    assert len(result.particles) == 1
+    assert result.withheld_candidates == 0
+
+
+@pytest.mark.asyncio
+async def test_query_below_floor_include_refused_candidates_keeps_hits(
+    db_session: object,
+) -> None:
+    """The opt-in keeps the hits below the floor, as before withholding."""
+    import numpy as np
+
+    from particles import embeddings as ep
+    from particles.llm import set_client
+    from particles.operations.query import query
+    from particles.store.particle_store import insert_particle
+
+    session = db_session  # type: ignore[assignment]
+    p = _make_active_particle("Pluto was reclassified as a dwarf planet.", 0.9)
+    await insert_particle(session, p, [1.0, 0.0, 0.0, 0.0])  # type: ignore[arg-type]
+    await session.commit()  # type: ignore[union-attr]
+
+    mock_model = MagicMock()
+    mock_model.encode = MagicMock(return_value=[np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32)])
+    mock_client = _mock_llm_client("MUST NOT APPEAR")
+
+    original_model = ep._embedding_model
+    ep.set_embedding_model(mock_model)
+    set_client(mock_client)
+    try:
+        result = await query(
+            session,  # type: ignore[arg-type]
+            QueryRequest(question="football", top_k=5, include_refused_candidates=True),
+        )
+    finally:
+        ep.set_embedding_model(original_model)
+        set_client(None)
+
+    assert result.answer_refused is True
+    assert [x.id for x in result.particles] == [p.id]
+    assert len(result.effective_confidences) == 1
+    assert result.withheld_candidates == 0
+    assert "listed for transparency" in result.answer
+    assert "withheld" not in result.answer
+
+
+@pytest.mark.asyncio
+async def test_query_marker_refusal_include_refused_candidates_keeps_hits(
+    db_session: object,
+) -> None:
+    """The opt-in keeps a marker refusal's hits and adds no withheld sentence."""
+    import numpy as np
+
+    from particles import embeddings as ep
+    from particles.llm import set_client
+    from particles.operations.query import query
+    from particles.store.particle_store import insert_particle
+
+    session = db_session  # type: ignore[assignment]
+    emb = (np.ones(4, dtype=np.float32) / np.linalg.norm(np.ones(4))).tolist()
+    for i in range(3):
+        await insert_particle(  # type: ignore[arg-type]
+            session, _make_active_particle(f"An unrelated engineering fact {i}.", 0.9), emb
+        )
+    await session.commit()  # type: ignore[union-attr]
+
+    mock_model = MagicMock()
+    mock_model.encode = MagicMock(return_value=[np.ones(4, dtype=np.float32)])
+    mock_client = _mock_llm_client("NO_RELEVANT_KNOWLEDGE\nNothing about watermelons.")
+
+    original_model = ep._embedding_model
+    ep.set_embedding_model(mock_model)
+    set_client(mock_client)
+    try:
+        result = await query(
+            session,  # type: ignore[arg-type]
+            QueryRequest(
+                question="what is a watermelon?", top_k=3, include_refused_candidates=True
+            ),
+        )
+    finally:
+        ep.set_embedding_model(original_model)
+        set_client(None)
+
+    assert result.answer == "Nothing about watermelons."
+    assert result.answer_refused is True
+    assert len(result.particles) == 3
+    assert len(result.effective_confidences) == 3
+    assert result.withheld_candidates == 0
 
 
 @pytest.mark.asyncio
@@ -906,6 +1048,11 @@ async def test_query_llm_failure_is_disclosed_not_silent(db_session: object) -> 
     # …and the answer text says what it is: a disclosed listing, not prose.
     assert result.answer.startswith("[Answer generation unavailable:")
     assert "• Pluto was reclassified as a dwarf planet." in result.answer
+    # a failed answer is not a refusal, so its listing keeps
+    # the hits.
+    assert result.answer_refused is False
+    assert [x.id for x in result.particles] == [p.id]
+    assert result.withheld_candidates == 0
 
 
 @pytest.mark.asyncio
@@ -1204,3 +1351,64 @@ async def test_query_answer_retry_can_be_disabled(db_session: object) -> None:
 
     assert len(provider.budgets) == 1
     assert result.answer_generation_error_cause is AnswerFailureCause.BUDGET  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_query_returns_each_hits_readable_source(db_session: object) -> None:
+    """``sources`` parallels ``particles``, resolved from the ranker's rows."""
+    import numpy as np
+
+    from particles import embeddings as ep
+    from particles.core.schema import FetchPolicy, Mutability, WarcRecordType
+    from particles.corpus.deposit import save_blob, sha256, write_entry_and_snapshot
+    from particles.operations.query import query
+    from particles.store.particle_store import insert_particle
+
+    session = db_session  # type: ignore[assignment]
+    body = b"Water is composed of hydrogen and oxygen."
+    digest = sha256(body)
+    entry_id, snapshot_id = await write_entry_and_snapshot(
+        session,  # type: ignore[arg-type]
+        uri_r="https://example.org/water",
+        source_type="WEB_PAGE",
+        mutability=Mutability.STABLE,
+        fetch_policy=FetchPolicy.NEVER,
+        content=body,
+        content_hash=digest,
+        archive_path=save_blob(body, digest),
+        deposited_by="operator",
+        tags=[],
+        warc_record_type=WarcRecordType.RESPONSE,
+        content_published_at=datetime(2026, 8, 23, tzinfo=UTC),
+    )
+    sourced = _make_active_particle("Water is composed of hydrogen and oxygen.", 0.95)
+    sourced.provenance = [
+        ProvenanceRef(
+            type=ProvenanceRefType.SOURCE, corpus_entry_id=entry_id, snapshot_id=snapshot_id
+        )
+    ]
+    unsourced = _make_active_particle("Water boils at 100 degrees Celsius.", 0.9)
+    unsourced.provenance = []
+    emb = np.ones(4, dtype=np.float32) / 2.0
+    for p in (sourced, unsourced):
+        await insert_particle(session, p, emb.tolist())  # type: ignore[arg-type]
+    await session.commit()  # type: ignore[union-attr]
+
+    mock_model = MagicMock()
+    mock_model.encode = MagicMock(return_value=[np.ones(4, dtype=np.float32)])
+    original_model = ep._embedding_model
+    ep.set_embedding_model(mock_model)
+    try:
+        with _shared_client(_mock_llm_client("Water is H2O.")):
+            req = QueryRequest(question="What is water made of?", top_k=5)
+            result = await query(session, req)  # type: ignore[arg-type]
+    finally:
+        ep.set_embedding_model(original_model)
+
+    assert len(result.sources) == len(result.particles) == 2
+    by_id = dict(zip([p.id for p in result.particles], result.sources, strict=True))
+    source = by_id[sourced.id]
+    assert source is not None
+    assert (source.source_type, source.uri) == ("WEB_PAGE", "https://example.org/water")
+    assert source.published is not None and source.published.date().isoformat() == "2026-08-23"
+    assert by_id[unsourced.id] is None

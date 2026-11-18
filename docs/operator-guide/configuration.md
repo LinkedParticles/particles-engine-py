@@ -118,6 +118,13 @@ in `particles/secrets.py`:
 | Engine key | `PARTICLES_API_KEY` (optional) | `particles engine serve`: the operator's key. Unset, empty or `dev-key`, and with no per-client key minted, the engine serves reads only: every write route answers `503`, from loopback too, and since `1.220.9` a report it serves records nothing in the store. Give other clients keys of their own with `particles engine keys create`; they live, as digests only, in `api.keys_file` |
 | Engine token | `PARTICLES_ENGINE_TOKEN` (optional) | The CLI, hooks and MCP server with `engine.base_url` set: the bearer they send, ideally a per-client key of their own |
 
+The GitHub and Numista keys are spent only on a fetch whose target the
+operator chose. A deposit made by an agent key (a harvester's included), a
+link a deposited post names and the deposit follows, and the refresh of an
+entry any of those made are all fetched without them: a GitHub URL is read anonymously, so a private
+repository the operator's key can read stays out of reach, and a Numista coin
+URL is refused with `403`, because the Numista API has no anonymous mode.
+
 Migrating to a secrets manager (1Password, AWS, sops, …) only
 requires editing `particles/secrets.py`.
 
@@ -336,6 +343,10 @@ A few config fields you'll likely want to set early:
   (both claims stay ACTIVE, ranked per-viewer at query time) rather than
   one claim auto-superseding the other on trust; a contributor's claim is
   never dropped by another contributor's trust.
+  A source's newer claim still replaces its own older one in `multi`, when
+  the pair is attributed: the same recorded author or contributor set, or
+  two captures by the owner's harvesters (`claude-code-hook`, `audit`),
+  which count as the operator.
 
 - `extraction.append_only_delta`: whether a snapshot of an `APPEND_ONLY`
   source (a session transcript, an append-only archive) is read as a delta,

@@ -19,13 +19,14 @@ status machine — no bespoke undo stack.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import CurationConfig, get_config
-from particles.core.conflict_review import is_retired_value
+from particles.core.conflict_review import is_retired_value, retirement_kind
 from particles.core.observer_scope import BeliefScope
 from particles.core.schema import (
     Particle,
@@ -48,6 +49,7 @@ from particles.store.event_store import (
     EventRefKind,
     OperatorEvent,
     OperatorEventType,
+    list_events,
     list_events_since,
     record_event,
 )
@@ -57,6 +59,7 @@ from particles.store.particle_store import (
     get_particles_by_ids,
     update_particle_status,
 )
+from particles.store.relation_store import create_relation, get_all_relations
 from particles.store.subject_store import get_subject
 
 from .cards import (
@@ -65,11 +68,22 @@ from .cards import (
     ConflictBrief,
     CurationCard,
     ParticleBrief,
+    RetiredValueBrief,
+    group_merge_scope_note,
     merge_scope_note,
     resolve_actions_for,
     scope_brief,
 )
-from .collect import cards_from_findings, collect_cards
+from .collect import cards_from_findings, collect_cards, election_ranks, linked_components
+from .duplicate_groups import (
+    GroupRulings,
+    nodes_of,
+    pair_withheld,
+    regroup,
+    resolve_members,
+    sort_key,
+)
+from .duplicate_groups import brief_ids as group_brief_ids
 from .leverage import _as_utc, contested_ids_from, score_cards
 from .rulings import record_demotion_ruling
 from .snapshot import (
@@ -81,7 +95,7 @@ from .snapshot import (
     read_prior,
     stamp_from,
 )
-from .suppression import dismissed_members, suppressed_keys
+from .suppression import dismissed_members, group_rulings, suppressed_keys
 
 log = logging.getLogger(__name__)
 
@@ -149,6 +163,7 @@ _KIND_PRIORITY: dict[CardKind, int] = {
     CardKind.RANK_LIFT: 9,
     CardKind.REFUSED_SNAPSHOTS: 9,
     CardKind.DUPLICATE_PAIR: 10,
+    CardKind.DUPLICATE_GROUP: 10,
     CardKind.UNCITED_URL: 11,
 }
 
@@ -230,11 +245,11 @@ async def build_curation_queue(
     if stamp.source == QueueSource.LIVE.value:
         contested_ids = contested_ids_from(collection)
         if kind is not None:
-            collection = [c for c in collection if c.kind is kind]
+            collection = [c for c in collection if _kind_matches(c, kind)]
         await score_cards(session, collection, contested_ids=contested_ids)
     elif kind is not None:
         # A snapshot's cards are already scored, so narrowing is a plain filter.
-        collection = [c for c in collection if c.kind is kind]
+        collection = [c for c in collection if _kind_matches(c, kind)]
 
     stamp.collection_size = len(collection)
 
@@ -259,6 +274,17 @@ async def build_curation_queue(
     return stamp
 
 
+#: The duplicate class: group cards, and the pair cards an older collection holds.
+_DUPLICATE_KINDS = frozenset({CardKind.DUPLICATE_GROUP, CardKind.DUPLICATE_PAIR})
+
+
+def _kind_matches(card: CurationCard, kind: CardKind) -> bool:
+    """Whether ``card`` is of ``kind``; either duplicate kind selects both."""
+    if kind in _DUPLICATE_KINDS:
+        return card.kind in _DUPLICATE_KINDS
+    return card.kind is kind
+
+
 async def _unresolved(
     session: AsyncSession, collection: list[CurationCard], stamp: CurationQueueResult
 ) -> list[CurationCard]:
@@ -280,6 +306,7 @@ async def _unresolved(
     gone: set[str] = set(resolved.particle_ids)
     if any(c.kind is CardKind.SUBJECTLESS_SOURCE for c in collection):
         gone |= await dismissed_members(session)
+    grouping = await _GroupState.read(session, collection)
     out: list[CurationCard] = []
     for card in collection:
         if resolved.covers(card):
@@ -289,8 +316,38 @@ async def _unresolved(
             if pruned is not None:
                 out.append(pruned)
             continue
+        if card.kind is CardKind.DUPLICATE_GROUP and grouping is not None:
+            # links and rulings made since the build apply at once.
+            regrouped = regroup(
+                card,
+                active=None,
+                linked=grouping.linked,
+                rulings=grouping.rulings,
+                withheld=grouping.withheld,
+            )
+            if regrouped is not None:
+                out.append(regrouped)
+            continue
         out.append(card)
     return out
+
+
+@dataclass(frozen=True)
+class _GroupState:
+    """What regrouping a served duplicate group reads."""
+
+    linked: dict[str, frozenset[str]]
+    rulings: GroupRulings
+    withheld: Callable[[str, str], bool]
+
+    @classmethod
+    async def read(cls, session: AsyncSession, cards: list[CurationCard]) -> _GroupState | None:
+        """The store's links and rulings, read once; ``None`` with no group card."""
+        if not any(c.kind is CardKind.DUPLICATE_GROUP for c in cards):
+            return None
+        rulings = await group_rulings(session)
+        withheld = pair_withheld(await suppressed_keys(session), rulings)
+        return cls(await linked_components(session), rulings, withheld)
 
 
 def _without_members(card: CurationCard, gone: set[str]) -> CurationCard | None:
@@ -340,8 +397,11 @@ async def _collection_for(
         return list(cards), CurationQueueResult(source=QueueSource.LIVE.value, semantic=semantic)
 
     if source is QueueSource.LIVE or not cfg.snapshot_enabled:
-        collected = await collect_cards(session, semantic=semantic)
-        return collected, CurationQueueResult(source=QueueSource.LIVE.value, semantic=semantic)
+        withheld: dict[str, int | None] = {}
+        collected = await collect_cards(session, semantic=semantic, withheld=withheld)
+        return collected, CurationQueueResult(
+            source=QueueSource.LIVE.value, semantic=semantic, withheld=withheld
+        )
 
     row = await latest_snapshot(session)
     if row is not None:
@@ -354,7 +414,9 @@ async def _collection_for(
             conflicts = cards_from_findings(await open_inconsistency_findings(session))
             await score_cards(session, conflicts, contested_ids=contested_ids_from(conflicts))
             stored += conflicts
-        return stored, stamp_from(row, kind_as_of=prior.kind_as_of)
+        return stored, stamp_from(
+            row, kind_as_of=prior.kind_as_of, withheld=prior.withheld, episode=prior.episode
+        )
 
     # Cold start: no snapshot yet, so collect live and serve
     # that — correct, just slow, exactly as before this ADR.
@@ -367,8 +429,11 @@ async def _collection_for(
     # filled by the two paths that are already writes — the nightly
     # cycle, and the explicit `--refresh` / `POST /curation/rebuild` — so the
     # read path stays a read.
-    collected = await collect_cards(session, semantic=semantic)
-    return collected, CurationQueueResult(source=QueueSource.LIVE.value, semantic=semantic)
+    cold: dict[str, int | None] = {}
+    collected = await collect_cards(session, semantic=semantic, withheld=cold)
+    return collected, CurationQueueResult(
+        source=QueueSource.LIVE.value, semantic=semantic, withheld=cold
+    )
 
 
 async def rebuild_curation_snapshot(
@@ -482,6 +547,12 @@ async def _take_live_cards(
             if pruned is not None:
                 out.append(pruned)
             continue
+        if card.kind is CardKind.DUPLICATE_GROUP:
+            # a retired member leaves the group, not the group the queue.
+            live = await _live_group(session, card)
+            if live is not None:
+                out.append(live)
+            continue
         if not card.particle_ids or card.kind is CardKind.GATED_SUBJECTS:
             # A batch card's gesture re-plans from the store, so a member that
             # changed since the build is skipped then, not checked one by one.
@@ -496,6 +567,31 @@ async def _take_live_cards(
         if alive:
             out.append(card)
     return out
+
+
+async def _live_group(session: AsyncSession, card: CurationCard) -> CurationCard | None:
+    """A group card regrouped over its ACTIVE members, or ``None``.
+
+    When the survivor itself has left ACTIVE, the remaining members' election
+    keys decide which component stands, so the card takes its new key.
+    """
+    members = await get_particles_by_ids(session, card.particle_ids)
+    active = {pid for pid, p in members.items() if p.status is Status.ACTIVE}
+    if active >= set(card.particle_ids):
+        return card
+    rank = None
+    if card.survivor_id not in active:
+        rank = await election_ranks(session, sorted(active))
+    state = await _GroupState.read(session, [card])
+    assert state is not None  # the card is a group
+    return regroup(
+        card,
+        active=active,
+        linked=state.linked,
+        rulings=state.rulings,
+        rank=rank,
+        withheld=state.withheld,
+    )
 
 
 async def _demotion_live(session: AsyncSession, card: CurationCard) -> bool:
@@ -586,6 +682,8 @@ async def _attach_particle_briefs(
         card.particles = [b for pid in _brief_ids(card, full=full) if (b := brief(pid)) is not None]
         if card.kind is CardKind.DUPLICATE_PAIR:
             card.scope_note = _merge_note(card, particles, scopes)
+        elif card.kind is CardKind.DUPLICATE_GROUP:
+            card.scope_note = _group_merge_note(card, particles, scopes)
         if card.inconsistency_id is None or card.inconsistency_id not in sides:
             continue
         a_side, b_side = sides[card.inconsistency_id]
@@ -600,11 +698,59 @@ async def _attach_particle_briefs(
         )
         if card.kind is CardKind.INCONSISTENCY:
             # offer only the actions that can do what they say.
+            retired = card.inconsistency_id in retired_values
+            claim_a = particles.get(a_id) if a_id else None
             card.resolve_actions = resolve_actions_for(
-                particles.get(a_id) if a_id else None,
+                claim_a,
                 particles.get(b_id) if b_id else None,
-                retired_value=card.inconsistency_id in retired_values,
+                retired_value=retired,
             )
+            if retired:
+                card.retired_value = await _retired_value_brief(
+                    session, claim_a, sources.get(b_id) if b_id else None
+                )
+
+
+# The operator event that retires a claim, by how it was retired.
+_RETIRING_EVENT: dict[str, OperatorEventType] = {
+    "retracted": OperatorEventType.PARTICLE_RETRACTED,
+    "superseded": OperatorEventType.PARTICLE_SUPERSEDED,
+    "reviewed": OperatorEventType.REVIEW_RESOLVED,
+}
+
+
+async def _retired_value_brief(
+    session: AsyncSession, claim_a: Particle | None, restated_by: str | None
+) -> RetiredValueBrief:
+    """What a retired-value card says: how, when and why A was retired.
+
+    The date and reason come from the newest event of the retiring kind that
+    names claim A. For a lost review that is the newest PREFER review: a
+    DEFER, or a BOTH_VALID ruling on another record A sits in, also names A
+    and retires nothing. A claim retired by a path that wrote no such event
+    keeps the card's wording without them.
+    """
+    kind = retirement_kind(claim_a)
+    brief = RetiredValueBrief(retirement=kind, restated_by=restated_by)
+    if claim_a is None or kind is None:
+        return brief
+    events = await list_events(
+        session,
+        ref_kind=EventRefKind.PARTICLE,
+        ref_id=claim_a.id,
+        event_type=_RETIRING_EVENT[kind],
+        limit=1 if kind != "reviewed" else 50,
+    )
+    if kind == "reviewed":
+        events = [e for e in events if (e.payload or {}).get("action") in _DEMOTING_REVIEWS]
+    if events:
+        brief.retired_at = _as_utc(events[0].occurred_at)
+        brief.reason = events[0].reason
+    return brief
+
+
+# The review actions that demote a claim; the others leave it as it is.
+_DEMOTING_REVIEWS = frozenset({ResolutionAction.PREFER_A.value, ResolutionAction.PREFER_B.value})
 
 
 async def _observer_scopes(
@@ -633,6 +779,21 @@ def _merge_note(
     return merge_scope_note(a, b)
 
 
+def _group_merge_note(
+    card: CurationCard, particles: dict[str, Particle], scopes: dict[str, BeliefScope]
+) -> str | None:
+    """What linking a duplicate group does to its observer scope.
+
+    Read over every member, so it is written only where every member is
+    briefed: a group of ten or fewer, or the full view of a larger one. A
+    derived or unscoped member leaves it unwritten, as for a pair.
+    """
+    members = [particles.get(pid) for pid in card.particle_ids]
+    if any(p is None or p.id not in scopes or _is_derived(p) for p in members):
+        return None
+    return group_merge_scope_note([scopes[p.id] for p in members if p is not None])
+
+
 def _is_derived(p: Particle) -> bool:
     """A derived belief takes the meet of its premises, which a merge leaves alone."""
     return any(r.type is ProvenanceRefType.PARTICLE for r in p.provenance)
@@ -646,6 +807,8 @@ def _brief_ids(card: CurationCard, *, full: bool = False) -> list[str]:
     """
     if not full and card.kind in (CardKind.GATED_SUBJECTS, CardKind.SUBJECTLESS_SOURCE):
         return card.particle_ids[:_BATCH_BRIEF_SAMPLE]
+    if card.kind is CardKind.DUPLICATE_GROUP:
+        return group_brief_ids(card, full=full)
     return card.particle_ids
 
 
@@ -675,6 +838,8 @@ async def apply_gesture(
     revision: BeliefRevision | None = None,
     action: str | None = None,
     note: str | None = None,
+    members: list[str] | None = None,
+    keep: str | None = None,
 ) -> str:
     """Dispatch a card's gesture onto an existing write op.
 
@@ -687,6 +852,11 @@ async def apply_gesture(
     ``assign-subject`` gesture. Does not commit — the caller owns
     the transaction, except that ``resolve`` runs ``review.resolve``, which
     commits its own work. Returns a human-readable result line.
+
+    On a ``duplicate_group`` card ``merge``, ``split`` and a
+    permanent ``dismiss`` rule on the ``members`` named (ids, unique id
+    prefixes, or ``all`` on a group of ten or fewer); ``keep`` names the hub a
+    ``merge`` links the others to.
     """
     g = gesture.lower()
     if card.kind is CardKind.INCONSISTENCY:
@@ -707,6 +877,13 @@ async def apply_gesture(
 
     if g in _SURFACED:
         raise ValueError(f"Gesture {g!r}: {_SURFACED[g]}.")
+    if card.kind is CardKind.DUPLICATE_GROUP:
+        if g == "merge":
+            return await _merge_group(session, card, members=members, keep=keep, actor=actor)
+        if g == "split" or (g == "dismiss" and days is None):
+            return await _rule_group(session, card, g, members=members, actor=actor)
+    elif members or keep:
+        raise ValueError("--members and --keep apply only to a duplicate_group card.")
 
     match g:
         case "affirm":
@@ -1082,11 +1259,164 @@ async def _merge(session: AsyncSession, card: CurationCard) -> str:
     """Link a duplicate pair CO_EVIDENTIAL via the operator path."""
     if card.kind is not CardKind.DUPLICATE_PAIR or len(card.particle_ids) != 2:
         raise ValueError("merge resolves a duplicate_pair card.")
-    from particles.store.relation_store import create_relation
-
     a, b = card.particle_ids
     await create_relation(session, a, b, RelationType.CO_EVIDENTIAL, RelationCreatedBy.MANUAL_CLI)
     return f"Linked {a[:8]}… ↔ {b[:8]}… as co-evidential."
+
+
+async def _served_group(session: AsyncSession, card: CurationCard) -> CurationCard:
+    """The group card the queue serves now, members and all.
+
+    A card rebuilt from its key carries only its survivor, so its membership
+    is read from the live collection, the same reading the queue gives.
+    """
+    served = await get_curation_card(session, card.key)
+    if served is None or served.kind is not CardKind.DUPLICATE_GROUP:
+        raise ValueError(f"{card.key} is not an open duplicate group.")
+    return served
+
+
+async def _merge_group(
+    session: AsyncSession,
+    card: CurationCard,
+    *,
+    members: list[str] | None,
+    keep: str | None,
+    actor: str,
+) -> str:
+    """Link the named members of a duplicate group to one hub.
+
+    Today's pair ``merge`` made once per member: a ``CO_EVIDENTIAL`` relation
+    hub → member for each named member not yet in the hub's linked set, and
+    every claim stays ACTIVE. Refused, with nothing written, for a pair of
+    named members an open INCONSISTENCY names or a ``CONTRADICTS`` relation
+    joins, or that a standing split or dismiss withholds.
+    """
+    served = await _served_group(session, card)
+    named = resolve_members(served, members or [])
+    nodes = [n for n in nodes_of(served) if set(n) <= set(named)]
+    if len(nodes) < 2:
+        raise ValueError("merge needs two or more members that are not already linked.")
+    hub = await _hub(session, named, keep)
+    await _refuse_crossings(session, named)
+    linked: set[str] = set(next(n for n in nodes if hub in n))
+    written = 0
+    for node in nodes:
+        if linked & set(node):
+            continue
+        await create_relation(
+            session,
+            hub,
+            node[0],
+            RelationType.CO_EVIDENTIAL,
+            RelationCreatedBy.MANUAL_CLI,
+            actor=actor,
+        )
+        linked.update(node)
+        written += 1
+    left = len(served.particle_ids) - len(named)
+    tail = f"; {left} member(s) stay on the card" if left else ""
+    return (
+        f"Linked {len(named)} belief(s) to {hub[:8]}… as co-evidential "
+        f"({written} link(s); every belief stays active){tail}."
+    )
+
+
+async def _hub(session: AsyncSession, named: list[str], keep: str | None) -> str:
+    """The hub ``merge`` links to: ``keep`` when named, else the elected member (§2)."""
+    if keep:
+        matches = [pid for pid in named if pid == keep or pid.startswith(keep)]
+        if len(matches) != 1:
+            raise ValueError(f"--keep {keep!r} names no single member being merged.")
+        return matches[0]
+    ranks = await election_ranks(session, named)
+    return min(named, key=lambda pid: sort_key(pid, ranks))
+
+
+async def _refuse_crossings(session: AsyncSession, named: list[str]) -> None:
+    """Refuse a merge across a recorded conflict or a standing ruling (§3)."""
+    wanted = set(named)
+    withheld = pair_withheld(await suppressed_keys(session), await group_rulings(session))
+    for i, a in enumerate(named):
+        for b in named[i + 1 :]:
+            if withheld(a, b):
+                raise ValueError(
+                    f"{a[:8]}… and {b[:8]}… were ruled not the same claim (a split or "
+                    "dismiss on an earlier card). Name fewer members."
+                )
+    for rel in await get_all_relations(session, RelationType.CONTRADICTS):
+        if rel.particle_a in wanted and rel.particle_b in wanted:
+            raise ValueError(
+                f"{rel.particle_a[:8]}… and {rel.particle_b[:8]}… are recorded as "
+                "contradicting. Split one of them off first."
+            )
+    for finding in await open_inconsistency_findings(session):
+        claims = {pid for side in finding.conflict_sides or [] for pid in side}
+        both = sorted(claims & wanted)
+        if len(both) >= 2:
+            raise ValueError(
+                f"{both[0][:8]}… and {both[1][:8]}… are in open conflict "
+                f"inconsistency:{finding.particle_id}. Split one of them off first."
+            )
+
+
+async def _rule_group(
+    session: AsyncSession,
+    card: CurationCard,
+    gesture: str,
+    *,
+    members: list[str] | None,
+    actor: str,
+) -> str:
+    """Record a ``split`` or ``dismiss`` as a partition of the members.
+
+    ``split`` partitions the group's current members into the named set and
+    the rest; ``dismiss`` puts every member (each linked set whole) in its
+    own class. One permanent ``CURATION_CARD_SNOOZED`` event keyed by the
+    card, with a ref per member and the classes in its payload.
+    """
+    served = await _served_group(session, card)
+    nodes = nodes_of(served)
+    if gesture == "split":
+        named = set(resolve_members(served, members or []))
+        rest = [pid for pid in served.particle_ids if pid not in named]
+        if not rest:
+            raise ValueError("split names some of the members, not all of them.")
+        classes = [sorted(named), sorted(rest)]
+    else:
+        if members and [m.lower() for m in members if m.strip()] != ["all"]:
+            raise ValueError("dismiss rules on the whole group; it takes no --members.")
+        classes = [sorted(n) for n in nodes]
+    side = {pid: i for i, c in enumerate(classes) for pid in c}
+    withheld = sorted(
+        sorted((e.a, e.b))
+        for e in served.pairs or []
+        if e.a in side and e.b in side and side[e.a] != side[e.b]
+    )
+    await record_event(
+        session,
+        actor=actor,
+        event_type=OperatorEventType.CURATION_CARD_SNOOZED,
+        refs=[(EventRefKind.PARTICLE, pid) for pid in served.particle_ids],
+        payload={
+            "card_key": served.key,
+            "snoozed_until": None,
+            "snooze_days": None,
+            "ruling": gesture,
+            "classes": classes,
+            # The carded pairs the ruling withholds, for the precision ledger (§7).
+            "pairs": withheld,
+        },
+    )
+    if gesture == "split":
+        return (
+            f"Split {len(classes[0])} belief(s) off {served.key}; the two sides are never "
+            "grouped together again."
+        )
+    return (
+        f"Dismissed {served.key}: none of its {len(served.particle_ids)} beliefs are grouped "
+        "with each other again."
+    )
 
 
 async def _deposit(session: AsyncSession, card: CurationCard, *, actor: str) -> str:

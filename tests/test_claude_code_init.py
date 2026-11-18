@@ -339,7 +339,12 @@ class TestInitClaudeCode:
         # from any working directory (CWD-independence).
         settings = _settings(init_env)
         config_abs = str(init_env["config"].resolve())
-        for event, verb in (("SessionStart", "session-start"), ("SessionEnd", "session-end")):
+        # SessionEnd hands off to the detached worker through the stdlib launcher;
+        # the worker command after `--` keeps the env pins.
+        for event, verb in (
+            ("SessionStart", "session-start"),
+            ("SessionEnd", "session-end-worker"),
+        ):
             commands = [h["command"] for g in settings["hooks"][event] for h in g["hooks"]]
             assert len(commands) == 1
             assert f"particles hook {verb} --store memory" in commands[0]
@@ -392,6 +397,69 @@ class TestInitClaudeCode:
         assert result.exit_code == 0, result.output
         assert not (init_env["home"] / ".claude" / "skills" / "particles").exists()
         assert bystander.read_text() == "not ours"
+
+    @pytest.mark.parametrize("dry_run", [True, False], ids=["dry-run", "install"])
+    def test_a_shared_lock_directory_is_refused_before_anything_is_written(
+        self,
+        runner: CliRunner,
+        init_env: dict[str, Path],
+        monkeypatch: pytest.MonkeyPatch,
+        dry_run: bool,
+    ) -> None:
+        """A dry run skips the lock, so it asks the lock's check itself.
+
+        On 2026-11-07 a preview passed and the install then stopped on a
+        traceback, because `~/.particles` was mode 0755.
+        """
+        shared = init_env["home"] / ".particles"
+        shared.mkdir()
+        shared.chmod(0o755)
+        monkeypatch.setenv("PARTICLES_PROJECT_IDENTITY_LOCK", str(shared / "identity.lock"))
+        from particles.config import reset_config
+
+        reset_config()
+        args = ["init", "claude-code", "--no-audit"] + (["--dry-run"] if dry_run else [])
+        result = runner.invoke(app, args)
+        assert result.exit_code == 1, result.output
+        assert f"chmod 700 {shared}" in result.output
+        assert "Nothing was written" in result.output
+        assert not init_env["settings"].exists()
+        assert not (shared / "harness-installer.lock").exists()
+
+    def test_a_lock_refusal_under_json_is_a_conflict_object(
+        self, runner: CliRunner, init_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        shared = init_env["home"] / ".particles"
+        shared.mkdir()
+        shared.chmod(0o755)
+        monkeypatch.setenv("PARTICLES_PROJECT_IDENTITY_LOCK", str(shared / "identity.lock"))
+        from particles.config import reset_config
+
+        reset_config()
+        result = runner.invoke(app, ["init", "claude-code", "--json", "--dry-run"])
+        assert result.exit_code == 1
+        payload = json.loads(result.stdout)
+        assert payload["status"] == "conflict" and f"chmod 700 {shared}" in payload["error"]
+
+    def test_the_lock_refusing_after_the_check_is_reported_not_raised(
+        self, runner: CliRunner, init_env: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The directory can change between the check and the lock."""
+        shared = init_env["home"] / ".particles"
+        shared.mkdir()
+        shared.chmod(0o755)
+        monkeypatch.setenv("PARTICLES_PROJECT_IDENTITY_LOCK", str(shared / "identity.lock"))
+        from particles.api.cli import _hook_state
+        from particles.config import reset_config
+
+        reset_config()
+        monkeypatch.setattr(_hook_state, "installer_lock_refusal", lambda: None)
+        result = runner.invoke(app, ["init", "claude-code", "--no-audit"])
+        assert result.exit_code == 1
+        assert result.exception is None or isinstance(result.exception, SystemExit)
+        assert "hook_state_directory_not_private" in result.output
+        assert "Nothing was written" in result.output
+        assert not init_env["settings"].exists()
 
     def test_dry_run_writes_no_skill_files(
         self, runner: CliRunner, init_env: dict[str, Path]
@@ -540,7 +608,8 @@ class TestInitClaudeCode:
         cmd = _commands(_settings(init_env), "SessionEnd")[0]
         env = _env_from_command(cmd)
         assert env["DATABASE_URL"] == dsn
-        assert " hook session-end --store default" in cmd
+        assert " hook session-end-worker --store default" in cmd
+        assert " -I -S " in cmd and "_claude_launcher.py --spool " in cmd
 
     def test_hook_env_resolves_named_store_from_foreign_cwd(
         self,

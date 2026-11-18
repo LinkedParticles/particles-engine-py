@@ -47,6 +47,9 @@ EXEMPT = {
     # Writes one into each case's run_dir, beside a private HOME, pinned the
     # same way, with its store beside it pinned by DATABASE_URL.
     "benchmark/update_gate/case.py",
+    # Writes one into each rot door build's run_dir beside a private HOME, pinned
+    # the same way (reusing update_gate's child environment).
+    "benchmark/rot/particles_door.py",
 }
 
 

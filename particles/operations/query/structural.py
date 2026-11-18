@@ -61,6 +61,7 @@ from .as_of import load_as_of_view
 from .decay_policy import DecayPolicy, load_decay_policy
 from .effective_confidence import score_effective_confidence
 from .observer_scope import filter_visible, merged_scope_note
+from .source_info import load_hit_sources
 from .source_trust import TrustPolicy, load_trust_policy
 from .vocabulary_report import VocabularyInputs, gather_vocabulary_inputs, vocabulary_report
 from .window import WindowGather, gather_window_candidates
@@ -408,10 +409,14 @@ async def _assemble(
     as_of_notes: list[AsOfNote | None] = (
         [gathered.as_of_notes.get(p.id) for p, _, _ in top] if request.as_of is not None else []
     )
+    listed = [p for p, _, _ in top]
     return QueryResponse(
         answer=answer,
-        particles=[p for p, _, _ in top],
+        particles=listed,
         effective_confidences=[eff for _, _, eff in top],
+        # one store's listing resolves its sources; the federated
+        # listing has no single session to resolve them in and sends none.
+        sources=await load_hit_sources(session, listed) if session is not None else [],
         claim_coverage=_coverage(gathered),
         as_of=request.as_of,
         as_of_notes=as_of_notes,

@@ -58,8 +58,39 @@ An empty denominator prints `n/a`, never a number: a floor that refuses
 nothing has no "share of refusals that were wrong". There is no aggregate
 score.
 
+With the floor off, the answer step can still decline a question on its own,
+by saying that nothing it retrieved bears on it. Since judge protocol 2 (the
+default), the judge reads the question and the beliefs that refusal withheld,
+without the refusal itself, and says whether they answer it. The report then
+gives the answer step's own false-refusal rate in both conditionings: of the
+answerable questions, the share it declined, and of what it declined, the share
+that was answerable. Protocol 1 labelled every such refusal unanswerable without
+a judge call, so its tables count the floor's errors only.
+
 The projected cost prints before any LLM call, priced from each question's
-*actual* retrieved context; `--estimate` stops there.
+*actual* retrieved context; `--estimate` stops there. A judged run ends with a
+`Spend:` block on stderr that sets the estimate beside the tokens and list-price
+dollars the providers reported, for the answer and the judge calls separately,
+and the JSON report records the same figures as `spend`. The estimate's output
+figures do not count thinking, which is billed as output; the measured figures
+do.
+
+Every judged run carries a spend ceiling. When a model is priced in
+`llm.price_per_mtok`, `--max-usd` names the most the run may spend at list
+price, which is not the account balance. A model with no price entry needs
+`--max-calls`, or `--no-ceiling` for a local model that costs nothing to call.
+There is no default, and a run without the stop its models need refuses before
+any call. The confirmation states the ceiling and the most the calls in flight
+at the stop can add: their output in full, each at its `max_tokens` (an
+answer's bound includes the larger budget the query operation retries at after
+an empty reply), and their input as projected. Once the ceiling is reached no
+call starts, and the calls in flight finish. A question left with a call
+unstarted is excluded as `budget_ceiling` and never checkpointed, so a re-run
+with a higher ceiling answers it afresh and pays only for what is left. A
+stopped report says INCOMPLETE in its table heading and its first note, and
+records `stopped_at_ceiling`. Its rates describe the questions that finished,
+which lean toward short answers, so it is not a result to quote; the resumed
+run is.
 
 ## Read before comparing
 
@@ -194,6 +225,50 @@ answerable; none of the three CLI queries was). That is the limit of this run:
 it measures the gate on real information needs, mostly not on real memory
 queries, because almost none of those were ever recorded.
 
+## Results: the answer step's refusals, judged (2026-11-03)
+
+The same 338 questions, replayed against the store as it stood on 2026-11-03
+(60,468 active beliefs, up from 27,980), with the gate off and judge
+protocol 2, which also judges each refusal the answer step makes on its own.
+Answer and judge model `claude-sonnet-5-5`. All 338 were scored; none was
+excluded.
+
+| | |
+|---|---|
+| Judged answerable (gate off) | 23.4% (79/338) |
+| Refused by the floor at the 0.25 default | 0.3% (1/338) |
+| Refused by the answer step | 10.7% (36/338) |
+| Answerable, refused by the answer step | 0.0% (0/79) |
+| Refused by the answer step, answerable | 0.0% (0/36) |
+
+What this says:
+
+* **The answer step refused no question its retrieved beliefs could answer.**
+  None of its 36 refusals was judged answerable. With 79 answerable questions,
+  zero observed refusals bounds its false-refusal rate at roughly 3.8% with 95%
+  confidence; it does not show that the rate is zero.
+* **On a store this size, the answer step is the gate that refuses.** The floor
+  turned away 1 question of 338, against 11 in September on a store half the
+  size. Some belief is nearly always close enough to pass it, so the answer
+  step's own refusals are the ones a reader meets, and their error rate is now
+  measured rather than assumed.
+* **The answer step declines far less often than in September** (36 of 338,
+  against 141). The answer model, its prompt (grounded answers with cited
+  facts) and the store all changed between the two runs, so this run
+  cannot say which of them moved the figure.
+* **A refusal is judged against what retrieval returned, not against the
+  store.** Eleven of the 36 refused questions name a project record by its
+  number. For every one, the store held active beliefs naming that record
+  (between 1 and 127 of them), and none reached the 40 beliefs the answer step
+  read. Those refusals were right for what the answer step was given; the miss
+  is retrieval's. Dense retrieval with this encoder does not tell one record
+  number from another, and neither this judge nor the floor sees that kind of
+  false negative.
+* **One model answers and judges.** The judge reads the withheld beliefs
+  without the refusal, but it is the same model, and its verdicts are sampled
+  (the model rejects a temperature setting). A hand check of three refusals'
+  withheld beliefs agreed with it.
+
 ## Reproducing
 
 ```bash
@@ -206,9 +281,9 @@ particles benchmark relevance-floor --format json --output ~/private/replay.json
 # Re-render any saved report as the aggregate table, over any floors (free)
 particles benchmark relevance-floor resweep ~/private/replay.json --floor 0.45 --floor 0.5
 
-# Price the judged stage from the saved replay, then run it
+# Price the judged stage from the saved replay, then run it under a ceiling
 particles benchmark relevance-floor --judge --estimate --replay-from ~/private/replay.json
-particles benchmark relevance-floor --judge --replay-from ~/private/replay.json
+particles benchmark relevance-floor --judge --replay-from ~/private/replay.json --max-usd 5
 ```
 
 Knobs live under `benchmark_relevance_floor` in `config.yaml`; prices come from

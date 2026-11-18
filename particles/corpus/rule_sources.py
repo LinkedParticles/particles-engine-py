@@ -41,14 +41,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from particles.config import get_config, is_broad_root
 from particles.core.observer_scope import project_tag
 from particles.core.schema import CorpusEntry, FetchPolicy, Mutability
+from particles.corpus.harvest_marks import RULE_FILE_TAG
 from particles.corpus.local_read import read_local_file
+from particles.corpus.origin import OtherHostEntryRefused
 from particles.corpus.rule_roots import record_rule_source_roots
 
 log = logging.getLogger(__name__)
 
 #: Tag every rule-source entry carries, so the set is addressable after deposit
 #: (``query --tag``, ``select.allow`` pins, the ``rules`` report).
-RULE_SOURCE_TAG = "rule-file"
+RULE_SOURCE_TAG = RULE_FILE_TAG
 
 #: ``source_type`` for a rule document. This is floored at 0 s, so the
 #: nightly cadence is the only rate limit on re-checking it.
@@ -92,6 +94,9 @@ class RuleSyncReport:
     unchanged: list[tuple[Path, str]] = field(default_factory=list)
     skipped_empty: list[Path] = field(default_factory=list)
     failed: list[tuple[Path, str]] = field(default_factory=list)
+    #: Paths another host's entry holds, with that host's id:
+    #: nothing is written for them.
+    other_host: list[tuple[Path, str]] = field(default_factory=list)
 
     @property
     def changed(self) -> int:
@@ -430,6 +435,11 @@ async def sync_rule_sources(
             )
         except OSError as exc:
             report.failed.append((path, str(exc)))
+            continue
+        except OtherHostEntryRefused as exc:
+            # The same path on another machine is that machine's file; this
+            # one's copy is not tracked.
+            report.other_host.append((path, exc.entry_origin))
             continue
         (report.unchanged if unchanged else report.deposited).append((path, entry_id))
 

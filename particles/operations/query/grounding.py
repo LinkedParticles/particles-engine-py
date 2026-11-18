@@ -59,12 +59,16 @@ GROUNDED_RULES = """\
   line such as "Here is what I found:".
 - The NO_RELEVANT_KNOWLEDGE line, when it applies, takes no tag."""
 
-# One tag: a declaration, or a citation list. A citation token is a ``p-`` /
-# ``p:`` handle or a bare UUID; requiring that shape keeps ordinary bracketed
-# prose ("[sic]") and markdown links ("[text](url)") out of the parse.
+# One tag: a comma-separated list of citations and declarations. A citation
+# token is a ``p-`` / ``p:`` handle or a bare UUID; requiring that shape keeps
+# ordinary bracketed prose ("[sic]") and markdown links ("[text](url)") out of
+# the parse. A composer sometimes writes both kinds in one bracket
+# ("[p-1a2b3c4d, inference]"): an inference with the claims it drew on, read
+# exactly as the adjacent pair "[p-1a2b3c4d] [inference]".
 _CITE_TOKEN = r"(?:p[-:][^\[\]\s,]+|[0-9a-f]{8}-[0-9a-f-]{27,})"
+_TAG_TOKEN = r"(?:inference|background|" + _CITE_TOKEN + r")"
 _TAG = re.compile(
-    r"\[\s*(inference|background|" + _CITE_TOKEN + r"(?:\s*,\s*" + _CITE_TOKEN + r")*)\s*\](?!\()",
+    r"\[\s*(" + _TAG_TOKEN + r"(?:\s*,\s*" + _TAG_TOKEN + r")*)\s*\](?!\()",
     re.IGNORECASE,
 )
 #: Terminal punctuation (and any closing quote) a tag placed before the
@@ -163,19 +167,19 @@ def _groups(text: str, lookup: dict[str, str]) -> list[_Group]:
         joins = bool(groups) and not text[groups[-1].end : match.start()].strip()
         group = groups[-1] if joins else _Group(match.start(), match.end(), [], [], declared=None)
         group.end = match.end()
-        lowered = body.strip().lower()
-        if lowered in ("inference", "background"):
-            label = AttributionKind(lowered)
-            # Both declared on one unit: the stronger disclosure wins.
-            if group.declared is not AttributionKind.BACKGROUND:
-                group.declared = label
-        else:
-            for raw in body.split(","):
-                pid = lookup.get(_normalise_token(raw))
-                if pid is None:
-                    group.invalid.append(raw.strip())
-                elif pid not in group.cited:
-                    group.cited.append(pid)
+        for raw in body.split(","):
+            lowered = raw.strip().lower()
+            if lowered in ("inference", "background"):
+                label = AttributionKind(lowered)
+                # Both declared on one unit: the stronger disclosure wins.
+                if group.declared is not AttributionKind.BACKGROUND:
+                    group.declared = label
+                continue
+            pid = lookup.get(_normalise_token(raw))
+            if pid is None:
+                group.invalid.append(raw.strip())
+            elif pid not in group.cited:
+                group.cited.append(pid)
         if not joins:
             groups.append(group)
     return groups
@@ -264,6 +268,25 @@ def parse_grounded(text: str, handles: dict[str, str]) -> GroundedAnswer:
     )
 
 
+#: A tag exactly as :func:`parse_grounded` writes it back (``_tag``), with the
+#: space before it: valid handles only, or one of the three labels.
+_CANONICAL_TAG = re.compile(
+    r"[ \t]*\[(?:inference|background|unattributed"
+    r"|p-[0-9a-f]{8,32}(?:, p-[0-9a-f]{8,32})*)\]"
+)
+
+
+def strip_attribution_tags(answer: str) -> str:
+    """The grounded answer as plain prose: every canonical tag removed.
+
+    Reads only what :func:`parse_grounded` wrote, so ordinary bracketed prose
+    (``[sic]``, a markdown link) is left alone, and an ungrounded answer comes
+    back unchanged. The per-sentence attribution is the structured record of
+    what this removes.
+    """
+    return _CANONICAL_TAG.sub("", answer)
+
+
 __all__ = [
     "GROUNDED_RULES",
     "GroundedAnswer",
@@ -271,4 +294,5 @@ __all__ = [
     "handle_for",
     "parse_grounded",
     "particle_handles",
+    "strip_attribution_tags",
 ]

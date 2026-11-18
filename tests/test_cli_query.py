@@ -237,6 +237,28 @@ class TestSemanticRendering:
         assert "Nearest beliefs — likely unrelated:" in result.output
         assert "Unrelated belief." in result.output
 
+    def test_refusal_prints_the_withheld_notice(self, backend: MagicMock) -> None:
+        """a withheld refusal prints one line in place of the table."""
+        backend.query.return_value = _response(
+            answer="I have no relevant knowledge.", answer_refused=True, withheld_candidates=7
+        )
+        result = runner.invoke(app, ["query", "anything?"], catch_exceptions=False)
+        assert result.exit_code == 0
+        assert "7 nearest beliefs withheld as likely unrelated (--show-particles" in result.output
+        assert "Nearest beliefs — likely unrelated:" not in result.output
+        req = backend.query.call_args.args[0]
+        assert req.include_refused_candidates is False
+
+    def test_show_particles_asks_for_refused_candidates(self, backend: MagicMock) -> None:
+        """--show-particles sets the request's opt-in."""
+        backend.query.return_value = _response()
+        result = runner.invoke(
+            app, ["query", "anything?", "--show-particles"], catch_exceptions=False
+        )
+        assert result.exit_code == 0
+        req = backend.query.call_args.args[0]
+        assert req.include_refused_candidates is True
+
     def test_contestedness_prints_the_per_policy_spread(self, backend: MagicMock) -> None:
         p = _claim("Disputed belief.")
         backend.query.return_value = _response(

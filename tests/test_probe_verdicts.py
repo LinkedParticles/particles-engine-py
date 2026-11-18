@@ -719,3 +719,12 @@ async def test_a_shadow_rungs_precision_is_read_against_the_probes_answers(
     yes = standings["yes"]
     assert (yes.rung, yes.recorded, yes.labelled, yes.correct) == ("polarity@1", 3, 3, 2)
     assert standings["no"].labelled == 0 and standings["no"].precision is None
+
+
+def test_a_rung_kind_fits_the_ledgers_32_characters() -> None:
+    from particles.core.probe_verdict import RUNG_KIND_PREFIX, rung_kind
+
+    longest = "r" * (32 - len(RUNG_KIND_PREFIX))
+    assert rung_kind(longest) == f"{RUNG_KIND_PREFIX}{longest}"
+    with pytest.raises(ValueError, match="too long"):
+        rung_kind(longest + "r")

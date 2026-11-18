@@ -289,6 +289,43 @@ async def test_cached_vectors_are_read_only(db_session: AsyncSession) -> None:
         rows[0][1][0] = 0.0
 
 
+async def test_the_matrix_is_the_candidates_stacked_and_kept_until_a_write(
+    db_session: AsyncSession,
+) -> None:
+    from particles.store.candidate_cache import load_candidate_matrix
+
+    await _seed(db_session)
+    rows = await load_active_candidates(db_session)
+    matrix = await load_candidate_matrix(db_session)
+    assert [p.id for p in matrix.particles] == [p.id for p, _ in rows]
+    assert np.array_equal(matrix.vectors, np.stack([v for _, v in rows]))
+    assert await load_candidate_matrix(db_session) is matrix
+    # The cache's vectors are the matrix's rows now: each held once, read-only.
+    again = await load_active_candidates(db_session)
+    assert np.shares_memory(again[0][1], matrix.vectors)
+    with pytest.raises(ValueError):
+        matrix.vectors[0, 0] = 0.0
+
+    await insert_particle(db_session, _particle("a new claim", 0.6), _vector(99))
+    await db_session.commit()
+    fresh = await load_candidate_matrix(db_session)
+    assert fresh is not matrix
+    assert "a new claim" in [p.content for p in fresh.particles]
+
+
+async def test_without_a_cache_the_matrix_is_stacked_from_the_loader(
+    db_session: AsyncSession,
+) -> None:
+    from particles.store.candidate_cache import load_candidate_matrix
+
+    get_config().query.candidate_cache = False
+    await _seed(db_session)
+    matrix = await load_candidate_matrix(db_session)
+    direct = await get_active_particles_with_embeddings(db_session)
+    assert [p.id for p in matrix.particles] == [p.id for p, _ in direct]
+    assert cached_rows(db_session) is None
+
+
 async def test_returned_particles_are_copies(db_session: AsyncSession) -> None:
     from particles.operations.query import retrieve_ranked
 
@@ -361,3 +398,145 @@ async def test_a_large_build_is_exempted_from_collection(
         assert freezes[0] == 1
     finally:
         gc.unfreeze()
+
+
+# ---------------------------------------------------------------------------
+# Vectors on demand: a reader that compares no vector
+# reads none, and a later reader that does gets the loader's vectors.
+# ---------------------------------------------------------------------------
+
+
+@contextmanager
+def _count_decodes() -> Iterator[list[int]]:
+    saved = candidate_cache.decode_embedding
+    calls = [0]
+
+    def counting(raw: str) -> Any:
+        calls[0] += 1
+        return saved(raw)
+
+    candidate_cache.decode_embedding = counting  # type: ignore[assignment]
+    try:
+        yield calls
+    finally:
+        candidate_cache.decode_embedding = saved  # type: ignore[assignment]
+
+
+async def test_the_particle_reader_decodes_no_vector(db_session: AsyncSession) -> None:
+    from particles.store.candidate_cache import load_active_candidate_particles
+
+    await _seed(db_session)
+    with _count_decodes() as decodes:
+        particles = await load_active_candidate_particles(db_session)
+        await load_active_candidate_particles(db_session, subject_id="subj-a")
+    assert decodes[0] == 0
+    direct = await get_active_particles_with_embeddings(db_session)
+    assert [p.model_dump() for p in particles] == [p.model_dump() for p, _ in direct]
+
+
+async def test_a_render_reads_no_vector(db_session: AsyncSession) -> None:
+    from particles.operations.query import retrieve_ranked
+
+    await _seed(db_session)
+    with _count_decodes() as decodes:
+        ranked = await retrieve_ranked(
+            db_session, QueryRequest(question="anything", top_k=5), use_embeddings=False
+        )
+    assert ranked
+    assert decodes[0] == 0
+    assert cached_rows(db_session) == 9
+
+
+async def test_vectors_read_after_a_vectorless_build_match_the_loader(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from particles.store.candidate_cache import load_active_candidate_particles
+
+    await _seed(db_session)
+    await load_active_candidate_particles(db_session)  # builds without vectors
+    with _count_decodes() as decodes:
+        await _assert_same(db_session, subject_id="subj-b")  # only that subject's
+        subject_only = decodes[0]
+        await _assert_same(db_session)
+        await _assert_same(db_session)  # warm: nothing more to read
+    assert 0 < subject_only < 8
+    assert decodes[0] == 8  # each kept row's vector, read once
+
+    candidate_cache.clear()
+    monkeypatch.setattr(candidate_cache, "_VECTOR_SCAN_FLOOR", 0)  # the one-scan read
+    await load_active_candidate_particles(db_session)
+    await _assert_same(db_session)
+
+
+async def test_a_re_read_row_carries_its_new_vector(db_session: AsyncSession) -> None:
+    seeded = await _seed(db_session)
+    await _assert_same(db_session)  # cache built, every vector read
+    await db_session.execute(
+        update(ParticleRow)
+        .where(ParticleRow.id == seeded[0].id)
+        .values(embedding_json=str(_vector(1234)))
+    )
+    await db_session.commit()
+    rows = await _assert_same(db_session)
+    changed = next(v for p, v in rows if p.id == seeded[0].id)
+    assert np.allclose(changed, np.asarray(_vector(1234), dtype=np.float32))
+
+
+async def test_vectors_by_id_match_the_loader_with_and_without_the_cache(
+    db_session: AsyncSession,
+) -> None:
+    from particles.store.candidate_cache import load_candidate_vectors
+
+    seeded = await _seed(db_session)
+    direct = {p.id: v for p, v in await get_active_particles_with_embeddings(db_session)}
+    wanted = [p.id for p in seeded] + ["no-such-id"]
+    for cache_on in (False, True):
+        get_config().query.candidate_cache = cache_on
+        with _count_decodes() as decodes:
+            got = await load_candidate_vectors(db_session, wanted)
+            again = await load_candidate_vectors(db_session, wanted[:3])
+        assert set(got) == set(direct)  # no retired, other-model, vectorless or missing id
+        assert all(np.array_equal(got[pid], direct[pid]) for pid in got)
+        assert set(again) == {pid for pid in wanted[:3] if pid in direct}
+        if cache_on:
+            assert decodes[0] == len(direct)  # each vector once, the second call none
+
+
+async def test_readers_that_arrive_together_build_one_copy(
+    file_db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """the engine's warm-up and a first request share one build."""
+    import asyncio
+
+    from particles.db import session_scope
+    from particles.store.candidate_cache import load_active_candidate_particles
+
+    await _seed(file_db_session)
+    builds = [0]
+    real_build = candidate_cache._build
+
+    async def counting(session: AsyncSession, head: Any) -> Any:
+        builds[0] += 1
+        await asyncio.sleep(0.05)  # long enough for the second reader to arrive
+        return await real_build(session, head)
+
+    monkeypatch.setattr(candidate_cache, "_build", counting)
+
+    async def read() -> int:
+        async with session_scope() as session:
+            return len(await load_active_candidate_particles(session))
+
+    assert await asyncio.gather(read(), read()) == [8, 8]
+    assert builds[0] == 1
+
+
+async def test_the_warm_up_builds_the_cache_and_writes_nothing(
+    file_db_session: AsyncSession,
+) -> None:
+    from particles.operations.warm_up import warm_render_path
+
+    await _seed(file_db_session)
+    head = await read_head(file_db_session)
+    assert await warm_render_path("default") >= 0.0
+    assert cached_rows(file_db_session) == 9
+    assert await read_head(file_db_session) == head

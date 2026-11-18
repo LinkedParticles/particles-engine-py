@@ -62,6 +62,7 @@ from particles.api.cli._progress import (
     progress_line,
     set_heartbeat_status,
 )
+from particles.api.cli._remote import refuse_remote_sync
 from particles.api.cli._terminal import terminal_echo
 from particles.core.progress import ProgressEvent
 from particles.core.schema import ObserverScopeNote
@@ -114,6 +115,7 @@ def rebuild_utility_cmd(
     never runs, so a literal-only rebuild now records no mined events. The
     explicit channel (`memory useful`) is rebuilt from its event log either way.
     """
+    refuse_remote_sync("memory rebuild-utility")
     configure_output(verbose, debug, quiet, progress)
     run(_rebuild_utility(store, yes=yes, batch=batch))
 
@@ -201,6 +203,7 @@ def useful_cmd(
     only promote. For "still true", the gesture is
     `particles curate apply affirm`.
     """
+    refuse_remote_sync("memory useful")
     configure_output(verbose, debug, quiet, progress)
     run(_useful(particle_id, reason=reason, store=store))
 
@@ -309,6 +312,32 @@ def rescope_cmd(
             "project, never global."
         ),
     ),
+    mark_reference: bool = typer.Option(
+        False,
+        "--mark-reference",
+        help=(
+            "List every global document entry (keyless, not harvested, not a rule file or "
+            "vocabulary document) that `scope:reference` would mark, then stop. With "
+            "--apply, mark them: each still answers questions from every project, and the "
+            "session-start digest and the agent-memory region leave it out. "
+            "Each mark is recorded. Run --apply only from a runtime that ships this flag."
+        ),
+    ),
+    except_entries: list[str] = typer.Option(
+        [],
+        "--except",
+        metavar="ENTRY_ID",
+        help="With --mark-reference, keep this listed entry global (repeatable).",
+    ),
+    apply: bool = typer.Option(
+        False, "--apply", help="With --mark-reference, write the marks the preview lists."
+    ),
+    unmark_reference: str | None = typer.Option(
+        None,
+        "--unmark-reference",
+        metavar="ENTRY_ID",
+        help="Remove one entry's `scope:reference` mark, so it is global again, then stop.",
+    ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Report what would change; write nothing."
     ),
@@ -344,15 +373,41 @@ def rescope_cmd(
     `--leave-unattributed`, and even then the entry is left in view for no
     project rather than made global. Putting a belief in view everywhere is
     `particles memory widen`.
+
+    Documents you deposited with no project (web pages, articles, files) are
+    reference material: they answer questions from every project, and the
+    session-start digest and the agent-memory region leave them out and say
+    how many. New deposits are marked as they arrive; older ones
+    change only when you run `--mark-reference --apply`, after previewing the
+    list without `--apply`. `--except ENTRY_ID` keeps one global, and
+    `--unmark-reference ENTRY_ID` reverses a mark.
     """
+    refuse_remote_sync("memory rescope")
     configure_output(verbose, debug, quiet, progress)
-    modes = [assign is not None, mark_agent_writes, unmark is not None, withdraw is not None]
+    modes = [
+        assign is not None,
+        mark_agent_writes,
+        unmark is not None,
+        withdraw is not None,
+        mark_reference,
+        unmark_reference is not None,
+    ]
     if sum(modes) > 1:
         typer.echo(
-            "Error: --assign, --mark-agent-writes, --unmark and --withdraw are separate steps.",
+            "Error: --assign, --mark-agent-writes, --unmark, --withdraw, --mark-reference and "
+            "--unmark-reference are separate steps.",
             err=True,
         )
         raise typer.Exit(2)
+    if (except_entries or apply) and not mark_reference:
+        typer.echo("Error: --except and --apply apply only with --mark-reference.", err=True)
+        raise typer.Exit(2)
+    if mark_reference:
+        run(_mark_reference(except_entries, apply=apply and not dry_run, store=store))
+        return
+    if unmark_reference is not None:
+        run(_unmark_reference(unmark_reference, store=store))
+        return
     if identity and not mark_agent_writes:
         typer.echo("Error: --identity applies only with --mark-agent-writes.", err=True)
         raise typer.Exit(2)
@@ -396,6 +451,60 @@ async def _mark_agent_writes(extra: list[str], *, dry_run: bool, store: str) -> 
         typer.echo("  A depositor you recognise as an agent can be added with `--identity NAME`.")
     if dry_run:
         typer.echo("\nDry run: nothing was written.")
+
+
+async def _mark_reference(excepted: list[str], *, apply: bool, store: str) -> None:
+    from particles.operations.observer_scope import mark_reference
+
+    async with session_scope(store, write=apply) as session:
+        try:
+            report = await mark_reference(
+                session, excepted=excepted, dry_run=not apply, actor=CLI_ACTOR
+            )
+        except ValueError as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(2) from exc
+        if apply:
+            await session.commit()
+    excepted_ids = set(report.excepted)
+    typer.echo(
+        f"Global document entries in '{store}': {len(report.listed)} listed, "
+        f"{len(report.excepted)} kept global, "
+        f"{'marked' if apply else 'would mark'} {len(report.marked)} `scope:reference`."
+    )
+    # A URI is a link a source published: printed through the terminal escape.
+    for entry_id, source_type, uri_r in report.listed:
+        state = "keep" if entry_id in excepted_ids else ("marked" if apply else "mark")
+        terminal_echo(f"  {state:6s}  {entry_id}  {source_type:<16s}  {uri_r or '(no URI)'}")
+    if report.skipped_vocabulary:
+        typer.echo(
+            f"  {report.skipped_vocabulary} vocabulary document(s) skipped: they are the "
+            "store's own statements."
+        )
+    if not apply:
+        typer.echo(
+            "\nPreview: nothing was written. Re-run with --apply to mark them "
+            "(--except ENTRY_ID keeps one global)."
+        )
+
+
+async def _unmark_reference(entry_id: str, *, store: str) -> None:
+    from particles.operations.observer_scope import unmark_reference
+
+    async with session_scope(store, write=True) as session:
+        try:
+            changed = await unmark_reference(
+                session, entry_id, actor=CLI_ACTOR, by="unmark-reference"
+            )
+        except ValueError as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(2) from exc
+        await session.commit()
+    typer.echo(
+        f"Entry {entry_id} is global again."
+        if changed
+        else f"Entry {entry_id} was not marked reference."
+    )
 
 
 async def _withdraw(target: tuple[str, str], *, leave_unattributed: bool, store: str) -> None:
@@ -552,6 +661,7 @@ def widen_cmd(
     this: an agent that could widen its own belief could put it in front of
     every future session.
     """
+    refuse_remote_sync("memory widen")
     configure_output(verbose, debug, quiet, progress)
     run(_widen(target_id, entry=entry, revoke=revoke, store=store))
 
@@ -612,30 +722,75 @@ def redate_cmd(
         file_okay=False,
         dir_okay=True,
     ),
+    reread: bool = typer.Option(
+        False,
+        "--reread",
+        help=(
+            "Re-read each session that spans more than one day, from its first day "
+            "change, so its acts are dated by their own day. Calls the extraction model: "
+            "prints the estimate and asks first (with --dry-run, stops after the estimate)."
+        ),
+    ),
+    yes: bool = typer.Option(
+        False, "--yes", help="With --reread: spend without asking (a non-interactive run)."
+    ),
+    skip: list[str] = typer.Option(  # noqa: B008 — Typer reads the default
+        [],
+        "--skip",
+        metavar="ENTRY_ID",
+        help="With --reread: leave this session's entry as it is. Repeatable.",
+    ),
     store: str = typer.Option(DEFAULT_STORE, "--store", help="Store handle."),
     verbose: bool = VERBOSE_OPTION,
     debug: bool = DEBUG_OPTION,
     quiet: bool = QUIET_OPTION,
     progress: bool | None = PROGRESS_OPTION,
 ) -> None:
-    """Give each harvested session its own start as the reference date.
+    """Give each harvested session its own dates.
 
-    A claim about an act a session performed is dated to the session's day
-    (the `session` basis of `valid_from`). Sessions harvested before 1.190.1
-    carried no date of their own, so their claims were anchored at the day
-    they were extracted instead. This verb reads each session's start from
-    its transcript, records it on the session's snapshots, and moves every
-    `session`-dated claim of that session to that day. It makes no model
-    call, never touches a claim dated any other way, and lists the sessions
-    whose transcript is gone rather than guessing. Running it twice changes
-    nothing. Local store only.
+    A claim about an act a session performed is dated to the day of the turn
+    that reports it (the `session` basis of `valid_from`). Sessions harvested
+    before 1.190.1 carried no date of their own, so their claims were anchored
+    at the day they were extracted instead. This verb reads each session's
+    days from its transcript, records its start on the session's snapshots,
+    and moves every `session`-dated claim on a day the session never saw to
+    its start. That part makes no model call, never touches a claim dated any
+    other way, and lists the sessions whose transcript is gone rather than
+    guessing. Running it twice changes nothing.
+
+    It also lists the sessions that span more than one day. Their claims were
+    extracted before transcripts carried their days, so every act is dated to
+    the first day, in the claim's date and in its text. `--reread` re-reads
+    them from their first day change: it retires the claims read from that
+    point on and reads the text again, so the tags, links and use history on
+    a retired claim do not carry over. It prints what it would retire and
+    spend, and asks first. Exit codes: 0 done, 1 a session's re-read failed,
+    2 not started. Local store only.
     """
+    refuse_remote_sync("memory redate")
     configure_output(verbose, debug, quiet, progress)
-    run(_redate(dry_run=dry_run, store=store, transcripts=transcripts))
+    run(
+        _redate(
+            dry_run=dry_run,
+            store=store,
+            transcripts=transcripts,
+            reread=reread,
+            yes=yes,
+            skip=set(skip),
+        )
+    )
 
 
-async def _redate(*, dry_run: bool, store: str, transcripts: Path | None = None) -> None:
-    from particles.api.cli._claude_code import session_started_at
+async def _redate(
+    *,
+    dry_run: bool,
+    store: str,
+    transcripts: Path | None = None,
+    reread: bool = False,
+    yes: bool = False,
+    skip: set[str] | None = None,
+) -> None:
+    from particles.api.cli._claude_code import session_started_at, session_turn_days
     from particles.operations.validity import REDATE_ACTOR, redate_sessions
 
     root = transcripts if transcripts is not None else _claude_projects_root()
@@ -646,6 +801,7 @@ async def _redate(*, dry_run: bool, store: str, transcripts: Path | None = None)
             started_at_for=lambda _entry_id, uri_r, _tags: session_started_at(
                 uri_r, root, flat=flat
             ),
+            turn_days_for=lambda _entry_id, uri_r, _tags: session_turn_days(uri_r, root, flat=flat),
             dry_run=dry_run,
             actor=REDATE_ACTOR,
         )
@@ -673,8 +829,153 @@ async def _redate(*, dry_run: bool, store: str, transcripts: Path | None = None)
                 "If their transcripts were copied elsewhere, name that folder with "
                 "--transcripts DIR."
             )
-    if dry_run:
+    if report.multi_day:
+        sessions = sorted(report.multi_day, key=lambda m: m.span_days, reverse=True)
+        on_first_day = sum(m.first_day_claims for m in sessions)
+        typer.echo(
+            f"\n{len(sessions)} session(s) span more than one day; their acts after the "
+            f"first day were dated to it when extracted ({on_first_day} session-dated "
+            "claim(s) on a first day):"
+        )
+        for found in sessions[:10]:
+            typer.echo(
+                f"  {found.entry_id}  {found.days} day(s) over {found.span_days + 1}, "
+                f"{found.first_day_claims} claim(s) on the first day"
+            )
+        if not reread:
+            typer.echo("Re-read them with --reread (calls the extraction model; asks first).")
+    if reread:
+        code = await _reread_sessions(
+            store=store,
+            root=root,
+            flat=flat,
+            entry_ids=[m.entry_id for m in report.multi_day if m.entry_id not in (skip or set())],
+            dry_run=dry_run,
+            yes=yes,
+        )
+        if code:
+            raise typer.Exit(code)
+    elif dry_run:
         typer.echo("\nDry run: nothing was written.")
+
+
+async def _reread_sessions(
+    *,
+    store: str,
+    root: Path,
+    flat: bool,
+    entry_ids: list[str],
+    dry_run: bool,
+    yes: bool,
+) -> int:
+    """``memory redate --reread``: estimate, confirm, deposit, re-read."""
+    import sys
+
+    from particles.api.cli._claude_code import (
+        distill_transcript,
+        redact_secrets,
+        session_transcripts,
+        transcript_started_at,
+    )
+    from particles.api.cli._estimate_text import range_text
+    from particles.core.schema import Mutability
+    from particles.corpus.store import get_entry
+    from particles.operations.deposit import deposit_text_versioned
+    from particles.operations.llm_spend import MeteredExtractRun
+    from particles.operations.session_reread import plan_reread, run_reread
+    from particles.operations.spend_estimate import extraction_range
+
+    if not entry_ids:
+        typer.echo("\nNo session to re-read.")
+        return 0
+    # The rendering each session's transcript distills to now, as a harvest
+    # would deposit it: distilled with its day marks, then redacted.
+    renderings: dict[str, tuple[str, str, Any]] = {}
+    plans = []
+    async with session_scope(store) as session:
+        for entry_id in entry_ids:
+            entry = await get_entry(session, entry_id)
+            if entry is None or not entry.uri_r:
+                continue
+            session_id = entry.uri_r.rsplit("/", 1)[-1]
+            for transcript in session_transcripts(entry.uri_r, root, flat=flat):
+                try:
+                    raw = transcript.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                text = redact_secrets(distill_transcript(raw, session_id))
+                renderings[entry_id] = (text, entry.uri_r, transcript_started_at(raw))
+                break
+            if entry_id in renderings:
+                plans.append(
+                    await plan_reread(session, entry_id, renderings[entry_id][0].encode("utf-8"))
+                )
+    ready = [plan for plan in plans if plan.refusal is None]
+    calls = [call for plan in ready for call in plan.calls]
+    retire = sum(len(plan.retire) for plan in ready)
+    with_state = sum(plan.retire_with_state for plan in ready)
+    typer.echo(
+        f"\nRe-read of {len(ready)} session(s): retire {retire} claim(s) "
+        f"({with_state} carry a tag, a link or use history, which do not carry over) "
+        f"and read {sum(plan.read_chars for plan in ready):,} character(s) again in "
+        f"{len(calls)} call(s), {range_text(extraction_range(calls, entries=len(ready)))}."
+    )
+    for plan in plans:
+        if plan.refusal is not None:
+            typer.echo(f"  skipped {plan.entry_id}: {plan.refusal}")
+    if not ready:
+        return 0
+    if dry_run:
+        typer.echo("\nDry run: nothing was written or spent.")
+        return 0
+    if not yes:
+        if not sys.stdin.isatty():
+            typer.echo(
+                "Error: --reread spends on the extraction model and asks first; pass --yes "
+                "in a non-interactive run. Nothing was spent.",
+                err=True,
+            )
+            return 2
+        if not confirm(f"Re-read {len(ready)} session(s)?"):
+            typer.echo("Aborted: nothing was spent.")
+            return 2
+
+    failed = 0
+    retired = 0
+    meter = MeteredExtractRun(actor="cli:memory-redate", route="reread")
+    async with meter:
+        for plan in ready:
+            text, uri_r, started = renderings[plan.entry_id]
+            try:
+                async with session_scope(store, write=True) as session:
+                    entry = await get_entry(session, plan.entry_id)
+                    if entry is None:
+                        continue
+                    await deposit_text_versioned(
+                        session,
+                        text=text,
+                        uri_r=uri_r,
+                        source_type=entry.source_type,
+                        mutability=Mutability.APPEND_ONLY,
+                        tags=list(entry.tags or []),
+                        deposited_by=entry.deposited_by or "claude-code-hook",
+                        content_published_at=started,
+                    )
+                    await session.commit()
+                    current = await plan_reread(session, plan.entry_id)
+                    if current.refusal is not None:
+                        typer.echo(f"  skipped {plan.entry_id}: {current.refusal}")
+                        continue
+                    retired += await run_reread(session, current)
+            except (RuntimeError, ValueError) as exc:
+                failed += 1
+                typer.echo(f"  {plan.entry_id}: the re-read stopped ({exc})", err=True)
+        meter.snapshots = len(ready)
+    typer.echo(
+        f"Re-read {len(ready) - failed} session(s); retired {retired} claim(s) and read their "
+        "text again."
+    )
+    return 1 if failed else 0
 
 
 @memory_app.command("absences")
@@ -977,6 +1278,7 @@ def sweep_rank_lift_cmd(
     consolidation monitor does, so a verdict it recorded reproduces
     by hand.
     """
+    refuse_remote_sync("memory sweep-rank-lift")
     configure_output(verbose, debug, quiet, progress)
     if not off_head_cohort and any(v is not None for v in (min_sessions, capture, entry_share)):
         typer.echo(
@@ -1399,6 +1701,62 @@ async def _consolidate_impl(
     output: Path | None,
     fmt: str,
 ) -> None:
+    """Enter the explicitly scoped scheduled credential fallback before paid passes."""
+    from particles.api.cli._codex_runtime import health_summary, paths
+    from particles.api.cli._scheduled_credentials import credential_binding, credential_status
+    from particles.secrets import scheduled_credential_scope
+
+    # This channel runs on --if-due no-ops and needs no later host delivery.
+    tracking = False
+    try:
+        _home, state, store_id = paths(store)
+        tracking = (state.parent.parent / "installations" / f"{store_id}.json").exists()
+        if (state / "health.json").exists():
+            typer.echo(health_summary(store), err=True)
+    except (ValueError, OSError):
+        pass
+    try:
+        binding = None if structural_only else credential_binding(store)
+    except (ValueError, KeyError, OSError):
+        typer.echo("learning blocked: invalid scheduled credential/store binding", err=True)
+        raise typer.Exit(2) from None
+    with scheduled_credential_scope(binding):
+        if not structural_only:
+            status = credential_status(binding) if binding is not None else None
+            if tracking:
+                from particles.api.cli._codex_runtime import record_learning_status
+                from particles.api.cli._scheduled_credentials import environment_status
+
+                if status is None:
+                    status = environment_status(store)
+                try:
+                    record_learning_status(store, status)
+                except (OSError, ValueError):
+                    typer.echo(
+                        "warning: scheduled credential status could not be recorded", err=True
+                    )
+            if binding is not None and status in {"missing", "locked/denied"}:
+                typer.echo(f"learning blocked: {status} scheduled extraction credential", err=True)
+                raise typer.Exit(2)
+        await _consolidate_impl_scoped(
+            store=store,
+            if_due=if_due,
+            structural_only=structural_only,
+            scope=scope,
+            output=output,
+            fmt=fmt,
+        )
+
+
+async def _consolidate_impl_scoped(
+    *,
+    store: str,
+    if_due: bool,
+    structural_only: bool,
+    scope: str,
+    output: Path | None,
+    fmt: str,
+) -> None:
     from particles.api.client import get_backend
 
     if get_backend().remote:
@@ -1711,6 +2069,51 @@ def build_projection_runner(store: str) -> tuple[ProjectionRunner | None, str | 
     return _run, None
 
 
+async def _refuse_a_store_this_install_cannot_serve(store: str) -> None:
+    """Exit before serving when the store has no schema or lacks one of this install's migrations.
+
+    Once the stdio transport is up, a store failure reaches the client only as
+    a tool error, on every call (a fresh store answers each tool with
+    ``no such table: subjects``). The façade never creates or migrates the
+    store it opens, so a mistyped path fails here instead of starting an empty
+    memory, and a missing SQLite file is refused before the probe would create
+    it. Any other probe failure is left to the server, which reports its own.
+    """
+    from sqlalchemy.exc import OperationalError, ProgrammingError
+
+    from particles.api.cli._schema import behind_summary, migrate_command
+    from particles.config import get_config, sqlite_file_path
+    from particles.db import schema_state
+
+    storage = get_config().storage
+    db_file = sqlite_file_path(
+        storage.database_url if store == DEFAULT_STORE else storage.stores[store]
+    )
+    problem: str | None = None
+    if db_file is not None and not Path(db_file).exists():
+        problem = f"there is no store at {db_file}"
+    else:
+        try:
+            state = await schema_state(store)
+        except (OperationalError, ProgrammingError) as exc:
+            msg = str(exc).lower()
+            if "no such table" not in msg and "does not exist" not in msg:
+                raise
+            problem = "the store has no Particles schema"
+        except Exception:  # noqa: BLE001 — the probe is advisory beyond a missing schema
+            return
+        else:
+            if state is None or not state.pending:
+                return
+            problem = behind_summary(state)
+    typer.echo(
+        f"Error: the memory server could not start: {problem}. Initialize or migrate it "
+        f"with this install, then restart the server:\n  {migrate_command(store)}",
+        err=True,
+    )
+    raise typer.Exit(2)
+
+
 @memory_app.command("serve")
 def memory_serve_cmd(
     store: str = typer.Option(
@@ -1723,9 +2126,13 @@ def memory_serve_cmd(
     tools, same schemas, same responses, backed by a Particles store. In your
     MCP client config, replace the reference server's command with::
 
-        "memory": {"command": "uv",
-                   "args": ["run", "--project", "/path/to/particles",
+        "memory": {"command": "uvx",
+                   "args": ["--from", "linkedparticles",
                             "particles", "memory", "serve"]}
+
+    Run ``particles db init`` against the store first: the server never
+    creates or migrates the store it opens, and refuses to start (exit 2) on
+    one without this install's schema, printing the command that fixes it.
 
     Args:
         store: Store handle to bind. Defaults to the default store. Writes
@@ -1748,6 +2155,8 @@ def memory_serve_cmd(
         allowed = get_config().mcp.write.enabled_stores
         if len(allowed) == 1 and allowed[0] != DEFAULT_STORE:
             prepare_stdio_server_store(allowed[0], local_store=True)
+            run(_refuse_a_store_this_install_cannot_serve(allowed[0]))
+    run(_refuse_a_store_this_install_cannot_serve(store or DEFAULT_STORE))
     try:
         serve_main(store)
     except UncoveredEventLoop as exc:
@@ -1858,6 +2267,7 @@ def sweep_owner_lift_cmd(
     so the non-regression criterion is measured against the head utility has
     already shaped.
     """
+    refuse_remote_sync("memory sweep-owner-lift")
     configure_output(verbose, debug, quiet, progress)
     if format_ not in _FORMATS:
         typer.echo(f"Error: --format must be one of: {', '.join(_FORMATS)}.", err=True)

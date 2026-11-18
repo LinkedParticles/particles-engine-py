@@ -32,6 +32,7 @@ $ particles [OPTIONS] COMMAND [ARGS]...
 * `structure`: Annotate particles with a structured...
 * `modality`: Reclassify claims whose adjudicability...
 * `validity`: Date claims from the absolute dates...
+* `episode`: Read whether transcript claims report only...
 * `subjects`: Manage subjects (canonical real-world...
 * `benchmark`: Whole-pipeline system benchmarks (ADR...
 * `config`: Inspect and validate Particles...
@@ -60,19 +61,30 @@ $ particles [OPTIONS] COMMAND [ARGS]...
 
 Manage the database.
 
+``init`` migrates the store to the current schema. Once per store it also
+marks each ``file://`` entry that records no host as this host's file, since
+the local refresh reads only its own host's files; run it on the machine
+whose files the store tracks.
+
+``backup <dir>`` copies the default store and its blobs into ``<dir>`` while
+the store stays in use, then checks the copy and runs the ``corpus fsck``
+audit over it. It exits non-zero unless the copy verifies.
+
 **Usage**:
 
 ```console
-$ particles db [OPTIONS] {action}
+$ particles db [OPTIONS] {action} [target]
 ```
 
 **Arguments**:
 
-* `action`: Action: init  [required]
+* `action`: Action: init or backup  [required]
+* `target`: backup: the new or empty directory to write the copy into. It receives particles.db and corpus_blobs/, the layout of the container's /data volume.
 
 **Options**:
 
 * `--force`: init: drop every particle-store table (preserving the corpus, the blob store and the session-exposure record) and rebuild from scratch. this is the upgrade path across a SCHEMA_VERSION major bump. Confirms before dropping.
+* `--origin-preview`: init: print how many file:// entries the one-time origin stamp would mark as this host's files, by class, and change nothing (no migration either). Run it before the first init that stamps, on the machine whose files the store tracks.
 * `--help`: Show this message and exit.
 
 ## `particles deposit`
@@ -96,6 +108,7 @@ $ particles deposit [OPTIONS] [source]
 * `--source-type <str>`: Override the source_type (normally auto-detected from the extension / URL / content; you rarely need this). Core values (particles.core.schema.SourceType): WEB_PAGE, PDF, CSV, CONVERSATION, DATA_EXPORT, LOCAL_FILE, LOCAL_MARKDOWN, ACADEMIC_PAPER, FORUM, BLOG, TAXONOMY_DEFINITION, TRUST_LENS_DEFINITION, VOCABULARY_DOCUMENT. Domain extractors register their own, e.g. JOURNAL, REDDIT_POST, HACKERNEWS_THREAD, MASTODON_THREAD, GITHUB_REPO / GITHUB_GIST / GITHUB_PAGES, WIKIDATA_API, NUMISTA_API_COIN / NUMISTA_API_ISSUER, NOMISMA_API. Use --journal for the JOURNAL shortcut.
 * `--journal`: Mark this deposit as a personal JOURNAL so the journal-aware extractor handles it (reifies feelings/opinions and emits the NARRATIVE graph). Shorthand for --source-type JOURNAL; an explicit --source-type wins.
 * `--tags <str>`: Comma-separated tags
+* `--standing`: Keep this deposit in every project's standing memory. A deposit that names no project is reference by default: it answers questions from every project, and the session-start digest and the agent-memory region leave it out and count it. Pass --standing for a document every project should start from. On a re-deposit of an entry already marked reference, it removes the mark.
 * `--date <str>`: Record this content's authorship date as content_published_at (ISO YYYY-MM-DD). Overrides the leading-date and file-mtime auto-detection. Local-file deposits only; ignored with a warning for URLs.
 * `--split-by-date`: Split a multi-entry local file at standalone date-line boundaries into N corpus entries, each with its own content_published_at (a journal / changelog / daily-log that concatenates many dated entries). Opt-in; default off leaves today's one-file-one-entry behaviour unchanged. Local files only; mutually exclusive with --date. A file that is not actually multi-entry deposits as a single entry.
 * `--follow-post-links / --no-follow-post-links`: Follow the post's primary URL for link-shaped sources (Reddit / HN / Mastodon link cards). When unspecified, the extractor's default applies: Reddit / HN / Mastodon default to True, everything else to False.
@@ -161,11 +174,11 @@ $ particles query [OPTIONS] [question]
 
 * `--min-confidence <float>`: Minimum confidence threshold  [default: 0.0]
 * `--audience <str>`: GENERAL, EXPERT, or REGULATORY  [default: GENERAL]
-* `--top-k <int>`: Number of particles to retrieve  [default: 40]
+* `--top-k <int>`: Number of particles to retrieve (default: query.default_top_k, 40).
 * `--subject <str>`: Filter to particles about this subject: an ID, an ID prefix, or a name or alias
 * `--tag <str>`: Filter by taxonomy tag (subtree-expanded; repeatable)
 * `--include-ancestors`: Match particles tagged with a broader ancestor of each --tag as well (up-expansion over taxonomy parent links)
-* `--show-particles`: Print retrieved particles with scores before the answer
+* `--show-particles`: Print retrieved particles with scores before the answer. When the answer refuses, this also asks for the nearest beliefs, which are otherwise withheld as likely unrelated.
 * `--show-source`: After the answer, print the source passage behind each of the top hits, labelled exact (hash-verified chunk), located (best term overlap; not verified), or whole source. Display only: never affects ranking. `particles particle source <id>` does the same for one belief.
 * `--contestedness`: Show per-result contestedness: the max−min spread of effective confidence across your policy set (local + adopted lenses). Absent when fewer than two policies are configured.
 * `--include-document-meta`: Include DOCUMENT_META particles (claims about a source's own structure)
@@ -570,14 +583,54 @@ $ particles validity [OPTIONS]
 * `--debug`: Debug logging.
 * `--help`: Show this message and exit.
 
+## `particles episode`
+
+Read whether transcript claims report only their session's moment.
+
+The episode reading asks of each claim whose every source is a session
+transcript whether it is true only of the moment its session reports (a
+state then, or an act performed in it) or holds beyond the session. The
+extractor answers it for new claims; this verb answers it for stored ones,
+several claims of one transcript per model call, each beside its source
+passage, and stores the answer with the stamp of the prompt that gave it.
+It never changes a claim's content, confidence, status or provenance, and
+never overwrites an operator's reading.
+
+No reading withholds a curation card yet: each curation build only counts,
+in shadow, the pair cards a reading would fold into one card per session.
+`--sheet` writes the sample the owner labels to admit a reading's stamp.
+
+**Usage**:
+
+```console
+$ particles episode [OPTIONS]
+```
+
+**Options**:
+
+* `--scope <str>`: Which claims to read: 'cards' (the sides of the newest curation collection's pair cards, the claims a fold acts on) or 'all' (every transcript-only active claim).  [default: cards]
+* `--limit <int>`: Max claims to read this run (default: curation.episode.batch_limit). Use 0 for the whole backlog; the pass commits as it goes.
+* `--rate-limit-per-minute <int>`: Max reader calls per minute (default: curation.episode.rate_limit_per_minute); 0 disables the delay.
+* `--restamp`: Rewrite every reading but an operator's under the current regeneration stamp, including readings under an admitted stamp.
+* `--dry-run`: Report the backlog, the reader calls it needs, their list-price estimate and the stored readings by stamp; write nothing and call no model.
+* `--sheet <path>`: Write the labelling sheet (JSON Lines) to this path instead of reading: per stratum and stamp combination, a sample of the pair cards it would withhold. Calls no model and writes nothing to the store.
+* `--sheet-size <int>`: Cards per stratum and stamp combination on the sheet (default: curation.episode.sheet_size).
+* `--seed <int>`: The sheet's sampling seed.  [default: 20261108]
+* `-v, --verbose`: Print per-call progress.
+* `--debug`: Debug logging.
+* `--help`: Show this message and exit.
+
 ## `particles subjects`
 
 Manage subjects (canonical real-world entities).
 
     particles subjects list [--order name|degree] [--phantoms-only]
+    particles subjects list --provisional
     particles subjects search QUERY
     particles subjects show ID|NAME
     particles subjects alias ID NAME [NAME ...]
+    particles subjects accept SUBJECT_ID
+    particles subjects provisional-backfill [--dry-run]
     particles subjects confirm SUBJECT_ID NAMESPACE:ID
     particles subjects unlink SUBJECT_ID NAMESPACE:ID
     particles subjects merge SOURCE_ID [SOURCE_ID ...] TARGET_ID [--dry-run] [--yes]
@@ -600,7 +653,7 @@ $ particles subjects [OPTIONS] [action] [rest]...
 
 **Arguments**:
 
-* `action`: Action: list, search, show, alias, confirm, unlink, merge, split, delete, gc, set-class, fix-labels, find-duplicates, relink-gated, rebuild-aliases, fold-artifacts  [default: list]
+* `action`: Action: list, search, show, alias, accept, confirm, unlink, merge, split, delete, gc, set-class, fix-labels, find-duplicates, relink-gated, rebuild-aliases, fold-artifacts, provisional-backfill  [default: list]
 * `rest...`: Arguments for the chosen action
 
 **Options**:
@@ -609,6 +662,7 @@ $ particles subjects [OPTIONS] [action] [rest]...
 * `-y, --yes`: merge only: skip the confirmation prompt
 * `--force`: delete only: remove a non-phantom subject (one with ACTIVE particles)
 * `--phantoms-only`: list only: restrict to phantom subjects (zero ACTIVE particles)
+* `--provisional`: list only: the provisional Subjects agent principals minted, oldest first, each with any confirmed Subject that holds its name
 * `--order <str>`: list only: 'name' (alphabetical) or 'degree' (most ACTIVE linked particles first)  [default: name]
 * `-p, --particle <str>`: Particle ID to split off from the source (split only; repeat for multiple)
 * `--new-name <str>`: Approximate name for the new Subject (split only). Canonicalised via the resolver.
@@ -703,12 +757,16 @@ $ particles benchmark leakage [OPTIONS]
 * `--limit <int range>`: Measure a seeded sample of N questions, stratified by source.  [x>=1]
 * `--estimate`: Print the projection and exit before any LLM call.
 * `-y, --yes`: Skip the confirmation above the call threshold.
+* `--max-usd <float>`: Stop the run once its priced roles have spent this many US$ at list price (llm.price_per_mtok, not your account balance). Calls in flight finish, and a re-run with a higher ceiling resumes. Required when a role is priced; there is no default.
+* `--max-calls <int range>`: Stop the run once its unpriced roles have made this many billed calls. Required when a role has no llm.price_per_mtok entry, unless --no-ceiling.  [x>=1]
+* `--no-ceiling`: Run an unpriced role (a local model that costs nothing to call) with no call count. Never lifts the --max-usd a priced role needs.
 * `--per-question / --aggregate-only`: One table row per question id (default: on with --question, off otherwise).
 * `-o, --output <path>`: Write the rendered report to this path as well.
 * `--format <table|json>`: table (default; no question, answer, or sentence text) or json (the report of record; carries that text).  [default: table]
 * `--checkpoint <path>`: Checkpoint file for a held-out run (default: beside the held-out set), so an interrupted run never re-pays a finished question.
 * `--allow-in-repo`: Permit a --format json --output inside a git work tree.
 * `--grounded / --ungrounded`: Measure grounded answers, where the composer cites particle ids per sentence and labels its own inference and background. Cited sentences are judged against the ids they cite, and the labels are reported beside the silent unsupported count. Default: query.grounded_answers.
+* `--calibrate-from <file>`: A saved leakage JSON report whose judged answers set the projection's sentences per answer, and so its judge calls (default: benchmark_leakage.estimate_sentences_per_answer, stated as assumed).
 * `--help`: Show this message and exit.
 
 ### `particles benchmark memory`
@@ -798,6 +856,7 @@ $ particles benchmark rot [OPTIONS] COMMAND [ARGS]...
 * `--arm <oracle|probe|live>`: Perception arm: oracle (scripted extraction + scripted §6.6 probe; zero LLM calls, deterministic), probe (scripted extraction, live contradiction probe), or live (the general extractor, i.e. the product).  [default: oracle]
 * `--seed <int>`: World seed; repeat for several worlds (default: benchmark_rot.seeds).
 * `--days <int range>`: Simulated world length (default: benchmark_rot.days).  [x>=30]
+* `--profile <full|quick>`: World size: full (twelve attributes, six checkpoints) or quick (six attributes, three checkpoints, sparse filler; about a quarter of the sessions).  [default: full]
 * `--top-k <int range>`: Probe top-k (default: benchmark_rot.top_k).  [x>=1]
 * `--trust-policy / --no-trust-policy`: Write the domain rule demoting the untrusted source channel (the operator's policy). --no-trust-policy measures the neutral-when-silent default instead.  [default: trust-policy]
 * `--estimate`: Print the projected LLM calls and cost, then exit.
@@ -814,6 +873,7 @@ $ particles benchmark rot [OPTIONS] COMMAND [ARGS]...
 **Commands**:
 
 * `rescore`: Re-classify a saved rot report under the...
+* `door`: The door arm: other memories...
 
 #### `particles benchmark rot rescore`
 
@@ -839,6 +899,270 @@ $ particles benchmark rot rescore [OPTIONS] {report}
 * `--format <table|json>`: What to print: table (default) or json.  [default: table]
 * `--help`: Show this message and exit.
 
+#### `particles benchmark rot door`
+
+The door arm: other memories through the rot world, scored on the text each memory's door hands the model.
+
+**Usage**:
+
+```console
+$ particles benchmark rot door [OPTIONS] COMMAND [ARGS]...
+```
+
+**Options**:
+
+* `--help`: Show this message and exit.
+
+**Commands**:
+
+* `run`: Build each memory on the rot world and...
+* `rescore`: Re-cut and re-classify a saved door report...
+* `read`: Have the pinned reader answer from every...
+* `reader-floor`: Count the reader's verdict flips between...
+* `seeds`: Generate a held-out seed set and print its...
+* `freeze`: Write the freeze record a milestone run is...
+* `label-sample`: Draw the blind, stratified segment sample...
+* `label-score`: Score the labels against the scorer: 95 %...
+* `label-replies`: Draw the blind, stratified reply sample...
+* `label-replies-score`: Score reply labels: 95 % agreement, 90 %...
+
+##### `particles benchmark rot door run`
+
+Build each memory on the rot world and score the text its door returns.
+
+When the manifest names a reader, the reader then answers from every door
+and the reply is scored. Prints the estimate first; a build or
+read that calls a model asks before it runs unless --yes. The Markdown
+table goes to stdout and the report of record to a JSON file outside any
+repository.
+
+**Usage**:
+
+```console
+$ particles benchmark rot door run [OPTIONS]
+```
+
+**Options**:
+
+* `--tier <quick|standard|milestone>`: quick (six-attribute world, one development seed, competitors cached), standard (full world, three development seeds) or milestone (held-out seeds, three builds per model-backed memory; needs --held-out and --freeze).  [default: quick]
+* `--seed <int>`: Development seed; repeat for several (quick: 42; standard: 42 43 44).
+* `--manifest <file>`: The arms manifest (default: benchmark_rot.door_manifest when it exists). Without one, Particles and the two baselines run alone.
+* `--memory <str>`: Run only these competitor memories from the manifest.
+* `--baselines / --no-baselines`: Include the two zero-cost baselines.  [default: baselines]
+* `--trust-row / --no-trust-row`: Add a labelled Particles row with the trust rule on the untrusted domain (default: on at milestone).
+* `--parity / --no-parity`: Add a labelled Particles row with every purpose on the manifest's parity model (default: on at milestone).
+* `--particles-scripted`: Run Particles with scripted perception instead of the product: a $0 plumbing check, labelled as not the product.
+* `--replay-extraction <directory>`: Replay Particles' extraction from this candidate cache (a read-side change only: ranking, the door's shape, the floor). The report says so.
+* `--cache / --no-cache`: Reuse cached competitor builds (keyed on pin and world).  [default: cache]
+* `--held-out <file>`: The private held-out seed file (milestone).
+* `--freeze <file>`: The committed freeze record (milestone).
+* `--predictions <file>`: A JSON file of metric → beat/trail/tie to print beside the results (milestone takes them from the freeze record).
+* `--read / --no-read`: Have the manifest's [reader] answer from every door after the builds (default: on when the manifest names a reader).
+* `--sensitivity / --no-sensitivity`: Read a second time with the free local [reader.sensitivity] model, under the benchmark host's run lock (default: on at the quick tier when the manifest names one).
+* `--estimate`: Print the estimate, then exit.
+* `-y, --yes`: Skip the confirmation before paid builds and reads.
+* `--store-dir <directory>`: Keep each build's store here for inspection.
+* `-o, --output <path>`: The JSON report of record (default: under door_runs_dir).
+* `--allow-in-repo`: Permit --output inside a git work tree.
+* `--help`: Show this message and exit.
+
+##### `particles benchmark rot door rescore`
+
+Re-cut and re-classify a saved door report and its replies under the current versions; free.
+
+The headline figures under the versions it was scored with are kept and
+printed beside the new ones.
+
+**Usage**:
+
+```console
+$ particles benchmark rot door rescore [OPTIONS] {report}
+```
+
+**Arguments**:
+
+* `report`: A saved door report.  [required]
+
+**Options**:
+
+* `-o, --output <path>`: Where to write the re-scored report.  [required]
+* `--allow-in-repo`: Permit --output inside a git work tree.
+* `--help`: Show this message and exit.
+
+##### `particles benchmark rot door read`
+
+Have the pinned reader answer from every door of a saved report.
+
+No memory runs: the reader is handed each probe's question, the
+checkpoint's date and the recorded door text, and its reply is scored.
+Particles' headline row is also read without its composed answer and as
+the answer alone. Prints the estimate first and asks before paid calls.
+
+**Usage**:
+
+```console
+$ particles benchmark rot door read [OPTIONS] {report}
+```
+
+**Arguments**:
+
+* `report`: A saved door report.  [required]
+
+**Options**:
+
+* `-o, --output <path>`: Where to write the read report.  [required]
+* `--manifest <file>`: The arms manifest naming the [reader] (default: benchmark_rot.door_manifest).
+* `--sensitivity / --no-sensitivity`: Read a second time with the free local [reader.sensitivity] model, under the run lock (default: on for a quick-tier report when the manifest names one).
+* `--cache / --no-cache`: Serve and keep replies in the reader cache. --no-cache bypasses it entirely: the second read of the reader's noise floor.  [default: cache]
+* `--estimate`: Print the estimate, then exit.
+* `-y, --yes`: Skip the confirmation before paid reads.
+* `--allow-in-repo`: Permit --output inside a git work tree.
+* `--help`: Show this message and exit.
+
+##### `particles benchmark rot door reader-floor`
+
+Count the reader's verdict flips between two reads of one report.
+
+Run once per reader pin: the flips are the reader's floor, added to the
+door floor before a quick answer result reads as outside the noise.
+
+**Usage**:
+
+```console
+$ particles benchmark rot door reader-floor [OPTIONS] {first} {second}
+```
+
+**Arguments**:
+
+* `first`: A read report.  [required]
+* `second`: The same report read again with --no-cache.  [required]
+
+**Options**:
+
+* `--help`: Show this message and exit.
+
+##### `particles benchmark rot door seeds`
+
+Generate a held-out seed set and print its commitment.
+
+The file stays private until the results are published; only the
+commitment goes into the freeze record.
+
+**Usage**:
+
+```console
+$ particles benchmark rot door seeds [OPTIONS]
+```
+
+**Options**:
+
+* `-o, --output <path>`: The private held-out file (never in a repository).  [required]
+* `--count <int range>`: How many held-out seeds.  [default: 3; x>=1]
+* `--help`: Show this message and exit.
+
+##### `particles benchmark rot door freeze`
+
+Write the freeze record a milestone run is pinned to.
+
+It carries the seed commitment, every version the run depends on and the
+pre-registered predictions; with a [reader] in the manifest, also the
+answer stage's versions and a prediction for every answer metric.
+Refuses when a validation did not pass.
+
+**Usage**:
+
+```console
+$ particles benchmark rot door freeze [OPTIONS]
+```
+
+**Options**:
+
+* `--held-out <file>`: [required]
+* `--predictions <file>`: metric → beat/trail/tie (JSON).  [required]
+* `--validation <file>`: The label-score result the freeze rests on (JSON).
+* `--reply-validation <file>`: The label-replies-score result the answer metrics rest on (JSON).
+* `--manifest <file>`
+* `-o, --output <path>`: The freeze record to commit.  [required]
+* `--help`: Show this message and exit.
+
+##### `particles benchmark rot door label-sample`
+
+Draw the blind, stratified segment sample for the segmenter validation.
+
+**Usage**:
+
+```console
+$ particles benchmark rot door label-sample [OPTIONS] {report}
+```
+
+**Arguments**:
+
+* `report`: A door report.  [required]
+
+**Options**:
+
+* `--items <path>`: The labeller's JSONL (no memory names).  [required]
+* `--key <path>`: The key the labeller must not see (JSON).  [required]
+* `--per-memory <int range>`: [default: 150; x>=1]
+* `--seed <int>`: [default: 0]
+* `--help`: Show this message and exit.
+
+##### `particles benchmark rot door label-score`
+
+Score the labels against the scorer: 95 % agreement, 90 % STALE / HISTORY recall.
+
+**Usage**:
+
+```console
+$ particles benchmark rot door label-score [OPTIONS]
+```
+
+**Options**:
+
+* `--items <path>`: The labelled JSONL.  [required]
+* `--key <path>`: The sample's key.  [required]
+* `-o, --output <path>`: Write the result (JSON).
+* `--help`: Show this message and exit.
+
+##### `particles benchmark rot door label-replies`
+
+Draw the blind, stratified reply sample for the reply scorer's validation.
+
+**Usage**:
+
+```console
+$ particles benchmark rot door label-replies [OPTIONS] {report}
+```
+
+**Arguments**:
+
+* `report`: A read door report.  [required]
+
+**Options**:
+
+* `--items <path>`: The labeller's JSONL (no memory names).  [required]
+* `--key <path>`: The key the labeller must not see (JSON).  [required]
+* `--per-reader <int range>`: [default: 100; x>=1]
+* `--seed <int>`: [default: 0]
+* `--help`: Show this message and exit.
+
+##### `particles benchmark rot door label-replies-score`
+
+Score reply labels: 95 % agreement, 90 % stale / hedged / poison recall, per reader.
+
+**Usage**:
+
+```console
+$ particles benchmark rot door label-replies-score [OPTIONS]
+```
+
+**Options**:
+
+* `--items <path>`: The labelled JSONL.  [required]
+* `--key <path>`: The sample's key.  [required]
+* `-o, --output <path>`: Write the result (JSON).
+* `--help`: Show this message and exit.
+
 ### `particles benchmark relevance-floor`
 
 The relevance-floor benchmark: how often the query gate refuses an answerable question, on real questions. `harvest` builds the private held-out set; the bare verb replays it (free) and, with --judge, scores it; `resweep` re-renders a saved report over any floor list.
@@ -858,6 +1182,9 @@ $ particles benchmark relevance-floor [OPTIONS] COMMAND [ARGS]...
 * `--judge`: Run the LLM-priced stage too: answer every question with the gate disabled, then judge the answer grounded-and-useful. Estimate-gated.
 * `--estimate`: With --judge: run the free replay, print the projection, and exit before any LLM call.
 * `-y, --yes`: Skip the confirmation above the call threshold.
+* `--max-usd <float>`: Stop the run once its priced roles have spent this many US$ at list price (llm.price_per_mtok, not your account balance). Calls in flight finish, and a re-run with a higher ceiling resumes. Required when a role is priced; there is no default.
+* `--max-calls <int range>`: Stop the run once its unpriced roles have made this many billed calls. Required when a role has no llm.price_per_mtok entry, unless --no-ceiling.  [x>=1]
+* `--no-ceiling`: Run an unpriced role (a local model that costs nothing to call) with no call count. Never lifts the --max-usd a priced role needs.
 * `-o, --output <path>`: Write the rendered report to this path as well.
 * `--format <table|json>`: table (default; aggregate-only, no question text) or json (the report of record; carries question and answer text).  [default: table]
 * `--replay-from <file>`: Reuse the free replay recorded in a saved JSON report instead of re-running it (the replay is free but slow on a large store). Refused unless top_k and the encoder match and it covers every question asked for.
@@ -1195,6 +1522,7 @@ $ particles corpus [OPTIONS] COMMAND [ARGS]...
 * `retract`: Retract every live particle from a source,...
 * `prune-orphans`: Sweep dangling rows left by older deletes...
 * `refresh`: Re-check deposited local sources against...
+* `reorigin`: Move file:// entries from one host id to...
 * `fsck`: Audit every blob the store references;...
 * `links`: Inspect cross-entry follow edges.
 
@@ -1374,6 +1702,31 @@ $ particles corpus refresh [OPTIONS] [entry_id]
 * `-v, --verbose`: Verbose logging
 * `--help`: Show this message and exit.
 
+### `particles corpus reorigin`
+
+Move file:// entries from one host id to another, for a store stamped on the wrong host.
+
+Each file:// entry records the host whose filesystem its path names, and
+the local refresh reads only its own host's entries. A store migrated with
+``particles db init`` on a machine other than the one whose files it tracks
+carries the wrong host; this rewrites it. Runs on the engine's host, against
+its local store, and records one event.
+
+**Usage**:
+
+```console
+$ particles corpus reorigin [OPTIONS]
+```
+
+**Options**:
+
+* `--from <str>`: The host id the file:// entries record now (wrongly).  [required]
+* `--to <str>`: The host id of the machine whose files they are, as `particles hook doctor` prints it there.  [required]
+* `--uri-prefix <path>`: Only entries whose path lies under this absolute directory.
+* `--dry-run`: Print how many entries would move and change nothing.
+* `--yes`: Move them without asking.
+* `--help`: Show this message and exit.
+
 ### `particles corpus fsck`
 
 Audit every blob the store references; optionally re-home the strays.
@@ -1530,7 +1883,7 @@ $ particles curate [OPTIONS] COMMAND [ARGS]...
 **Options**:
 
 * `-n, --limit <int>`: Cap the cards shown (default: curation.session_size).
-* `-k, --kind <str>`: Restrict to one card kind: stale, retraction_cascade, broken_provenance, confidence_decay, recency_decay, contradiction, contested, no_subject, gated_subjects, subjectless_source, duplicate_pair, uncited_url, failed_snapshots, refused_snapshots, proposed_abstraction, stale_basis, inconsistency, demotion, rank_lift.
+* `-k, --kind <str>`: Restrict to one card kind: stale, retraction_cascade, broken_provenance, confidence_decay, recency_decay, contradiction, contested, no_subject, gated_subjects, subjectless_source, duplicate_pair, duplicate_group, uncited_url, failed_snapshots, refused_snapshots, proposed_abstraction, stale_basis, inconsistency, demotion, rank_lift.
 * `--semantic`: Run the LLM-assisted finders (semantic contradiction).
 * `--refresh`: Rebuild the card collection before showing it. Slow: the structural finders re-run store-wide. Contradiction cards carry forward from the last census unless --semantic re-probes them. Run this once on a store with no collection yet; the nightly `memory consolidate` does it for you after that.
 * `--no-snapshot`: Bypass the persisted collection entirely and run the finders for this invocation without caching the result.
@@ -1560,6 +1913,8 @@ Examples:
   particles curate apply supersede KEY --content "The window is 30 days."
       --reason "Changed in 1.140" --confidence 0.85
   particles curate apply resolve KEY --action BOTH_VALID --note "Different runs"
+  particles curate apply merge KEY --members all
+  particles curate apply split KEY --members 1a2b3c4d,5e6f7a8b
 
 **Usage**:
 
@@ -1569,7 +1924,7 @@ $ particles curate apply [OPTIONS] {gesture} {card_key}
 
 **Arguments**:
 
-* `gesture`: affirm | snooze | dismiss | retract | merge | deposit | assign-subject | supersede | accept | reject | resolve. The queue listing says what each one does to that card.  [required]
+* `gesture`: affirm | snooze | dismiss | retract | merge | split | deposit | assign-subject | supersede | accept | reject | resolve. The queue listing says what each one does to that card.  [required]
 * `card_key`: The card key shown in the queue listing.  [required]
 
 **Options**:
@@ -1583,6 +1938,8 @@ $ particles curate apply [OPTIONS] {gesture} {card_key}
 * `--corpus-entry <str>`: supersede: cite an existing corpus entry as the source instead.
 * `--action <str>`: resolve: PREFER_A, PREFER_B, BOTH_VALID, DISCARD, or DEFER. The listing names the actions this conflict offers; DEFER records a note and leaves it open.
 * `--note <str>`: resolve: a note recorded on the review.
+* `--members <str>`: merge / split on a duplicate group: the members to rule on, as ids or id prefixes from the listing, comma-separated or repeated. `all` names every member of a group of ten or fewer.
+* `--keep <str>`: merge on a duplicate group: the member the others are linked to. Defaults to the elected survivor among those named.
 * `--help`: Show this message and exit.
 
 ## `particles engine`
@@ -1634,7 +1991,7 @@ $ particles engine serve [OPTIONS] {HOST:PORT}
 
 ### `particles engine keys`
 
-Per-client engine keys: each names a principal and a role (reader, agent or operator). Run on the engine's host; no HTTP route manages keys.
+Per-client engine keys: each names a principal and a role (reader, agent, operator or codex-capture). Run on the engine's host; no HTTP route manages keys.
 
 **Usage**:
 
@@ -1668,13 +2025,16 @@ $ particles engine keys create [OPTIONS]
 
 **Options**:
 
-* `--role <str>`: reader (reads only), agent (writes as itself) or operator  [required]
+* `--role <str>`: reader (reads only), agent (writes as itself), operator or codex-capture  [required]
 * `--principal <str>`: Who the key's requests are recorded as, e.g. mcp:claude-code. An operator key's principal is always curation.operator_identity.  [required]
-* `--project <str>`: Bind an agent key's writes to one project key. Reads are not confined: every key reads every project.
+* `--project <str>`: Bind an agent or Codex capture key to one project key. Agent reads are not confined: every key reads every project.
 * `--label <str>`: A note for `keys list`
 * `--reserved-principal`: Mint a principal some reader trusts by name (claude-code-hook, audit, rule-sync, init, mcp:memory-compat, web-clipper), or one the store's own writers stamp (an extractor id such as general-extractor, interchange-import, memory-consolidate). An agent key under a writer's label changes no belief that writer, or any other, asserted under that label. A harvester principal's key may write the memory-harvest tags and name session transcripts and memory files by URI, which places them in the harvest's document collections and update lineage.
 * `--memory-root <str>`: For a harvester key (claude-code-hook, audit): a client's Claude Code projects directory, resolved, under which its memory files lie. Repeat for each. With neither this nor --archive-root, the key records this host's own directories. On a remote client with engine.base_url set, `particles init claude-code` prints them.
 * `--archive-root <str>`: For a harvester key: a client's <claude_code.state_dir>/projects directory, resolved, under which its MEMORY.archive.md files lie. Repeat for each.
+* `--host-id <str>`: For a harvester key: the client's host id, which every file:// entry the key deposits records as the host its path names. Without it the key names no memory or archive file. On the client, `particles init claude-code` or `hook doctor` prints it; this engine host's own id is refused.
+* `--rule-root <str>`: For a harvester key: one project's root on the client, under which the hooks may push that project's AGENTS.md and CLAUDE.md files. Repeat for each project; a directory holding several projects is refused.
+* `--global-rule-root <str>`: For a harvester key: the client's ~/.claude, whose AGENTS.md and CLAUDE.md directly in it the hooks may push as global rules.
 * `--output <path>`: Write the key to this new file, created with mode 0600 and never over an existing one. The default is <key id>.key beside api.keys_file.
 * `--print-token`: Print the key to standard output instead of writing a file. Whatever shows or keeps that output (a terminal's scrollback, a pipe, a CI log, an agent harness's transcript) then holds the key.
 * `--help`: Show this message and exit.
@@ -2203,9 +2563,13 @@ $ particles hook [OPTIONS] COMMAND [ARGS]...
 
 * `session-start`: SessionStart hook: push the memory digest...
 * `session-end`: SessionEnd hook: harvest the session...
+* `session-end-worker`: Harvest every session the SessionEnd...
 * `stop`: Retired Stop hook: exits 0 and does nothing.
 * `log`: Print recent hook-log entries (one JSONL...
 * `doctor`: Diagnose whether ``particles hook``...
+* `codex-worker`: Run bounded, detached capture without...
+* `codex-recall`: Bounded recall child; no exposure or...
+* `codex-dismiss`: Acknowledge an unresolved capture hint;...
 
 ### `particles hook session-start`
 
@@ -2230,6 +2594,24 @@ SessionEnd hook: harvest the session transcript + memory files.
 
 ```console
 $ particles hook session-end [OPTIONS]
+```
+
+**Options**:
+
+* `--store <str>`: Memory store the harvest deposits into.  [required]
+* `--help`: Show this message and exit.
+
+### `particles hook session-end-worker`
+
+Harvest every session the SessionEnd hand-off queued, then re-render MEMORY.md.
+
+The installed SessionEnd command starts this worker detached;
+it is safe to run by hand, and exits at once when another worker runs.
+
+**Usage**:
+
+```console
+$ particles hook session-end-worker [OPTIONS]
 ```
 
 **Options**:
@@ -2270,6 +2652,8 @@ $ particles hook log [OPTIONS]
 **Options**:
 
 * `-n, --tail <int>`: How many recent entries to print.  [default: 20]
+* `--harness <str>`: claude-code or codex.  [default: claude-code]
+* `--store <str>`: Store handle for Codex diagnostics.  [default: default]
 * `--help`: Show this message and exit.
 
 ### `particles hook doctor`
@@ -2291,6 +2675,62 @@ $ particles hook doctor [OPTIONS]
 **Options**:
 
 * `--store <str>`: Store handle to check.  [default: default]
+* `--harness <str>`: claude-code or codex.  [default: claude-code]
+* `--help`: Show this message and exit.
+
+### `particles hook codex-worker`
+
+Run bounded, detached capture without calling a model.
+
+**Usage**:
+
+```console
+$ particles hook codex-worker [OPTIONS]
+```
+
+**Options**:
+
+* `--store <str>`: [default: default]
+* `--session <str>`: [required]
+* `--cwd <str>`: [required]
+* `--catch-up`
+* `--destination <str>`
+* `--help`: Show this message and exit.
+
+### `particles hook codex-recall`
+
+Bounded recall child; no exposure or use-feedback accounting.
+
+**Usage**:
+
+```console
+$ particles hook codex-recall [OPTIONS]
+```
+
+**Options**:
+
+* `--store <str>`: [default: default]
+* `--session <str>`: [required]
+* `--cwd <str>`: [required]
+* `--reason <str>`: [default: startup]
+* `--destination <str>`
+* `--help`: Show this message and exit.
+
+### `particles hook codex-dismiss`
+
+Acknowledge an unresolved capture hint; this cannot recover lost testimony.
+
+**Usage**:
+
+```console
+$ particles hook codex-dismiss [OPTIONS]
+```
+
+**Options**:
+
+* `--session <str>`: Canonical session UUID to dismiss.
+* `--acknowledge`: Acknowledge the current UI failure signature; retain hints.
+* `--store <str>`: Local store handle.  [default: default]
 * `--help`: Show this message and exit.
 
 ## `particles import`
@@ -2594,6 +3034,7 @@ $ particles init [OPTIONS] COMMAND [ARGS]...
 **Commands**:
 
 * `claude-code`: Install the Claude Code hook integration...
+* `codex`: Install Codex for a local store or the...
 
 ### `particles init claude-code`
 
@@ -2615,7 +3056,33 @@ $ particles init claude-code [OPTIONS]
 * `--command <str>`: Override the hook command base (default: the absolute path of the running `particles` console script).
 * `--no-audit`: Skip the first-run memory-audit hand-off.
 * `--skills / --no-skills`: Install the shipped agent-onboarding skill files too, into the harness's skills directory (a Particles-owned subdirectory; --remove deletes exactly that). Default on: an agent that has the tools but not the guidance is the gap these close.  [default: skills]
+* `--engine <str>`: Install a thin client of the engine at this URL: write engine.base_url into the pinned config, provision no local store, and give the hooks and the MCP server their keys through token files. A config that already names engine.base_url installs a thin client without this flag.
+* `--hooks-token-file <path>`: Thin client: pin this existing file (absolute, mode 0600, one line) as the hooks' engine key instead of asking for the key.
+* `--mcp-token-file <path>`: Thin client: pin this existing file (absolute, mode 0600, one line) as the MCP server's engine key instead of asking for the key.
 * `--json`: Emit a machine-readable result on stdout (what was created, what was merged, and what is left for the human) so an agent can run the installer and report the outcome instead of scraping human-formatted output. Implies --no-audit: the audit hand-off is interactive, and the result names it under next_steps.
+* `--help`: Show this message and exit.
+
+### `particles init codex`
+
+Install Codex for a local store or the engine named by its pinned config.
+
+**Usage**:
+
+```console
+$ particles init codex [OPTIONS]
+```
+
+**Options**:
+
+* `--store <str>`: Memory store handle.
+* `--config <path>`: Absolute Particles config to pin.
+* `--command <str>`: Absolute particles executable.
+* `--dry-run`: Inspect and validate without writes or prompts.
+* `--remove`: Remove only unchanged installer-owned resources.
+* `--json`: Machine-readable plan; never prompts.
+* `--recall-token-file <path>`: Absolute checked reader key file for an engine install.
+* `--capture-token-file <path>`: Absolute checked Codex capture key file.
+* `--mcp-token-file <path>`: Absolute checked MCP agent key file.
 * `--help`: Show this message and exit.
 
 ## `particles interchange`
@@ -2976,7 +3443,7 @@ $ particles memory [OPTIONS] COMMAND [ARGS]...
 * `useful`: Mark a belief useful: the explicit utility...
 * `rescope`: Bring a store's project keys up to date,...
 * `widen`: Put a belief in view for every project...
-* `redate`: Give each harvested session its own start...
+* `redate`: Give each harvested session its own dates.
 * `absences`: Report the memory files that no longer...
 * `sweep-rank-lift`: Sweep the usefulness rank-lift and report...
 * `consolidate`: Run the scheduled consolidation cycle (ADR...
@@ -3078,6 +3545,14 @@ own event. It never removes an entry's last key unless you also pass
 project rather than made global. Putting a belief in view everywhere is
 `particles memory widen`.
 
+Documents you deposited with no project (web pages, articles, files) are
+reference material: they answer questions from every project, and the
+session-start digest and the agent-memory region leave them out and say
+how many. New deposits are marked as they arrive; older ones
+change only when you run `--mark-reference --apply`, after previewing the
+list without `--apply`. `--except ENTRY_ID` keeps one global, and
+`--unmark-reference ENTRY_ID` reverses a mark.
+
 **Usage**:
 
 ```console
@@ -3093,6 +3568,10 @@ $ particles memory rescope [OPTIONS]
 * `--unmark ENTRY_ID`: Reverse one recorded --mark-agent-writes mark, then stop.
 * `--withdraw ENTRY_ID KEY`: Remove one wrong project key from one entry, then stop. Refuses the entry's last key unless --leave-unattributed.
 * `--leave-unattributed`: With --withdraw, allow the last key to go: the entry is left in view for no project, never global.
+* `--mark-reference`: List every global document entry (keyless, not harvested, not a rule file or vocabulary document) that `scope:reference` would mark, then stop. With --apply, mark them: each still answers questions from every project, and the session-start digest and the agent-memory region leave it out. Each mark is recorded. Run --apply only from a runtime that ships this flag.
+* `--except ENTRY_ID`: With --mark-reference, keep this listed entry global (repeatable).
+* `--apply`: With --mark-reference, write the marks the preview lists.
+* `--unmark-reference ENTRY_ID`: Remove one entry's `scope:reference` mark, so it is global again, then stop.
 * `--dry-run`: Report what would change; write nothing.
 * `--store <str>`: Store handle.  [default: default]
 * `-v, --verbose`: Raise diagnostics to INFO and un-aggregate per-item detail.
@@ -3135,17 +3614,26 @@ $ particles memory widen [OPTIONS] {ID}
 
 ### `particles memory redate`
 
-Give each harvested session its own start as the reference date.
+Give each harvested session its own dates.
 
-A claim about an act a session performed is dated to the session's day
-(the `session` basis of `valid_from`). Sessions harvested before 1.190.1
-carried no date of their own, so their claims were anchored at the day
-they were extracted instead. This verb reads each session's start from
-its transcript, records it on the session's snapshots, and moves every
-`session`-dated claim of that session to that day. It makes no model
-call, never touches a claim dated any other way, and lists the sessions
-whose transcript is gone rather than guessing. Running it twice changes
-nothing. Local store only.
+A claim about an act a session performed is dated to the day of the turn
+that reports it (the `session` basis of `valid_from`). Sessions harvested
+before 1.190.1 carried no date of their own, so their claims were anchored
+at the day they were extracted instead. This verb reads each session's
+days from its transcript, records its start on the session's snapshots,
+and moves every `session`-dated claim on a day the session never saw to
+its start. That part makes no model call, never touches a claim dated any
+other way, and lists the sessions whose transcript is gone rather than
+guessing. Running it twice changes nothing.
+
+It also lists the sessions that span more than one day. Their claims were
+extracted before transcripts carried their days, so every act is dated to
+the first day, in the claim's date and in its text. `--reread` re-reads
+them from their first day change: it retires the claims read from that
+point on and reads the text again, so the tags, links and use history on
+a retired claim do not carry over. It prints what it would retire and
+spend, and asks first. Exit codes: 0 done, 1 a session's re-read failed,
+2 not started. Local store only.
 
 **Usage**:
 
@@ -3157,6 +3645,9 @@ $ particles memory redate [OPTIONS]
 
 * `--dry-run`: Report what would change; write nothing.
 * `--transcripts DIR`: Read the transcripts from DIR instead of Claude Code's projects folder: the folder given to `audit --transcripts`, or a copy of the projects folder.
+* `--reread`: Re-read each session that spans more than one day, from its first day change, so its acts are dated by their own day. Calls the extraction model: prints the estimate and asks first (with --dry-run, stops after the estimate).
+* `--yes`: With --reread: spend without asking (a non-interactive run).
+* `--skip ENTRY_ID`: With --reread: leave this session's entry as it is. Repeatable.
 * `--store <str>`: Store handle.  [default: default]
 * `-v, --verbose`: Raise diagnostics to INFO and un-aggregate per-item detail.
 * `--debug`: Full DEBUG diagnostics and tracebacks (implies --verbose).
@@ -3299,9 +3790,13 @@ The drop-in swap for ``@modelcontextprotocol/server-memory``: same nine
 tools, same schemas, same responses, backed by a Particles store. In your
 MCP client config, replace the reference server's command with::
 
-    "memory": {"command": "uv",
-               "args": ["run", "--project", "/path/to/particles",
+    "memory": {"command": "uvx",
+               "args": ["--from", "linkedparticles",
                         "particles", "memory", "serve"]}
+
+Run ``particles db init`` against the store first: the server never
+creates or migrates the store it opens, and refuses to start (exit 2) on
+one without this install's schema, printing the command that fixes it.
 
 Args:
     store: Store handle to bind. Defaults to the default store. Writes
@@ -3402,6 +3897,7 @@ $ particles particle [OPTIONS] COMMAND [ARGS]...
 * `tag`: Add taxonomy tags to a particle.
 * `untag`: Remove taxonomy tags from a particle (ADR...
 * `retract`: Retract one belief under operator...
+* `restore`: Return a claim an automatic rung retired...
 * `reclassify`: Set one claim's adjudicability default by...
 * `date`: Set one claim's world-time start by...
 * `search`: List particles sharing a context...
@@ -3544,6 +4040,39 @@ $ particles particle retract [OPTIONS] {particle_id}
 **Options**:
 
 * `--reason <str>`: Why this belief is being retired; recorded in the event log  [required]
+* `--dry-run`: Show the plan without writing
+* `-y, --yes`: Skip the confirmation prompt
+* `--help`: Show this message and exit.
+
+### `particles particle restore`
+
+Return a claim an automatic rung retired as replaced.
+
+Covers the retirements that name a replacing claim: an update, a document
+supersession, a re-anchor restatement. The retired row is never revived. A
+successor is minted with the claim's content, confidence, provenance,
+subjects and embedding, and a RETIREMENT_RESTORED event records the
+ruling. With ``--replacement wrong`` the replacing claim is retracted under
+operator authority, so a re-extraction of it is held for review. With
+``--replacement holds`` both claims stay ACTIVE, and the restored claim is
+never again retired by a replacement: a later conflicting claim is held for
+review. The session-start digest prints this command for each source that
+retired claims since your last session.
+
+**Usage**:
+
+```console
+$ particles particle restore [OPTIONS] [particle_id]
+```
+
+**Arguments**:
+
+* `particle_id`: The retired claim's ID (prefix OK); omit it with --from-entry
+
+**Options**:
+
+* `--replacement <str>`: What the replacing claim was: 'wrong' retracts it, 'holds' keeps both claims current. Required: the two fail in opposite directions  [required]
+* `--from-entry <str>`: Restore every claim whose replacement came from this corpus entry (prefix OK) within mcp.recall.digest_retirement_window_days
 * `--dry-run`: Show the plan without writing
 * `-y, --yes`: Skip the confirmation prompt
 * `--help`: Show this message and exit.

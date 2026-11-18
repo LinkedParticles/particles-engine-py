@@ -226,6 +226,27 @@ class TestEffectiveModality:
     def test_an_invalid_regex_matches_nothing(self) -> None:
         assert effective_modality(_FACTS, [_rule("a", "url_pattern", "(", EV)]).basis == "stored"
 
+    def test_within_one_lens_abstention_breaks_a_tie_at_one_scope(self) -> None:
+        # Two rules of one lens at one scope: withholding wins, then enum order,
+        # in whichever order the lens lists them.
+        for rules in (
+            [_rule("a", "subject", "s1", F), _rule("a", "subject", "s1", EV)],
+            [_rule("a", "subject", "s1", EV), _rule("a", "subject", "s1", F)],
+        ):
+            assert effective_modality(_FACTS, rules) == ModalityReading(EV, "lens:a")
+        for rules in (
+            [_rule("a", "subject", "s1", EX), _rule("a", "subject", "s1", EV)],
+            [_rule("a", "subject", "s1", EV), _rule("a", "subject", "s1", EX)],
+        ):
+            assert effective_modality(_FACTS, rules) == ModalityReading(EV, "lens:a")
+
+    def test_two_lenses_that_both_grant_name_the_first_by_name(self) -> None:
+        stored_evaluative = ModalityFacts(
+            particle_id="p1", stored=EV, subject_ids=frozenset({"s1"})
+        )
+        rules = [_rule("b", "subject", "s1", F), _rule("a", "subject", "s1", F)]
+        assert effective_modality(stored_evaluative, rules) == ModalityReading(F, "lens:a")
+
     def test_pair_adjudicable(self) -> None:
         assert pair_adjudicable(ModalityReading(F), ModalityReading(F))
         assert not pair_adjudicable(ModalityReading(F), ModalityReading(EV))

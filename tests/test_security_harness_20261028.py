@@ -557,9 +557,12 @@ def test_the_doctor_reports_a_reader_key_the_installed_hooks_pin(
     monkeypatch.setenv("PARTICLES_CONFIG", str(config))
     monkeypatch.setenv("PARTICLES_ENGINE_TOKEN", _engine_key("agent"))
     reset_config()
-    line = hook_mod._engine_line()
-    assert "reader key" in line
-    assert "installed hooks pin" in line
+    # The hooks' own key is judged on its engine token: line.
+    assert "the engine token: lines judge" in hook_mod._engine_line()
+    _, lines = hook_mod._engine_token_lines("https://engine.invalid")
+    hooks = [line for line in lines if line.startswith("engine token:   hooks:")]
+    assert len(hooks) == 1
+    assert "⚠" in hooks[0] and "reader key" in hooks[0]
 
 
 # ---------------------------------------------------------------------------
@@ -788,4 +791,4 @@ def test_the_installer_runs_no_claude_found_through_an_empty_path_entry(
     monkeypatch.chdir(project)
     original(["mcp", "list"])
     assert not marker.exists()
-    assert init_mod._trusted_which("particles") is None
+    assert init_mod.trusted_which("particles") is None

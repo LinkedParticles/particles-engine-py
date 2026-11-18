@@ -140,6 +140,51 @@ class TestReconcileSupersessionSweep:
         assert winner.status is Status.ACTIVE  # the current claim stays ACTIVE
 
     @pytest.mark.asyncio
+    async def test_a_claim_restored_to_hold_is_never_retired_by_a_document(
+        self, db_session: AsyncSession
+    ) -> None:
+        """a ``holds`` restore exempts the claim from rung 1.5 too.
+
+        Security review of PR 1222: a document's frontmatter ``supersedes`` is
+        a replacement route, and a source author controls it.
+        """
+        from particles.ingest.pipeline import _gather_rung_inputs
+        from particles.store.event_store import EventRefKind, OperatorEventType, record_event
+
+        superseded_id, superseding_id = await _setup_flagship(
+            db_session, superseded_modality=AssertionModality.FALSIFIABLE
+        )
+        await record_event(
+            db_session,
+            actor="test",
+            event_type=OperatorEventType.RETIREMENT_RESTORED,
+            refs=[(EventRefKind.PARTICLE, superseded_id)],
+            payload={"successor_id": superseded_id, "ruling": "holds"},
+        )
+        await db_session.commit()
+
+        with patch("particles.operations.reconcile._has_contradiction_signal", _probe(True)):
+            summary = await reconcile_supersession(db_session)
+        assert summary["demoted"] == 0 and summary["restored_held"] == 1
+        held = await get_particle(db_session, superseded_id)
+        assert held is not None and held.status is Status.ACTIVE
+
+        # The write path's rung 1.5 input is withheld for the same pair.
+        winner = await get_particle(db_session, superseding_id)
+        assert winner is not None and held is not None
+        ref = winner.provenance[0]
+        inputs, _ = await _gather_rung_inputs(
+            db_session,
+            winner,
+            held,
+            ref.corpus_entry_id,
+            ref.snapshot_id or "",
+            order_source=None,
+            effective_single=True,
+        )
+        assert inputs.new_supersedes_existing is False
+
+    @pytest.mark.asyncio
     async def test_a_sweep_demotion_is_recorded_in_the_event_log(
         self, db_session: AsyncSession
     ) -> None:

@@ -231,6 +231,13 @@ class TestPromptComponent:
     def test_every_other_prompt_is_unchanged(self) -> None:
         prompt = general._build_extract_prompt(scope_enabled=True, modality_enabled=True)
         assert "SESSION ARTIFACTS" not in prompt
+        assert "SESSION DAYS" not in prompt
+
+    def test_the_day_rule_rides_a_session_source_before_the_rules_that_use_it(self) -> None:
+        on = [c.name for c in general._configured_prompt_components(session_source=True)]
+        off = {c.name for c in general._configured_prompt_components(session_source=False)}
+        assert general.PROMPT_SESSION_DAYS in on and general.PROMPT_SESSION_DAYS not in off
+        assert on.index(general.PROMPT_SESSION_DAYS) < on.index(general.PROMPT_SESSION_ARTIFACTS)
 
 
 class TestExtractorWiring:

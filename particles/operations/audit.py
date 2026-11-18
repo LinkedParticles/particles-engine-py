@@ -46,6 +46,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import TokenPrice, get_config, lookup_by_model
 from particles.core.contradiction_disclosure import census_sides, group_pairs
+from particles.core.ladders import WITHHELD_REASONS
 from particles.core.progress import ProgressEvent
 from particles.core.schema import (
     ExtractionStatus,
@@ -69,8 +70,9 @@ from particles.operations._llm import (
     llm_trip_count,
     llm_unavailable_cause,
 )
-from particles.operations.curation.cards import CardKind, CurationCard
+from particles.operations.curation.cards import CardKind, CurationCard, DuplicateEdge
 from particles.operations.curation.collect import collect_cards
+from particles.operations.curation.duplicate_groups import split_card
 from particles.operations.curation.leverage import contested_ids_from, score_cards
 from particles.operations.curation.session import _attach_particle_briefs
 from particles.operations.lint import ContradictionProbeControl
@@ -965,15 +967,23 @@ class AuditReport(BaseModel):
     # headline / exemplars were filtered to pairs touching this harvest,
     # "store" when store-wide (re-audit / ``--scope store``).
     # ``duplicate_candidate_pairs_total`` is the store-wide candidate count M
-    # (before scoping); when it exceeds the harvest-scoped headline count, the
-    # report discloses the store-wide tail so the scan's full reach — e.g.
-    # pre-existing store pollution — is never hidden behind the scoped count.
+    # (before scoping), counted in groups since; when it exceeds the
+    # harvest-scoped headline count, the report discloses the store-wide tail
+    # so the scan's full reach — e.g. pre-existing store pollution — is never
+    # hidden behind the scoped count.
     duplicate_scope: Literal["harvested", "store"] | None = None
     duplicate_candidate_pairs_total: int = 0
     # unjudged candidate pairs set aside because their two claims
     # differ only in a number or an ordinal (one series' log lines, two runs'
     # results). Outside every duplicate count above; disclosed beside them.
     duplicate_number_variants: int = 0
+    # candidate pairs each withholding rung kept out of the duplicate
+    # groups before grouping, by stamp (``None``: switched off). Store-wide,
+    # like the finder's enumeration; disclosed beside the counts above.
+    duplicate_withheld: dict[str, int | None] = Field(default_factory=dict)
+    # the beliefs the in-scope duplicate groups hold (the class
+    # counts groups; ``duplicate_candidate_pairs_total`` counts groups too).
+    duplicate_group_beliefs: int = 0
     # The §4 estimate the run was gated on, when a harvest happened.
     estimate: AuditEstimate | None = None
     # ``--judge`` verdict split over ALL duplicate cards (not just exemplars):
@@ -1047,11 +1057,16 @@ class AuditReport(BaseModel):
 
 # Stable bucket order: headline classes first, then the secondary kinds in the
 # §5 "Also:" order.
+#: The duplicate class: one card per group since, and the pair cards
+#: an older collection still holds.
+_DUPLICATE_KINDS: tuple[CardKind, ...] = (CardKind.DUPLICATE_GROUP, CardKind.DUPLICATE_PAIR)
+
 _BUCKET_ORDER: tuple[CardKind, ...] = (
     CardKind.CONTRADICTION,
     CardKind.INCONSISTENCY,
     CardKind.CONTESTED,
     CardKind.DUPLICATE_PAIR,
+    CardKind.DUPLICATE_GROUP,
     CardKind.STALE,
     CardKind.RECENCY_DECAY,
     CardKind.CONFIDENCE_DECAY,
@@ -1295,17 +1310,34 @@ def differs_only_in_numbers(a: str, b: str) -> bool:
 async def _drop_number_variants(
     session: AsyncSession, cards: list[CurationCard]
 ) -> tuple[list[CurationCard], int]:
-    """Drop unjudged duplicate cards whose claims differ only in a number."""
-    pairs = [c for c in cards if c.kind is CardKind.DUPLICATE_PAIR and c.verdict is None]
-    if not pairs:
+    """Set aside unjudged duplicate pairs whose claims differ only in a number.
+
+    A group keeps its other pairs, regrouped, so setting one pair aside can
+    break a group in two or leave a single claim with no card.
+    """
+    groups = [c for c in cards if c.kind is CardKind.DUPLICATE_GROUP and c.pairs]
+    if not groups:
         return cards, 0
-    by_id = await get_particles_by_ids(session, [pid for c in pairs for pid in c.particle_ids])
-    dropped: set[int] = set()
-    for card in pairs:
-        texts = [by_id[pid].content for pid in card.particle_ids if pid in by_id]
-        if len(texts) == 2 and differs_only_in_numbers(*texts):
-            dropped.add(id(card))
-    return [c for c in cards if id(c) not in dropped], len(dropped)
+    by_id = await get_particles_by_ids(session, [pid for c in groups for pid in c.particle_ids])
+    dropped = 0
+    out: list[CurationCard] = []
+    for card in cards:
+        if card.kind is not CardKind.DUPLICATE_GROUP or not card.pairs:
+            out.append(card)
+            continue
+
+        def keep(edge: DuplicateEdge) -> bool:
+            if edge.verdict is not None or edge.a not in by_id or edge.b not in by_id:
+                return True
+            return not differs_only_in_numbers(by_id[edge.a].content, by_id[edge.b].content)
+
+        kept = sum(1 for e in card.pairs if keep(e))
+        if kept == len(card.pairs):
+            out.append(card)
+            continue
+        dropped += len(card.pairs) - kept
+        out.extend(split_card(card, keep))
+    return out, dropped
 
 
 async def _extract_concurrently(
@@ -1688,12 +1720,14 @@ async def run_memory_audit(
 
         failures_before = llm_failure_count()
         trips_before = llm_trip_count()
+        withheld: dict[str, int | None] = {}
         cards = await collect_cards(
             session,
             semantic=semantic,
             duplicate_mode=duplicate_mode,
             contradiction_probe=probe_control,
             duplicate_scope_ids=harvested_scope_ids,
+            withheld=withheld,
         )
         probe_failures = llm_failure_count() - failures_before
         # read the composed-badge set off the full collection, before
@@ -1707,14 +1741,17 @@ async def run_memory_audit(
         # M for the tail disclosure, then drop DUPLICATE_PAIR cards that don't touch
         # this harvest so the headline / exemplars / verdict census describe the
         # harvest — never store-wide pollution mislabelled as a harvest finding.
-        duplicate_total = sum(1 for c in cards if c.kind is CardKind.DUPLICATE_PAIR)
+        duplicate_total = sum(1 for c in cards if c.kind in _DUPLICATE_KINDS)
         if harvested_scope_ids is not None:
             cards = [
                 c
                 for c in cards
-                if c.kind is not CardKind.DUPLICATE_PAIR
+                if c.kind not in _DUPLICATE_KINDS
                 or any(pid in harvested_scope_ids for pid in c.particle_ids)
             ]
+        duplicate_beliefs = len(
+            {pid for c in cards if c.kind is CardKind.DUPLICATE_GROUP for pid in c.particle_ids}
+        )
 
         await score_cards(session, cards, contested_ids=contested_ids)
 
@@ -1741,13 +1778,17 @@ async def run_memory_audit(
 
         verdict_counts: dict[str, int] = {}
         if judge and semantic:
+            # the judge reads pairs, so its census counts pairs.
             for card in cards:
-                if card.kind is not CardKind.DUPLICATE_PAIR:
+                if card.kind is not CardKind.DUPLICATE_GROUP:
                     continue
-                value = (
-                    card.verdict.verdict.value if card.verdict else JudgeVerdictKind.UNSURE.value
-                )
-                verdict_counts[value] = verdict_counts.get(value, 0) + 1
+                for edge in card.pairs or []:
+                    value = (
+                        edge.verdict.verdict.value
+                        if edge.verdict
+                        else JudgeVerdictKind.UNSURE.value
+                    )
+                    verdict_counts[value] = verdict_counts.get(value, 0) + 1
 
         report = AuditReport(
             store=store,
@@ -1784,7 +1825,9 @@ async def run_memory_audit(
             contradiction_probes_run=probe_control.probes_run if probe_control is not None else 0,
             duplicate_scope="harvested" if harvested_scope_ids is not None else "store",
             duplicate_candidate_pairs_total=duplicate_total,
+            duplicate_group_beliefs=duplicate_beliefs,
             duplicate_number_variants=number_variants,
+            duplicate_withheld=withheld,
             estimate=estimate,
         )
     record_contradiction_census(report, probe_control)
@@ -1810,7 +1853,7 @@ _NEXT_VERBS: dict[str, str] = {
     "contradictions": (
         "next: particles curate --kind inconsistency · particles curate --kind contradiction"
     ),
-    "duplicates": "next: particles links suggest --judge · particles curate --kind duplicate_pair",
+    "duplicates": "next: particles links suggest --judge · particles curate --kind duplicate_group",
     "stale": "next: particles curate --kind stale",
     # a divergence- or stance-only card has no INCONSISTENCY for
     # `review` to resolve, so its door is the drill-down that shows the reading.
@@ -1851,7 +1894,7 @@ def _judged_duplicate_split(report: AuditReport) -> tuple[int, int, int]:
     counts = report.duplicate_verdicts
     paraphrase = counts.get(JudgeVerdictKind.PARAPHRASE.value, 0)
     distinct = counts.get(JudgeVerdictKind.DISTINCT.value, 0)
-    unsure = report.count(CardKind.DUPLICATE_PAIR) - paraphrase - distinct
+    unsure = sum(counts.values()) - paraphrase - distinct
     return paraphrase, distinct, max(0, unsure)
 
 
@@ -1994,7 +2037,8 @@ def render_audit_report(report: AuditReport) -> str:
     records_n, observer_contested_n = report.contested_split()
     census_n = min(report.disclosure_open_records, records_n)
     contested_n = records_n - census_n
-    dup_n = report.count(CardKind.DUPLICATE_PAIR)
+    dup_n = report.count(CardKind.DUPLICATE_GROUP) + report.count(CardKind.DUPLICATE_PAIR)
+    over = f" over {_count(report.duplicate_group_beliefs, 'belief')}"
     expired_n = report.count(CardKind.STALE)
     aged_n = report.count(CardKind.RECENCY_DECAY) + report.count(CardKind.CONFIDENCE_DECAY)
 
@@ -2023,14 +2067,16 @@ def render_audit_report(report: AuditReport) -> str:
         paraphrase, distinct, unsure = _judged_duplicate_split(report)
         headline.append(
             (
-                _count(dup_n, "verified duplicate belief pair"),
-                f"(LLM-judged: {paraphrase} paraphrase, {distinct} distinct, {unsure} unsure)",
+                _count(dup_n, "group of possible duplicates", "groups of possible duplicates")
+                + over,
+                f"(LLM-judged pairs: {paraphrase} paraphrase, {distinct} distinct, "
+                f"{unsure} unsure)",
             )
         )
     else:
         headline.append(
             (
-                _count(dup_n, "likely-duplicate belief pair"),
+                _count(dup_n, "group of likely duplicates", "groups of likely duplicates") + over,
                 "(unjudged similarity candidates; --judge to verify)",
             )
         )
@@ -2124,15 +2170,11 @@ def render_audit_report(report: AuditReport) -> str:
     # a harvest-scoped duplicate headline discloses the store-wide
     # total so the scan's full reach (e.g. pre-existing store pollution) is
     # never hidden behind the harvest-scoped count.
-    if (
-        report.duplicate_scope == "harvested"
-        and report.duplicate_candidate_pairs_total > report.count(CardKind.DUPLICATE_PAIR)
-    ):
-        harvested_dups = report.count(CardKind.DUPLICATE_PAIR)
+    if report.duplicate_scope == "harvested" and report.duplicate_candidate_pairs_total > dup_n:
         store_dups = report.duplicate_candidate_pairs_total
         lines.append(
-            f"  duplicate scan is store-wide; {store_dups} candidate pairs total, "
-            f"{harvested_dups} involve this harvest — pass --scope store to surface "
+            f"  duplicate scan is store-wide; {store_dups} candidate groups total, "
+            f"{dup_n} involve this harvest — pass --scope store to surface "
             f"all {store_dups}"
         )
 
@@ -2142,6 +2184,14 @@ def render_audit_report(report: AuditReport) -> str:
             f"  {_count(n, 'candidate pair')} set aside as not duplicates: the two claims "
             f"differ only in a number"
         )
+    for stamp, held in sorted(report.duplicate_withheld.items()):
+        if held is None:
+            lines.append(f"  {stamp} off: no candidate pair was withheld")
+        elif held:
+            reason = WITHHELD_REASONS.get(stamp.partition("@")[0], "a rung ruled them different")
+            lines.append(
+                f"  {_count(held, 'candidate pair')} withheld across the store: {reason} ({stamp})"
+            )
 
     # --- Secondary line (only nonzero kinds; §5) ----------------------------
     also: list[str] = []
@@ -2198,7 +2248,7 @@ def render_audit_report(report: AuditReport) -> str:
             lines.extend(_exemplar_lines(card))
         lines.append(f"  {verbs}")
 
-    dup_title = "Verified duplicates" if report.judged else "Likely-duplicate belief pairs"
+    dup_title = "Verified duplicates" if report.judged else "Likely-duplicate groups"
     _class_block(
         "Potential contradictions",
         (CardKind.CONTRADICTION, CardKind.INCONSISTENCY),
@@ -2209,7 +2259,7 @@ def render_audit_report(report: AuditReport) -> str:
         _class_block(
             "Contested by observer signal", (CardKind.CONTESTED,), _NEXT_VERBS["contested"]
         )
-    _class_block(dup_title, (CardKind.DUPLICATE_PAIR,), _NEXT_VERBS["duplicates"])
+    _class_block(dup_title, _DUPLICATE_KINDS, _NEXT_VERBS["duplicates"])
     _class_block("Probably-stale facts", _STALE_KINDS, _NEXT_VERBS["stale"])
 
     # --- Disclosures + footer (§5/§6) ---------------------------------------

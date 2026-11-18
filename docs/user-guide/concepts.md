@@ -62,13 +62,15 @@ entities into one, the fix is
 | `ACTIVE` | Currently valid; participates in queries and exports |
 | `SUPERSEDED` | Replaced by a newer particle |
 | `RETRACTED` | Explicitly invalidated; the source itself was wrong |
-| `INCONSISTENCY` | Contradicts another particle; needs operator review |
-| `PROVENANCE_STALE` | The corpus entry it was extracted from has new content; needs re-extraction |
+| `INCONSISTENCY` | A conflict record pairing two claims that disagree; needs your review |
+| `PROVENANCE_STALE` | Retired but kept: replaced by a newer or more trusted claim, held for review, expired, or its evidence or source is gone. Its `status_reason` says which |
 
 Transitions go through `status.validate_transition()`; operators
 don't poke `status` directly. Every retirement is dated, so you can ask
 what the store believed *before* a status changed: see
-[As-of time travel](as-of.md). Getting `INCONSISTENCY` and
+[As-of time travel](as-of.md). How a disagreement between two sources
+reaches one of these statuses is [When sources disagree](conflicts.md).
+Getting `INCONSISTENCY` and
 `PROVENANCE_STALE` back down to `ACTIVE` is the
 [lint and review](../operator-guide/lint-and-review.md) workflow.
 
@@ -110,6 +112,8 @@ re-read it:
 
 ## Where to go next
 
+- [When sources disagree](conflicts.md): which claim wins a conflict and
+  what is kept.
 - [Querying](querying.md): how ranking and tag filters work.
 - [As-of time travel](as-of.md): what the store believed at a past instant.
 - [Exporting](exporting.md): Obsidian / Anki / wiki shapes.

@@ -40,6 +40,7 @@ from particles.core.reanchor import (
     Outcome,
     ProbeVerdict,
     Reading,
+    anchor_date,
     build_restatement,
     decide_after_reading,
     decide_write,
@@ -171,6 +172,8 @@ async def _session(
         source_type=SourceType.CONVERSATION,
         mutability=Mutability.STABLE,
         content_published_at=T0 + timedelta(days=day),
+        # One project, as the harness stamps it.
+        tags=["project:-Users-o-src-app"],
     )
     await session.commit()
     await extract_snapshot(session, entry_id, snapshot_id, extractor=ex)
@@ -284,6 +287,23 @@ class TestPure:
         ]
         assert parse_probe_reply("not json", {"c1": "a"}) is None
 
+    def test_a_dropped_probe_item_keeps_every_later_verdict(self) -> None:
+        """One bad item costs its own candidate a verdict, never the ones after it."""
+        reply = (
+            '{"claims": ["c1", {"claim": "c1", "verdict": "HOLDS", "reason": "w"}, '
+            '{"claim": "c9", "verdict": "HOLDS", "reason": "unknown"}, '
+            '{"claim": "c2", "verdict": "MAYBE", "reason": "bad verdict"}, '
+            '{"claim": "c2", "verdict": "HOLDS", "reason": "x"}, '
+            '{"claim": "c1", "verdict": "DEPENDS", "reason": "dup"}, '
+            '{"claim": "c3", "verdict": "HOLDS", "reason": "y"}]}'
+        )
+        verdicts = parse_probe_reply(reply, {"c1": "a", "c2": "b", "c3": "c"})
+        assert verdicts == [
+            ProbeVerdict("a", DependencyVerdict.HOLDS, None, "w"),
+            ProbeVerdict("b", DependencyVerdict.HOLDS, None, "x"),
+            ProbeVerdict("c", DependencyVerdict.HOLDS, None, "y"),
+        ]
+
     def test_probe_reply_tolerates_how_the_label_is_echoed(self) -> None:
         reply = (
             '{"claims": [{"claim": "C1", "verdict": "HOLDS", "reason": "x"}, '
@@ -378,6 +398,17 @@ class TestPure:
         assert Cursor.from_payload(cursor.payload()) == cursor
         assert Cursor.from_payload({"retired_at": "nope", "particle_id": "p"}) is None
 
+    def test_a_cursor_needs_a_string_time_and_a_particle_id(self) -> None:
+        at = T0.isoformat()
+        assert Cursor.from_payload({"retired_at": at, "particle_id": ""}) is None
+        assert Cursor.from_payload({"retired_at": 1_700_000_000, "particle_id": "p"}) is None
+        assert Cursor.from_payload({"retired_at": at, "particle_id": 7}) is None
+        assert Cursor.from_payload(["not", "a", "dict"]) is None
+
+    def test_anchor_date(self) -> None:
+        assert anchor_date(None) is None
+        assert anchor_date(datetime(2026, 9, 4, 23, 30)) == "2026-09-04"
+
     def test_restatement_record(self) -> None:
         def claim(content: str, value: float, snap: str) -> Particle:
             return Particle(
@@ -418,6 +449,43 @@ class TestPure:
 
         assert is_reanchor_restatement(written)
         assert not is_reanchor_restatement(original)
+
+    def test_the_restatement_takes_the_weaker_claims_confidence(self) -> None:
+        """A conjunction is no more credible than its weaker part, whichever side that is."""
+
+        def claim(content: str, value: float, source: CalibrationSource) -> Particle:
+            return Particle(
+                content=content,
+                confidence=Confidence(value=value, calibration_source=source),
+                uncertainty_nature=UncertaintyNature.EPISTEMIC,
+                provenance=[
+                    ProvenanceRef(
+                        type=ProvenanceRefType.SOURCE, corpus_entry_id="e", snapshot_id="s4"
+                    )
+                ],
+                asserted_by="general-extractor",
+            )
+
+        direct, human = CalibrationSource.EXTRACTOR_DIRECT, CalibrationSource.HUMAN_REVIEW
+        now = T0 + timedelta(days=30)
+        # The original is the weaker claim: it keeps its own value.
+        weak_original = claim(WALK, 0.5, direct)
+        written = build_restatement(
+            weak_original, claim(RESIDENCE, 0.9, human), RESTATED, provider_model=None, now=now
+        )
+        assert written.confidence == weak_original.confidence
+        # A tie keeps the original's calibration fields.
+        tied = build_restatement(
+            claim(WALK, 0.7, direct),
+            claim(RESIDENCE, 0.7, human),
+            RESTATED,
+            provider_model=None,
+            now=now,
+        )
+        assert tied.confidence.calibration_source is direct
+        # The pass's contributor entry is dated to the run.
+        assert written.contributors is not None
+        assert written.contributors[-1].at == now
 
     def test_the_restatement_carries_this_sdks_stamp(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """D2: a minted record never copies its predecessor's stamp."""
@@ -560,8 +628,13 @@ class TestDelhi:
             await run_reanchor(db_session, cursor=None)
             await db_session.commit()
         text = await build_digest("default")
-        assert RESTATED in text
-        assert WALK not in text
+        # The ranked list carries the restatement and not the original; the
+        # original is named only in the automatic-retirement section above it,
+        # with its restore command.
+        retired, _, ranked = text.partition("ACTIVE belief(s)")
+        assert RESTATED in ranked
+        assert WALK not in ranked
+        assert "Retired automatically" in retired and WALK in retired
 
     async def test_a_rerun_examines_nothing_new(self, db_session: Any, bow: None) -> None:
         from particles.operations.reanchor import run_reanchor
@@ -685,7 +758,7 @@ def ledgerly_probes(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, No
     async def contradicts(a: str, b: str) -> bool:
         return frozenset((a, b)) in _LEDGERLY_CONFLICTS
 
-    async def updates(earlier: str, later: str) -> SlotVerdict:
+    async def updates(earlier: str, later: str, contexts: Any = None) -> SlotVerdict:
         return _LEDGERLY_CONFLICTS.get(frozenset((earlier, later)), SlotVerdict.DIFFERENT)
 
     # Every session-3 claim is in the subject pool, so the scripted probes
@@ -827,7 +900,7 @@ class TestLedgerly:
 
         asked: list[tuple[str, str]] = []
 
-        async def read(earlier: str, later: str) -> SlotReading:
+        async def read(earlier: str, later: str, contexts: Any = None) -> SlotReading:
             asked.append((earlier, later))
             return SlotReading(SlotVerdict.CHANGES, "verification")
 
@@ -893,7 +966,7 @@ def trip_probes(monkeypatch: pytest.MonkeyPatch) -> Generator[None, None, None]:
     async def contradicts(a: str, b: str) -> bool:
         return frozenset((a, b)) in _TRIP_CONFLICTS
 
-    async def updates(earlier: str, later: str) -> SlotVerdict:
+    async def updates(earlier: str, later: str, contexts: Any = None) -> SlotVerdict:
         return _TRIP_CONFLICTS.get(frozenset((earlier, later)), SlotVerdict.DIFFERENT)
 
     # As in the Ledgerly fixture: the scripted probes alone decide which pairs
@@ -933,6 +1006,8 @@ async def _note(
         source_type=SourceType.CONVERSATION,
         mutability=Mutability.STABLE,
         content_published_at=T0 + timedelta(days=day),
+        # One project, as the harness stamps it.
+        tags=["project:-Users-o-src-app"],
     )
     await session.commit()
     await extract_snapshot(session, entry_id, snapshot_id, extractor=ex)
@@ -1037,7 +1112,7 @@ class TestTripVersusMove:
         async def contradicts(a: str, b: str) -> bool:
             return frozenset((a, b)) in confirmed
 
-        async def read(earlier: str, later: str) -> SlotReading:
+        async def read(earlier: str, later: str, contexts: Any = None) -> SlotReading:
             if (earlier, later) in changes:
                 return SlotReading(SlotVerdict.CHANGES, "verification")
             return SlotReading(SlotVerdict.DIFFERENT, "semantic_lint")
@@ -1071,6 +1146,7 @@ class TestTripVersusMove:
             "winner_id": decided.id,
             "route": "paraphrase",
             "decided_by": update_decided_by(),
+            "winner_entry_id": decided.provenance[0].corpus_entry_id,
         }
         assert [r["retired"] for r in report.retired] == [home.id]
 
@@ -1137,10 +1213,10 @@ class TestTripVersusMove:
         )
         changes = {**_TRIP_CONFLICTS, frozenset((HOME, MOVED_LITERAL)): SlotVerdict.CHANGES}
 
-        async def updates(earlier: str, later: str) -> SlotVerdict:
+        async def updates(earlier: str, later: str, contexts: Any = None) -> SlotVerdict:
             return changes.get(frozenset((earlier, later)), SlotVerdict.DIFFERENT)
 
-        async def read(earlier: str, later: str) -> SlotReading:
+        async def read(earlier: str, later: str, contexts: Any = None) -> SlotReading:
             return SlotReading(await updates(earlier, later), "verification")
 
         ex = await _trip(db_session)

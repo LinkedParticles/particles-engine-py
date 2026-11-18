@@ -21,6 +21,9 @@ write-lock wait vs blob write vs LLM call) across the process boundary.
    pip install 'particles[otel]'      # or: uv sync --extra otel
    ```
 
+   The engine's container image already carries it; skip this step
+   there and see [In a container](#in-a-container).
+
 2. **Enable it in `config.yaml`:**
 
    ```yaml
@@ -100,6 +103,16 @@ checks and the one the exporter is given.
   engine host vs. the always-on engine) regardless of which writer lost the
   lock; plus the engine's per-request `http.server` duration from the FastAPI
   instrumentation.
+- **Nightly consolidation gauges**, set once at the end of each run, where the
+  run happens (the engine's daemon, or `particles memory consolidate`): the
+  pending-snapshot backlog the run left (`particles_consolidation_backlog`),
+  snapshots it extracted, its LLM cost, the extraction pass's spend, budget and
+  rounds, which reason stopped the pass (`particles_consolidation_extract_stop`,
+  1 for that reason and 0 for the others), and when it finished. Three
+  `*_to_date` gauges sum cost, extraction spend and snapshots over every stored
+  run record, so a panel can read what a span of nights spent even across an
+  engine restart. Each carries a `store` label. A night that skipped extraction
+  leaves the backlog unset rather than reporting zero.
 - **Logs**: the existing stdlib logs, with the active trace/span ID injected so
   a log line ties back to its span.
 
@@ -135,8 +148,60 @@ tailing the engine's log file into Loki today.
 
 For network exposure of the engine itself, see
 [Remote engine](remote-engine.md); observability rides whatever channel
-(Tailscale / SSH tunnel) that uses. If the engine runs as a container, the
-OTel environment goes in the same place as the rest of its configuration;
-see [Running in a container](container-deployment.md#overriding-configuration).
-The longest-running spans you will see belong to the nightly passes; what
-they are is [Scheduled consolidation](scheduled-consolidation.md).
+(Tailscale / SSH tunnel) that uses. The longest-running spans you will see
+belong to the nightly passes; what they are is
+[Scheduled consolidation](scheduled-consolidation.md).
+
+## In a container
+
+The engine image carries the `otel` extra, with observability off in its baked
+config. Turning it on is a configuration change, not a rebuild:
+add an `observability` block to the config you mount over
+`/etc/particles/config.yaml`, or set the `PARTICLES_OBSERVABILITY_*`
+overrides in the container's environment
+([Overriding configuration](container-deployment.md#overriding-configuration)).
+
+Inside the container, `localhost` is the container itself, so point
+`endpoint` at a collector the container can reach:
+
+```yaml
+observability:
+  enabled: true
+  exporter: otlp
+  # Docker Desktop: the host's own ports, including ones bound to 127.0.0.1.
+  endpoint: "http://host.docker.internal:4318"
+  # Or a collector on the same Docker network:  "http://alloy:4318"
+  service_name: particles-engine
+```
+
+On Linux Docker Engine, `host.docker.internal` needs
+`extra_hosts: ["host.docker.internal:host-gateway"]` in the compose service,
+and reaches only host ports bound to the bridge address, not to 127.0.0.1;
+a shared Docker network is the simpler route there. A collector that is down
+costs nothing but the dropped telemetry: the engine starts and serves either
+way.
+
+A distinct `service_name` keeps the engine's spans and metrics apart from the
+client's (the client keeps the default, `particles`). The dashboard above
+selects `job="particles"`; widen it to `job=~"particles.*"` to show both. The
+OTLP metric export interval defaults to 60 s; set `OTEL_METRIC_EXPORT_INTERVAL`
+(milliseconds) in the container's environment to fill the `rate()` panels
+sooner.
+
+Logs are not exported over OTLP (above), so the engine's logs are its container
+stdout. A collector that reads the container runtime's logs ships them to Loki,
+for example Grafana Alloy's `loki.source.docker` with the Docker socket mounted
+read-only. Label the engine's stream with `service_name` equal to its
+`service.name`, so Grafana's trace-to-logs link finds it. The engine's log
+lines do not carry the trace id today, so that link matches by service and
+time window (`filterByTraceID: false` on the Tempo data source).
+
+To check whether an image carries the SDK:
+
+```bash
+docker run --rm --network none --entrypoint python IMAGE -c "import importlib.util as u; print(u.find_spec('opentelemetry.sdk') is not None)"
+```
+
+It prints `True` for an image that carries the extra. An image built from a
+release before the extra was added prints `False`, and `observability.enabled`
+in its config does nothing there.

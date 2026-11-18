@@ -24,7 +24,8 @@ from fastapi.testclient import TestClient
 
 from particles.api import _keys
 from particles.api._keys import KeyRuleError, Role
-from particles.core.observer_scope import EntryScope, classify_entry, project_tag
+from particles.core.observer_scope import classify_entry, project_tag
+from tests._corpus_rows import CLIENT_HOST_ID
 from tests.test_engine_keys import (  # noqa: F401
     AGENT,
     HOOK,
@@ -42,6 +43,7 @@ MEMORY_URI = "file:///home/owner/.claude/projects/-home-owner-repo/memory/NOTES.
 HOOK_ROOTS = {
     "memory_roots": ["/home/owner/.claude/projects", "/home/u/.claude/projects"],
     "archive_roots": ["/home/u/.particles/claude-code/projects"],
+    "host_id": CLIENT_HOST_ID,
 }
 CAPTURED_URL = "https://example.org/ports"
 CAPTURE_BODY = "A page about ports.\n"
@@ -88,7 +90,8 @@ def _not_global(tags: list[str]) -> bool:
     from particles.config import get_config
 
     harness = get_config().observer_scope.harness_tags
-    return classify_entry(tags, harness) is not EntryScope.GLOBAL
+    # A reference entry is global on every question surface.
+    return not classify_entry(tags, harness).everywhere
 
 
 # --- W2, W3: confinement runs before the reconciles and the unchanged return ----
@@ -195,10 +198,48 @@ def test_an_agent_deposit_naming_a_project_carries_that_key_and_no_marker(
     assert _entry(resp.json()["entry_id"]).tags == [project_tag("alpha")]
 
 
-def test_an_operator_keys_untagged_deposit_stays_global(engine: TestClient) -> None:
+def test_an_operator_keys_untagged_deposit_is_reference(engine: TestClient) -> None:
+    """In view everywhere, as before, and marked reference."""
+    from particles.core.observer_scope import REFERENCE_MARKER
+
     resp = engine.post("/corpus/deposit/text", json={"text": "An operator's note."})
     assert resp.status_code == 200, resp.text
-    assert not _not_global(_entry(resp.json()["entry_id"]).tags)
+    tags = _entry(resp.json()["entry_id"]).tags
+    assert not _not_global(tags)
+    assert REFERENCE_MARKER in tags
+
+
+def test_an_operator_keys_standing_deposit_stays_global(engine: TestClient) -> None:
+    resp = engine.post("/corpus/deposit/text", json={"text": "A standing note.", "standing": True})
+    assert resp.status_code == 200, resp.text
+    assert _entry(resp.json()["entry_id"]).tags == []
+
+
+def test_a_statement_upload_is_neither_marked_nor_unmarking(engine: TestClient) -> None:
+    """The remote `import vault` arm's field: the operator's own writing."""
+    resp = engine.post(
+        "/corpus/deposit/file",
+        files={"file": ("note.md", b"# My own note\n")},
+        data={"statement": "true"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert _entry(resp.json()["entry_id"]).tags == []
+
+
+def test_an_agent_cannot_make_its_deposit_reference(engine: TestClient) -> None:
+    """An agent naming the reference marker is still unattributed."""
+    from particles.core.observer_scope import REFERENCE_MARKER, UNATTRIBUTED_MARKER
+
+    token = _mint("agent", "agent:ci-bot")
+    resp = engine.post(
+        "/corpus/deposit/text",
+        json={"text": "An agent note.", "tags": [REFERENCE_MARKER]},
+        headers=_bearer(token),
+    )
+    assert resp.status_code == 200, resp.text
+    tags = _entry(resp.json()["entry_id"]).tags
+    assert UNATTRIBUTED_MARKER in tags
+    assert _not_global(tags)
 
 
 # --- W52, W26, W67: the web-capture rule (R13) ----------------------------------
@@ -457,6 +498,51 @@ def test_a_harvester_key_names_the_harvests_own_uris(
         headers=_bearer(token),
     )
     assert resp.status_code == 200, resp.text
+
+
+def test_a_harvest_records_no_author(engine: TestClient) -> None:
+    """the harvest principal is read from the depositor, never stamped.
+
+    The update rung compares snapshot authors, so a harvest that began recording
+    one would split every memory file from its own earlier snapshots and end
+    the owner's updates silently.
+    """
+    from particles.corpus.harvest_marks import is_owner_harvest
+
+    token = _mint("agent", HOOK, reserved_ok=True, **HOOK_ROOTS)
+    deposits = [
+        ("claude-code://session/0f6b2c1e-1d2a-4c3b-9e8f-123456789abc", "CONVERSATION"),
+        ("file:///home/u/.claude/projects/-home-u-repo/memory/MEMORY.md", "LOCAL_MARKDOWN"),
+    ]
+    ids = []
+    for uri, source_type in deposits:
+        resp = engine.post(
+            "/corpus/deposit/text",
+            json={
+                "text": "Harvested.",
+                "uri_r": uri,
+                "source_type": source_type,
+                "mutability": "MUTABLE",
+                "tags": ["claude-code", "memory-file", project_tag("repo")],
+            },
+            headers=_bearer(token),
+        )
+        assert resp.status_code == 200, resp.text
+        ids.append(resp.json()["entry_id"])
+
+    async def _snapshots(entry_id: str) -> list[Any]:
+        from particles.corpus.store import list_snapshots_for_entry
+        from particles.db import session_scope
+
+        async with session_scope() as session:
+            return await list_snapshots_for_entry(session, entry_id)
+
+    for entry_id in ids:
+        entry = _entry(entry_id)
+        assert entry.deposited_by == HOOK
+        assert is_owner_harvest(entry)
+        snapshots = _run(lambda eid=entry_id: _snapshots(eid))
+        assert snapshots and all(s.author_id is None for s in snapshots)
 
 
 def test_a_harvester_key_may_not_write_the_rule_file_mark(engine: TestClient) -> None:

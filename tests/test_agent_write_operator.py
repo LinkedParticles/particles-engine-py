@@ -584,6 +584,48 @@ class TestOperatorSupersedeScope:
         assert tags == [] and scope.is_global and described == "global"
 
     @pytest.mark.asyncio
+    async def test_a_reference_predecessor_gives_a_reference_successor(
+        self, db_session: Any, stub_resolver: Any
+    ) -> None:
+        """A correction never moves an article's claim into every digest."""
+        from particles.core.observer_scope import REFERENCE_MARKER
+        from tests._observer_scope import belief, rescoped, source
+
+        target = await belief(
+            db_session,
+            "Donkey Kong came out in 1980.",
+            await source(db_session, "dk", [REFERENCE_MARKER]),
+        )
+        await rescoped(db_session)
+
+        _new, tags, (scope, described) = await self._supersede(db_session, target)
+
+        assert tags == [REFERENCE_MARKER] and scope.reference and scope.is_global
+        assert described is not None and described.startswith("reference")
+
+    @pytest.mark.asyncio
+    async def test_a_widened_reference_predecessors_widening_carries_over(
+        self, db_session: Any, stub_resolver: Any
+    ) -> None:
+        from particles.core.observer_scope import REFERENCE_MARKER
+        from particles.operations.observer_scope import widen
+        from particles.store.observer_scope_store import ScopeTarget
+        from tests._observer_scope import belief, rescoped, source
+
+        target = await belief(
+            db_session,
+            "Donkey Kong came out in 1980.",
+            await source(db_session, "dk", [REFERENCE_MARKER]),
+        )
+        await rescoped(db_session)
+        await widen(db_session, ScopeTarget.PARTICLE, target.id, actor="op")
+
+        _new, _tags, (scope, described) = await self._supersede(db_session, target)
+
+        assert scope.reference and scope.widened
+        assert described is not None and described.endswith("widened to every project")
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize("target_kind", ["belief", "source"])
     async def test_a_widening_carries_over_as_a_revocable_widening(
         self, db_session: Any, stub_resolver: Any, target_kind: str

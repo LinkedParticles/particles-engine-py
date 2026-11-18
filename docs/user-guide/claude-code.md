@@ -69,8 +69,8 @@ That one command:
 
 1. **Merges two hook entries** into `~/.claude/settings.json`: a
    `SessionStart` hook running `particles hook session-start --store <handle>`
-   and a `SessionEnd` hook running `particles hook session-end --store
-   <handle>`, both with the absolute path of your `particles` executable so
+   and a `SessionEnd` hook that hands the session to `particles hook
+   session-end-worker --store <handle>` (below), both with absolute paths so
    they work regardless of shell PATH. The merge is **marker-owned**: your
    existing settings and hooks are preserved byte-for-byte semantically;
    re-running `init` replaces exactly the Particles-owned entries
@@ -478,10 +478,29 @@ port a service ran on in May) wants to be **retrievable, not resident**;
 that's the MCP query path, and it's why the digest never tries to carry the
 store. Ranking composes effective confidence with usage (beliefs that keep
 earning recall rise), so the budget is spent on what sessions
-actually use, not on whatever was written most recently.
+actually use, not on whatever was written most recently. A recall is cheap
+too: the `query` tool returns the answer and only the beliefs it cites, each
+in a compact form, about 1,500 characters a call rather than the whole
+records of every retrieved belief
+([what the query tool returns](querying.md#what-the-query-tool-returns)).
 
-**Session end: the harvest.** `hook session-end` deposits two kinds of
-material. This is *harvest, don't ask*; the agent took no action to be remembered:
+**Session end: the harvest.** The SessionEnd hook does not harvest while the
+session waits. It runs a small launcher, using only Python's standard library,
+that queues the session under `<claude_code.state_dir>/session-end/`, starts
+`particles hook session-end-worker` in the background, logs a
+`session-end-handoff` line and exits, in well under a second even on a busy
+machine. The worker harvests every queued session, then re-renders each
+`MEMORY.md` once, so several sessions ending together cost one harvest, not
+one each. It logs one `session-end` line per session with `"mode":
+"worker"`, bounded by `claude_code.harvest.worker_deadline_seconds` (default
+120). A worker stopped mid-harvest (the machine slept, you logged out) is
+logged by the next one as `worker lost`, an error, and the session is
+harvested again. An install from before 1.245.0 still harvests inside the hook:
+re-run `particles init claude-code` to switch, and `particles hook doctor`
+says when you need to.
+
+The harvest deposits two kinds of material. This is *harvest, don't ask*; the
+agent took no action to be remembered:
 
 - **The session transcript, distilled, never raw.** A deterministic, LLM-free
   pass keeps user/assistant turns verbatim, elides each tool call to one line
@@ -525,7 +544,10 @@ material. This is *harvest, don't ask*; the agent took no action to be remembere
 - **Catch-up sweep.** SessionEnd doesn't fire on a crash or SIGKILL, but the
   transcript persists on disk, so after handling the current session the hook
   re-checks up to `claude_code.harvest.catchup_limit` (default 5) recent
-  transcripts and harvests any whose content moved. The corpus itself is the
+  transcripts and harvests any whose content moved. It reads the transcripts
+  of every directory that belongs to the session's project, the main
+  checkout's and each linked worktree's, so a worktree session killed before
+  its SessionEnd is picked up by the next session end in the same project. The corpus itself is the
   harvest state; a session missed because the store was unreachable is simply
   retried at the next session end.
 
@@ -656,8 +678,12 @@ or tighten the floor and budgets. `max_lines` / `max_bytes`
 truncate in rank order, lowest effective confidence dropped first,
 `select.allow` pins exempt. You can re-render on demand with
 `particles project ~/.particles/claude-code/memory.yaml
-~/.claude/projects/<project>/memory/MEMORY.md --splice memory-index
---without-synthesis`.
+~/.claude/projects/<project>/memory/MEMORY.md --splice memory-index`.
+On this manifest the verb runs the same render-splice cycle as the SessionEnd
+hook: the same backup, fold and per-project snapshot, so the next session's
+hook finds the region unedited. It refuses a region holding edits the hook has
+not deposited yet, any region other than `memory-index`, any target that is not
+a Claude Code `MEMORY.md`, and a store the installed hooks do not name.
 
 **Safety posture.** The splice runs only after the same cycle's harvest of
 `MEMORY.md` succeeded; the write is atomic (temp file + rename); the pre-splice
@@ -674,7 +700,11 @@ edit you make inside the region is still harvested as yours. With
 the projection active, the session-start digest push checks the region's
 `<!-- sources: … -->` trailer first: if the loaded file already *is* the
 current view it injects nothing, and if the store moved since the last render
-it injects only the difference. Disable the whole feature with
+it injects only the difference. When that check cannot finish in its share of
+the hook deadline (a busy machine, an engine still warming up), a session that
+loaded the region the projection last rendered keeps it and gets nothing
+more, logged as `"outcome": "degraded"` with the load average; without such a
+region it gets the full digest. Disable the whole feature with
 `agent_memory.projection.enabled: false`.
 
 **Git-versioned history (optional, off by default).** If you keep your memory
@@ -821,8 +851,23 @@ What to know before running it:
   its session's first timestamp, as the SessionEnd hook dates it, so a
   claim about what a session did carries that session's day. Transcripts
   audited before 1.223.13 were dated to the day of the audit instead:
-  `particles memory redate --transcripts <dir>` repairs them from the same
-  folder.
+  `particles memory redate --transcripts <dir>` repairs their dates from the
+  same folder. A claim whose text states the audit day ("On 2026-10-28 …")
+  keeps that text, because a claim's wording is never edited; after the
+  redate, `particles reindex --entry-ids <ids>` re-reads those transcripts
+  against their sessions' days (a paid extraction, about what the audit
+  cost for them).
+- **A session that runs over several days dates each act by its own day.**
+  A resumed session keeps writing to one transcript, so one session can span
+  weeks. The saved transcript marks the turn where the day changes
+  (`## User · 2026-09-14`), and an act is dated by the mark above it; the
+  first day's turns carry no mark, so a session that stays within one day is
+  saved exactly as before. Sessions extracted before 1.227 dated every act to
+  the first day. `particles memory redate` lists them, and
+  `particles memory redate --reread` re-reads them from their first day
+  change after printing what it would retire and spend. It needs the raw
+  transcripts: a session whose transcript Claude Code has already deleted
+  cannot be repaired.
 - **No key, no silent clean bill.** With no `ANTHROPIC_API_KEY`, a harvest
   audit refuses before touching the store (extraction is the audit's
   substance); a re-audit of a populated store still runs the structural
@@ -850,6 +895,81 @@ live under `audit:` in `config.yaml` (`exemplars_per_class`,
 `max_contradiction_verifications`); detection thresholds stay with their
 finders.
 
+## The curation pane
+
+The `particles-curation` plugin puts the curation queue in a pane beside the
+conversation, in the Claude Code desktop app, the terminal and the VS Code
+extension. The pane shows the same cards as the web UI's Curate screen and
+offers the same actions on them (edit, retract, assign a subject, resolve a
+conflict, affirm, snooze, dismiss). Both clients render one shared curation
+core, so a card reads and behaves the same in each.
+
+The pane also does one thing the web UI cannot. When the agent's Particles
+`query` returns a belief that an open conflict contests, the pane lists that
+conflict under **In this session**, with its card when the nightly card set
+already holds it. The pane opens for it where the window docks panes, and
+shows a short notice elsewhere.
+
+### What it needs
+
+- **A running engine.** The pane talks to one engine over HTTP, by default
+  `http://127.0.0.1:8000`, and starts none itself:
+
+  ```bash
+  particles engine serve 127.0.0.1:8000
+  ```
+
+- **A key minted for the pane.** Curation writes need the operator role. A
+  key for the pane alone can be revoked alone, and the event log records its
+  actions under its own key id. Every operator key carries the one operator
+  principal (`curation.operator_identity`, `operator:local` unless changed):
+
+  ```bash
+  particles engine keys create --role operator --principal operator:local --label "Claude Code pane" --output ~/.particles/pane.key
+  ```
+
+  A reader key gives a read-only pane. An engine on this machine that has no
+  key at all serves the pane's reads and refuses its writes.
+
+### Install
+
+The plugin folder, `clients/claude-code-plugin`, is its own plugin
+marketplace. In a terminal session, add it from the checkout you run
+Particles from, then install it:
+
+```text
+/plugin marketplace add /path/to/particles-engine-py/clients/claude-code-plugin
+/plugin install particles-curation@particles-local
+```
+
+In the desktop app, click **+** next to the prompt box, then **Plugins**,
+**Add marketplace** with the same folder, then **Add plugin**. A plugin
+installed at the user scope from a terminal also loads in the desktop app's
+sessions.
+
+The install asks for four options. `/plugin configure
+particles-curation@particles-local` asks again later.
+
+| Option | Default | What it is |
+|---|---|---|
+| Engine URL | `http://127.0.0.1:8000` | The engine to curate. One that is not on this machine must use https. |
+| Engine key | none | The pane's key. Claude Code keeps it in secure storage, not in `settings.json`. |
+| Particles MCP server name | `particles` | Where the pane watches the agent's queries for contested beliefs. |
+| Reviewer id | `claude-code` | Recorded on each conflict resolved from the pane. |
+
+### Use
+
+Run `/particles` to open the pane. Its footer names the curation core's
+version and the engine's, and lists any route the engine lacks. A form an
+action needs (a revised claim, a resolution) opens in place of the card's
+buttons.
+
+The key is kept out of the model's context and the transcript, but not out of
+reach of code running as you. Claude Code lets a plugin that runs earlier in
+its chain observe this plugin's requests, and the agent's own tools run as
+your user. A key minted for the pane alone limits what a leak can do, and
+`particles engine keys revoke` ends it.
+
 ## Degradation and debugging
 
 The hook verbs **never break a session**: on any failure (database missing,
@@ -872,6 +992,15 @@ Each `session-end` line also records the `project` it resolved and how
 (`project_resolved_from`: `repository`, or `transcript-dir` when the launch
 directory could not be identified and the hook fell back to the directory
 holding the transcript).
+
+Each line also carries `phases_ms`, the milliseconds each step took
+(`freshness`, `digest` and `exposure` at session start; `transcript`,
+`memory_files`, `sweep` and `projection` at session end), and, when the
+deadline cut the run short, `interrupted_in`, the step it stopped in. A slow
+hook therefore names its slow step. The harvest never mines use evidence:
+`utility` reads `{"deferred": "consolidation"}`, and the nightly `particles
+memory consolidate` mines every session harvested since its last run, so a
+belief a session acted on is credited the following night.
 
 `particles hook doctor --store <handle>` prints the memory directory a session
 started from the current directory writes to, and whether that store is the
@@ -897,6 +1026,10 @@ anything itself.
   MEMORY.md region is rendered by the engine and spliced on this machine.
   Utility mining needs the store on the same machine and is skipped; see
   [Remote engine](../operator-guide/remote-engine.md#claude-code-hooks-against-a-remote-engine).
+  `particles init claude-code --engine URL` installs that thin client: no local
+  store, and each client's engine key in its own `0600` token file rather than
+  in Claude Code's settings
+  ([how](../operator-guide/remote-engine.md#installing-claude-code-as-a-thin-client)).
 - **Distill-then-redact.** Only the distilled rendering is deposited; tool
   results never are. The pattern redaction is best-effort defence in depth,
   **not a guarantee**: review what scrolls through your sessions.

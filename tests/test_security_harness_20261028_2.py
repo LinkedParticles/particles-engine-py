@@ -69,7 +69,7 @@ def test_the_installer_claude_call_runs_no_interpreter_from_an_untrusted_path_en
     planted.chmod(0o755)
     monkeypatch.chdir(clone)
     monkeypatch.setenv("PATH", f"{trusted}{os.pathsep}.")
-    assert init_mod._trusted_which("claude") == str(stub)
+    assert init_mod.trusted_which("claude") == str(stub)
     _unrecorded_claude_mcp(["mcp", "list"])
     assert not marker.exists(), "a program found through '.' ran under the installer"
 

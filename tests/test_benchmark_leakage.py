@@ -26,10 +26,13 @@ from pydantic import BaseModel
 from typer.testing import CliRunner
 
 from particles.api.cli import app
+from particles.api.cli.benchmark import _benchmark_leakage, _Format
 from particles.benchmark.leakage import (
     LeakageError,
+    LeakageReport,
     QueryLeakage,
     RunSelection,
+    SentenceMeasure,
     SentenceResult,
     SentenceVerdict,
     build_report,
@@ -37,6 +40,7 @@ from particles.benchmark.leakage import (
     estimate_run,
     judge_prompt,
     measure_question,
+    measured_sentences_per_answer,
     render_report,
     rubric,
     run_leakage,
@@ -44,7 +48,7 @@ from particles.benchmark.leakage import (
 )
 from particles.benchmark.leakage.runner import _checkpoint_key
 from particles.benchmark.relevance_floor import HeldOutQuestion, QuestionSource, write_heldout
-from particles.config import TokenPrice, get_config
+from particles.config import ProviderSelection, TokenPrice, get_config
 from particles.core.schema import (
     AttributionKind,
     CalibrationSource,
@@ -56,6 +60,7 @@ from particles.core.schema import (
     UncertaintyNature,
 )
 from particles.llm import CompletionError, override_providers
+from particles.llm.usage import record_usage
 from particles.operations.entailment import (
     EntailmentRubric,
     EntailmentVerdict,
@@ -443,6 +448,9 @@ class TestRunner:
             (result,) = await run_leakage([_OFF_TOPIC], selection=_selection())
         assert judge.calls == 0
         assert result.refused is True and result.sentences == []
+        # the harness asks for refused candidates, so a refused
+        # row still records the context it refused over.
+        assert result.context_particle_ids and result.hit_count > 0
         report = build_report(_selection(), [result])
         assert report.unsupported_sentences.denominator == 0
         assert (report.refused.numerator, report.refused.denominator) == (1, 1)
@@ -785,3 +793,160 @@ class TestCLI:
         )
         assert result.exit_code == 1
         assert "git work tree" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Spend: the projection's factors, and the measurement beside it
+# ---------------------------------------------------------------------------
+
+
+class _Metered(_Scripted):
+    """A scripted provider that reports each response's usage, as an adapter does."""
+
+    def __init__(self, name: str, reply: Any, *, input_tokens: int, output_tokens: int) -> None:
+        super().__init__(name, reply)
+        self._input = input_tokens
+        self._output = output_tokens
+
+    async def complete(self, prompt: str, **kwargs: object) -> str:
+        out = await super().complete(prompt, **kwargs)
+        record_usage(self.provider_model, input_tokens=self._input, output_tokens=self._output)
+        return out
+
+
+def _price_scripted() -> None:
+    for name in ("composer", "judge"):
+        get_config().llm.price_per_mtok[f"scripted:{name}"] = TokenPrice(input=2.0, output=10.0)
+
+
+class TestSpend:
+    def test_judge_calls_follow_a_measured_sentence_count(self) -> None:
+        composer = _Scripted("composer", _ANSWER)
+        judge = _Scripted("judge", _verdicts)
+        measured = SentenceMeasure(per_answer=15.0, answers=40, source="prior.json", top_k=20)
+        with override_providers({"query_response": composer, "benchmark": judge}):
+            assumed = estimate_run([_ON_TOPIC, _OFF_TOPIC], top_k=40)
+            est = estimate_run([_ON_TOPIC, _OFF_TOPIC], top_k=40, sentences=measured)
+        assert assumed.judge_calls == 16
+        assert any("assumed" in note for note in assumed.assumptions)
+        assert est.judge_calls == 30
+        assert est.judge_input_tokens == pytest.approx(assumed.judge_input_tokens * 30 / 16, 1)
+        note = next(n for n in est.assumptions if "sentences an answer" in n)
+        assert "15.0 sentences an answer, measured over 40 judged answers in prior.json" in note
+        assert "at top-k 20 (this run reads 40" in note
+
+    def test_sentences_per_answer_reads_only_judged_answers(self) -> None:
+        report = build_report(_selection(questions=5), _rows())
+        measured = measured_sentences_per_answer(report, source="r.json")
+        # a, b and c were judged (4 + 4 + 1 sentences); d was refused, e excluded.
+        assert measured is not None
+        assert (measured.per_answer, measured.answers, measured.top_k) == (3.0, 3, 5)
+        nothing = build_report(
+            _selection(),
+            [QueryLeakage(question_id="d", source=QuestionSource.USER_PROMPT, refused=True)],
+        )
+        assert measured_sentences_per_answer(nothing, source="r.json") is None
+
+    def test_an_opus_judge_counts_input_at_the_shipped_factor(self) -> None:
+        # cause 2: with no entry for claude-opus-5-5 the judge's
+        # premises were converted at 4.0 characters a token and came in a
+        # third low. It counts the same tokens as claude-sonnet-5-5.
+        llm = get_config().llm
+        llm.query_response = ProviderSelection(provider="anthropic", model="claude-sonnet-5-5")
+        llm.benchmark = ProviderSelection(provider="anthropic", model="claude-opus-5-5")
+        cfg = get_config().benchmark_leakage
+        composer = _Scripted("composer", _ANSWER)
+        judge = _Scripted("judge", _verdicts)
+        with override_providers({"query_response": composer, "benchmark": judge}):
+            est = estimate_run([_ON_TOPIC], top_k=40)
+        per_call = 40 * cfg.estimate_particle_tokens + cfg.estimate_judge_prompt_overhead_tokens
+        assert est.judge_input_tokens == est.judge_calls * per_call
+        assert any(
+            "2.98 characters a token for the composer, 2.98 for the judge" in n
+            for n in est.assumptions
+        )
+
+    async def test_a_run_prints_and_records_its_measured_spend(
+        self,
+        leakage_store: None,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-not-used")
+        _price_scripted()
+        composer = _Metered("composer", _ANSWER, input_tokens=1_000, output_tokens=200)
+        judge = _Metered("judge", _verdicts, input_tokens=500, output_tokens=300)
+        out = tmp_path / "report.json"
+        with override_providers({"query_response": composer, "benchmark": judge}):
+            await _benchmark_leakage(
+                questions=[_ON_TOPIC.question],
+                heldout=None,
+                store=None,
+                top_k=5,
+                limit=None,
+                estimate_only=False,
+                yes=True,
+                per_question=None,
+                output=out,
+                output_format=_Format.json,
+                checkpoint=None,
+                allow_in_repo=True,
+                max_usd=100.0,
+            )
+        assert (composer.calls, judge.calls) == (1, 3)
+        err = capsys.readouterr().err
+        estimate_line, spend_head = err.index("projected"), err.index("Spend: estimated ~US$")
+        assert estimate_line < spend_head
+        assert "measured US$0.02 at list price" in err
+        assert "judge   estimated     8 calls" in err
+        assert "measured     3 calls, 2k in / 900 out" in err
+        assert "LLM usage: 3 benchmark calls (scripted:judge)" in err
+        assert "1 query response call (scripted:composer)" in err
+        report = LeakageReport.model_validate_json(out.read_text())
+        assert report.spend is not None
+        answer, judged = report.spend.roles
+        assert (answer.measured_calls, answer.measured_input_tokens) == (1, 1_000)
+        assert (judged.measured_calls, judged.measured_output_tokens) == (3, 900)
+        # 1k in and 200 out at $2/$10 ($0.004), plus 1.5k in and 900 out ($0.012).
+        assert report.spend.measured_cost_usd == pytest.approx(0.016)
+        assert report.spend.estimated_cost_usd is not None
+
+    async def test_calibrate_from_projects_from_the_saved_run(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        saved = tmp_path / "prior.json"
+        saved.write_text(build_report(_selection(questions=5), _rows()).model_dump_json())
+        composer = _Scripted("composer", _ANSWER)
+        judge = _Scripted("judge", _verdicts)
+        with override_providers({"query_response": composer, "benchmark": judge}):
+            await _benchmark_leakage(
+                questions=["What?", "Why?"],
+                heldout=None,
+                store=None,
+                top_k=5,
+                limit=None,
+                estimate_only=True,
+                yes=False,
+                per_question=None,
+                output=None,
+                output_format=_Format.table,
+                checkpoint=None,
+                allow_in_repo=False,
+                calibrate_from=saved,
+            )
+        err = capsys.readouterr().err
+        assert "projected 8 LLM calls over 2 questions" in err  # 2 answers + 2 × 3.0
+        assert "3.0 sentences an answer, measured over 3 judged answers in prior.json" in err
+        assert composer.calls == judge.calls == 0
+
+    def test_calibrate_from_refuses_a_file_that_is_not_a_leakage_report(
+        self, tmp_path: Path
+    ) -> None:
+        bad = tmp_path / "bad.json"
+        bad.write_text("{}")
+        result = cli.invoke(
+            app, ["benchmark", "leakage", "-q", "What?", "--estimate", "--calibrate-from", str(bad)]
+        )
+        assert result.exit_code == 1
+        assert "is not a leakage report" in result.output

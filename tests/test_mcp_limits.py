@@ -21,6 +21,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from particles.config import get_config, reset_config
+from particles.core.schema import QueryResponse
 from particles.db import DEFAULT_STORE
 from particles.mcp import limits
 
@@ -60,10 +61,9 @@ def test_reset_config_clears_the_bucket() -> None:
 
 def _fake_backend() -> Any:
     backend = MagicMock()
-    resp = MagicMock()
-    resp.particles = []
-    resp.model_dump = MagicMock(return_value={})
-    backend.query = AsyncMock(return_value=resp)
+    backend.query = AsyncMock(
+        return_value=QueryResponse(answer="", particles=[], effective_confidences=[])
+    )
     backend.inconsistency_backrefs = AsyncMock(return_value={})
     return backend
 

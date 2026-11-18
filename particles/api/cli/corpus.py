@@ -739,6 +739,7 @@ async def _corpus_refresh(
         store_file_judgement,
         store_refusal,
     )
+    from particles.corpus.origin import count_file_entries_by_origin
     from particles.corpus.refresh_outcome import RefreshOutcome
     from particles.corpus.store import (
         CorpusEntryRow,
@@ -764,6 +765,14 @@ async def _corpus_refresh(
             targets = [(resolved, (row.uri_r or "") if row is not None else "")]
         else:
             targets = await list_refreshable_local_entries(session)
+        # Another host's entries, and ones with no host, are never listed; they
+        # are counted so the sweep says what it left alone.
+        by_origin = RefusalCounts()
+        if entry_id is None:
+            counts = await count_file_entries_by_origin(session, lazy_only=True)
+            by_origin = RefusalCounts(
+                other_host=counts.other_hosts, origin_unknown=counts.unstamped
+            )
 
         store = cwd_relative_store(session)
         if (
@@ -812,6 +821,8 @@ async def _corpus_refresh(
                 "file:// URI-R and fetch_policy=LAZY — deposit with "
                 "`--fetch-policy LAZY --mutability MUTABLE` to opt a file in."
             )
+            for line in by_origin.info_lines() + by_origin.lines():
+                terminal_echo(line)
             return
 
         changed = unchanged = missing = recorded = refused = 0
@@ -857,8 +868,75 @@ async def _corpus_refresh(
     )
     if changed:
         typer.echo("Run `particles extract --all-pending` to turn the new snapshots into beliefs.")
-    for line in RefusalCounts.tally(outside).lines():
+    for line in RefusalCounts.tally(outside).lines() + by_origin.info_lines() + by_origin.lines():
         terminal_echo(line)
+
+
+@corpus_app.command("reorigin")
+def corpus_reorigin_cmd(
+    from_host: str = typer.Option(
+        ..., "--from", help="The host id the file:// entries record now (wrongly)."
+    ),
+    to_host: str = typer.Option(
+        ...,
+        "--to",
+        help=(
+            "The host id of the machine whose files they are, as `particles hook doctor` "
+            "prints it there."
+        ),
+    ),
+    uri_prefix: Path | None = typer.Option(
+        None,
+        "--uri-prefix",
+        help="Only entries whose path lies under this absolute directory.",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Print how many entries would move and change nothing."
+    ),
+    yes: bool = typer.Option(False, "--yes", help="Move them without asking."),
+) -> None:
+    """Move file:// entries from one host id to another, for a store stamped on the wrong host.
+
+    Each file:// entry records the host whose filesystem its path names, and
+    the local refresh reads only its own host's entries. A store migrated with
+    ``particles db init`` on a machine other than the one whose files it tracks
+    carries the wrong host; this rewrites it. Runs on the engine's host, against
+    its local store, and records one event.
+    """
+    run(_corpus_reorigin(from_host, to_host, uri_prefix, dry_run=dry_run, yes=yes))
+
+
+async def _corpus_reorigin(
+    from_host: str, to_host: str, uri_prefix: Path | None, *, dry_run: bool, yes: bool
+) -> None:
+    import uuid
+
+    from particles.api.cli._remote import ensure_local
+    from particles.operations.corpus_origin import reorigin
+
+    ensure_local("corpus reorigin")
+    try:
+        old, new = str(uuid.UUID(from_host.strip())), str(uuid.UUID(to_host.strip()))
+    except ValueError as exc:
+        raise typer.BadParameter("--from and --to take host ids (UUIDs)") from exc
+    if old == new:
+        raise typer.BadParameter("--from and --to name the same host")
+    prefix: str | None = None
+    if uri_prefix is not None:
+        if not uri_prefix.is_absolute():
+            raise typer.BadParameter("--uri-prefix takes an absolute directory")
+        prefix = uri_prefix.as_uri().rstrip("/") + "/"
+    async with session_scope(write=True) as session:
+        n = await reorigin(session, from_host=old, to_host=new, uri_prefix=prefix, apply=False)
+        where = f" under {uri_prefix}" if uri_prefix is not None else ""
+        terminal_echo(f"{n} file:// entr(ies){where} record host {old}; they would record {new}.")
+        if dry_run or n == 0:
+            return
+        if not yes:
+            confirm("Move them?", default=False, abort=True)
+        moved = await reorigin(session, from_host=old, to_host=new, uri_prefix=prefix, apply=True)
+        await session.commit()
+    terminal_echo(f"Moved {moved} file:// entr(ies) to host {new}.")
 
 
 @corpus_app.command("fsck")

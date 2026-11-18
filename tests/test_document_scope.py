@@ -77,16 +77,21 @@ class TestBuildExtractPrompt:
         assert "DOCUMENT_META" in prompt
         assert '"scope"' in prompt
         # F3: the source is now fenced in the user turn, so the trusted prompt
-        # ends with the JSON schema and no longer carries a "SOURCE TEXT:" label.
+        # ends with the JSON schema and the REFERENCE DATE line (0.21.0) and no
+        # longer carries a "SOURCE TEXT:" label.
         assert "SOURCE TEXT:" not in prompt
-        assert prompt.rstrip().endswith("}")
+        assert prompt.rstrip().endswith(
+            "}\n\nREFERENCE DATE: the source was published/captured on {reference_date}."
+        )
 
     def test_scope_clause_absent_when_disabled(self) -> None:
         prompt = _build_extract_prompt(scope_enabled=False, modality_enabled=False)
         assert "DOCUMENT_META" not in prompt
         assert '"scope"' not in prompt
         assert "SOURCE TEXT:" not in prompt
-        assert prompt.rstrip().endswith("}")
+        assert prompt.rstrip().endswith(
+            "}\n\nREFERENCE DATE: the source was published/captured on {reference_date}."
+        )
 
 
 # --------------------------------------------------------------------------

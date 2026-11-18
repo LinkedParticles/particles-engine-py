@@ -11,18 +11,21 @@ answers the one store question the fold asks: for each pointer
 target the client names, whether the region just rendered shows a belief that
 file currently states. The local cycle calls it inside a session it opens, and
 the engine's ``POST /memory/projection/{store}`` route calls it for a thin
-client, so the two paths render the same bytes.
+client, so the two paths render the same bytes. A thin client's manifest
+blocks arrive as text the client read: the engine looks each one up
+by the block's own string and never opens a path.
 """
 
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from particles.operations.projection.manifest import DocManifest, MechanicalBlock
+from particles.operations.projection.paths import read_block_text
 from particles.operations.projection.project import project_splice_body
 from particles.render.markdown import parse_memory_bullet
 
@@ -33,12 +36,23 @@ if TYPE_CHECKING:
 RegionVerdict = Literal["not-extracted", "not-in-region"]
 
 
+#: The most UTF-8 bytes of block text one remote render may carry (
+#: §4). A protocol bound, so a module constant both ends read rather than a
+#: config field: a knob on the client would disagree with its engine. Four
+#: times the default region budget and over twice the harness's 25 KB
+#: session-start load window, so no block a ``MEMORY.md`` can usefully hold is
+#: refused. The local render has no such cap.
+MAX_REMOTE_BLOCK_BYTES = 64 * 1024
+
+
 class ClientFileSectionError(ValueError):
     """A manifest section includes a file the renderer cannot read.
 
     A mechanical block names a path resolved against the manifest's own
-    directory, which is on the client. The engine never reads it, so a remote
-    render of such a manifest is refused.
+    directory, which is on the client. The engine never reads it: the client
+    sends each block's text with the render, and this is raised
+    when it cannot or did not. The message names a block's position in the
+    manifest and the reason, never the block's path or its text.
     """
 
 
@@ -75,6 +89,18 @@ def observer_trailer(observer_project: str, engaged: bool) -> str:
     )
 
 
+def reference_trailer(withheld: int) -> str:
+    """The region's line saying how many reference beliefs it left out.
+
+    A line of its own, before the observer trailer, so the freshness check's
+    reading of the observer line is unchanged.
+    """
+    return (
+        f"<!-- {withheld} reference belief(s) answer questions but are not listed "
+        "(`particles query` finds them) -->"
+    )
+
+
 def region_short_ids(body: str) -> set[str]:
     """The short ids the region's memory bullets cite."""
     ids: set[str] = set()
@@ -88,6 +114,71 @@ def region_short_ids(body: str) -> set[str]:
 def has_client_file_section(manifest: DocManifest) -> bool:
     """Whether any section of ``manifest`` includes a file (a mechanical block)."""
     return any(isinstance(section, MechanicalBlock) for section in manifest.sections)
+
+
+def _block_positions(manifest: DocManifest) -> list[tuple[int, str]]:
+    """``(1-based section position, block string)`` for each mechanical block."""
+    return [
+        (index, section.block)
+        for index, section in enumerate(manifest.sections, start=1)
+        if isinstance(section, MechanicalBlock)
+    ]
+
+
+def block_texts_size(block_texts: Mapping[str, str]) -> int:
+    """The UTF-8 bytes the texts take on the wire, the quantity the cap bounds."""
+    return sum(len(text.encode("utf-8")) for text in block_texts.values())
+
+
+def read_block_texts(manifest: DocManifest, base_dir: Path) -> dict[str, str]:
+    """Read each mechanical block's file on the client, for a remote render.
+
+    Each file is read with the same call, and so the same containment rules,
+    the local render uses (``paths.read_block_text`` with no outside paths): a
+    relative path, no ``..`` or ``~``, inside the containment root, no
+    symlinked final component, a regular file. A refused or missing file
+    raises what the local render would raise. A total over
+    :data:`MAX_REMOTE_BLOCK_BYTES` raises :class:`ClientFileSectionError`.
+    """
+    texts: dict[str, str] = {}
+    for _position, block in _block_positions(manifest):
+        if block not in texts:
+            texts[block] = read_block_text(block, base_dir=base_dir, allow_outside=False)
+    total = block_texts_size(texts)
+    if total > MAX_REMOTE_BLOCK_BYTES:
+        raise ClientFileSectionError(
+            f"the memory manifest's file sections total {total} bytes, over the "
+            f"{MAX_REMOTE_BLOCK_BYTES}-byte limit for a remote render"
+        )
+    return texts
+
+
+def check_block_texts(manifest: DocManifest, block_texts: Mapping[str, str]) -> None:
+    """Refuse texts that do not match the manifest's blocks exactly.
+
+    Every block needs a text, every text needs a block, and the total stays
+    under :data:`MAX_REMOTE_BLOCK_BYTES`. A key is compared, never opened. The
+    message names positions and counts only, never a key or a text.
+    """
+    positions = _block_positions(manifest)
+    named = {block for _position, block in positions}
+    missing = [position for position, block in positions if block not in block_texts]
+    if missing:
+        listed = ", ".join(str(p) for p in missing)
+        raise ClientFileSectionError(
+            f"the request carries no text for the file section at manifest position {listed} "
+        )
+    extra = sum(1 for key in block_texts if key not in named)
+    if extra:
+        raise ClientFileSectionError(
+            f"the request carries text for {extra} file section(s) the manifest does not name"
+        )
+    total = block_texts_size(block_texts)
+    if total > MAX_REMOTE_BLOCK_BYTES:
+        raise ClientFileSectionError(
+            f"the request's file sections total {total} bytes, over the "
+            f"{MAX_REMOTE_BLOCK_BYTES}-byte limit"
+        )
 
 
 async def fold_verdicts(
@@ -126,22 +217,28 @@ async def render_memory_region(
     observer_project: str | None,
     exclude_source_tags: Collection[str],
     fold_targets: Collection[str] = (),
+    block_texts: Mapping[str, str] | None = None,
 ) -> MemoryRegion:
     """Render the memory-index region body and answer its fold verdicts.
 
     Deterministic and budget-enforced: no synthesis, so no model call.
     ``base_dir`` is the manifest's directory, against which a mechanical
     block's file is read; ``None`` means the renderer cannot see the client's
-    files, and a manifest with a block raises :class:`ClientFileSectionError`.
+    files: each block's text then comes from ``block_texts``, which the client
+    read and sent, and a manifest whose blocks the texts do not
+    match exactly raises :class:`ClientFileSectionError`. With ``base_dir``
+    given, ``block_texts`` is ignored and blocks are read from disk as before.
     ``fold_targets`` are read after the render, against the body just rendered,
     which is the order the local cycle has always used.
     """
     from particles.operations.query.observer_scope import lens_may_engage
 
-    if base_dir is None and has_client_file_section(manifest):
-        raise ClientFileSectionError(
-            "the memory manifest includes a file section, which a remote engine cannot read"
-        )
+    withheld: set[str] = set()
+    texts: Mapping[str, str] | None = None
+    if base_dir is None:
+        texts = block_texts or {}
+        if has_client_file_section(manifest) or texts:
+            check_block_texts(manifest, texts)
     result = await project_splice_body(
         session,
         manifest,
@@ -149,8 +246,12 @@ async def render_memory_region(
         synthesize=False,
         observer_project=observer_project,
         exclude_source_tags=exclude_source_tags,
+        reference_withheld_out=withheld,
+        block_texts=texts,
     )
     body = result.document
+    if withheld:
+        body = body.rstrip("\n") + "\n" + reference_trailer(len(withheld)) + "\n"
     if observer_project is not None:
         engaged = await lens_may_engage(session)
         body = body.rstrip("\n") + "\n" + observer_trailer(observer_project, engaged) + "\n"

@@ -49,7 +49,7 @@ project-bound surface the target must also be in view for that project.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -59,6 +59,7 @@ from particles.config import get_config
 from particles.core.granularity import granularity_violation
 from particles.core.observer_scope import (
     PROJECT_TAG_PREFIX,
+    REFERENCE_MARKER,
     UNATTRIBUTED_MARKER,
     BeliefScope,
     describe_scope,
@@ -68,6 +69,7 @@ from particles.core.observer_scope import (
     same_scope,
     visible,
 )
+from particles.core.provisional import ResolutionKind, resolution_args
 from particles.core.schema import (
     Confidence,
     Particle,
@@ -87,6 +89,7 @@ from particles.core.schema import (
 from particles.core.scoring.confidence import CalibrationSource
 from particles.core.status import Status, StatusReason
 from particles.corpus.deposit import deposit_text as _deposit_text_seam
+from particles.corpus.deposit_role import agent_deposit
 from particles.corpus.harvest_marks import reserved_marks, reserved_marks_refusal
 from particles.db import write_transaction
 from particles.extraction.registry import infer_domain
@@ -206,15 +209,17 @@ async def _resolve_provenance(
     whose successor carries its predecessor's attribution.
     """
     if source_excerpt is not None:
-        return await _deposit_text_seam(
-            session,
-            source_excerpt,
-            deposited_by=identity,
-            source_type=SourceType.CONVERSATION,
-            tags=excerpt_tags if excerpt_tags is not None else _scope_tags(None, project_key),
-            author_id=identity,
-            own_entries_only=not operator,
-        )
+        # An agent's excerpt entry is an agent's deposit.
+        with nullcontext() if operator else agent_deposit():
+            return await _deposit_text_seam(
+                session,
+                source_excerpt,
+                deposited_by=identity,
+                source_type=SourceType.CONVERSATION,
+                tags=excerpt_tags if excerpt_tags is not None else _scope_tags(None, project_key),
+                author_id=identity,
+                own_entries_only=not operator,
+            )
     if corpus_entry_id is not None:
         entry = await _cited_entry(
             session, identity, corpus_entry_id, project_key=project_key, operator=operator
@@ -452,7 +457,11 @@ async def _gather_belief(
     known = list(subject_ids or [])
     if names:
         subjects = await prefetch_subjects(
-            session, list(names), particle_content=content, source_type=SourceType.CONVERSATION
+            session,
+            list(names),
+            particle_content=content,
+            source_type=SourceType.CONVERSATION,
+            **resolution_args(identity, operator=operator),
         )
         known = list(dict.fromkeys([*known, *subjects.known_ids]))
 
@@ -557,6 +566,7 @@ async def _apply_belief(
             particle_content=gathered.draft.content,
             source_type=SourceType.CONVERSATION,
             answers=gathered.subjects.answers if gathered.subjects is not None else None,
+            **resolution_args(identity, operator=operator),
         )
         ids = named if ids is None else list(dict.fromkeys([*ids, *named]))
 
@@ -991,7 +1001,17 @@ class _SuccessorAttribution:
 
     @property
     def tags(self) -> list[str]:
-        """The excerpt's tags: the predecessor's own keys, else the marker, else none."""
+        """The excerpt's tags: the predecessor's own keys, else the marker, else none.
+
+        A predecessor that is reference gives its successor the
+        reference marker, so a supersede never moves a document's claim into
+        every project's digest. One excerpt entry cannot be both reference
+        and keyed (a key outranks the marker and would narrow the claim on
+        every question surface), so a reference predecessor's own keys are
+        not carried; ``particles memory widen`` admits the successor.
+        """
+        if self.own.reference:
+            return [REFERENCE_MARKER]
         if self.own.is_global:
             return []
         if self.own.keys:
@@ -1002,6 +1022,8 @@ class _SuccessorAttribution:
         if not excerpt:
             # The operator named the successor's source; its scope is that entry's.
             own = "the cited entry's"
+        elif self.own.reference:
+            own = "reference (marked scope:reference)"
         elif self.own.is_global:
             own = "global"
         elif self.own.keys:
@@ -1024,7 +1046,10 @@ class _SuccessorAttribution:
 
 async def _successor_attribution(session: Any, predecessor: Particle) -> _SuccessorAttribution:
     own, widened = await own_attribution(session, predecessor)
-    return _SuccessorAttribution(own=own, widen=widened and not own.is_global)
+    # A widening is carried unless the successor is global by its own sources;
+    # a reference successor still needs it to reach the digests.
+    standing_everywhere = own.is_global and not own.reference
+    return _SuccessorAttribution(own=own, widen=widened and not standing_everywhere)
 
 
 async def assign_subject_belief(
@@ -1082,7 +1107,9 @@ async def assign_subject_belief(
             raise ValueError("subject_name must be non-empty.")
         name = subject_name.strip()
         answers = (
-            await prefetch_subjects(session, [name], particle_content=target.content)
+            await prefetch_subjects(
+                session, [name], particle_content=target.content, kind=ResolutionKind.OPERATOR
+            )
         ).answers
 
     async with _apply_phase(session, store, commit_under_lock):
@@ -1101,6 +1128,7 @@ async def assign_subject_belief(
                 asserted_by=event_actor,
                 particle_content=target.content,
                 answers=answers,
+                kind=ResolutionKind.OPERATOR,
             )
             linked = subject.id
             names = [name]
@@ -1201,15 +1229,16 @@ async def deposit_conversation_text(
     refusal = reserved_marks_refusal(reserved_marks(tags, identity))
     if refusal is not None:
         raise ValueError(refusal[0].upper() + refusal[1:])
-    return await _deposit_text_seam(
-        session,
-        text,
-        deposited_by=identity,
-        source_type=SourceType.CONVERSATION,
-        tags=_scope_tags(tags, project_key),
-        author_id=identity,
-        own_entries_only=True,
-    )
+    with agent_deposit():  # an agent principal's deposit
+        return await _deposit_text_seam(
+            session,
+            text,
+            deposited_by=identity,
+            source_type=SourceType.CONVERSATION,
+            tags=_scope_tags(tags, project_key),
+            author_id=identity,
+            own_entries_only=True,
+        )
 
 
 async def require_project_binding(session: Any, project_key: str | None) -> None:

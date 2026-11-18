@@ -1,0 +1,19 @@
+{
+  "name": "particles-curation-core",
+  "version": "0.1.0",
+  "description": "The shared curation core: what each card shows and offers, its flows, calls and wording, as plain data every client renders.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "gen-api": "openapi-typescript ../../artifacts/openapi.json -o src/openapi.d.ts --default-non-nullable false",
+    "typecheck": "npm run gen-api && tsc --noEmit",
+    "fixtures": "node scripts/fixtures.mts",
+    "test": "node --test test/*.test.mts"
+  },
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@types/node": "20.19.43",
+    "openapi-typescript": "7.13.0",
+    "typescript": "5.9.3"
+  }
+}

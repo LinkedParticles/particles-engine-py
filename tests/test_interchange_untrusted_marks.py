@@ -580,13 +580,17 @@ async def test_import_reconciles_under_the_target_stores_own_trust_regime(
 
 
 # ---------------------------------------------------------------------------
-# AF3 / AF4: a status the import kept is the bundle's, not a judgment here
+# import admits ACTIVE units only; AF3 / AF4 for rows it already holds
 # ---------------------------------------------------------------------------
 
 
-def _kept_unit(content: str, status: str, reason: str) -> dict[str, Any]:
+def _kept_unit(content: str, status: str, reason: str | None) -> dict[str, Any]:
     unit = _unit(content, "bundle-entry", "bundle-snapshot")
-    unit["status"], unit["statusReason"] = status, reason
+    unit["status"] = status
+    if reason is None:
+        unit.pop("statusReason", None)
+    else:
+        unit["statusReason"] = reason
     return unit
 
 
@@ -608,31 +612,132 @@ async def _open_records(session: Any) -> list[Particle]:
     return list(await get_inconsistency_particles(session))
 
 
+_NON_ACTIVE = [
+    ("RETRACTED", "EXPLICIT_RETRACTION"),
+    ("SUPERSEDED", "EXPLICIT_SUPERSESSION"),
+    ("SUPERSEDED", "LOWER_TRUST_SOURCE"),
+    ("INCONSISTENCY", None),
+    ("PROVENANCE_STALE", "CONFLICT_PENDING"),
+]
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("status", "reason"),
-    [
-        ("RETRACTED", "EXPLICIT_RETRACTION"),
-        ("SUPERSEDED", "EXPLICIT_SUPERSESSION"),
-        ("PROVENANCE_STALE", "CONFLICT_PENDING"),
-    ],
-)
-async def test_a_kept_non_active_unit_takes_no_part_in_reconciling_a_later_unit(
-    db_session: Any, stub_encoder: None, status: str, reason: str
+@pytest.mark.parametrize(("status", "reason"), _NON_ACTIVE)
+async def test_a_non_active_unit_is_set_aside_and_counted(
+    db_session: Any, stub_encoder: None, status: str, reason: str | None
 ) -> None:
-    """A unit the import keeps non-ACTIVE neither holds nor absorbs the bundle's later
-    unit of the same claim: that unit lands ACTIVE, and no record names the kept one
-    (security review 2026-10-31-3, AF3, AF4)."""
+    """A unit whose status is not ACTIVE is set aside before its subjects resolve: no
+    particle, no subject, and the summary counts it under its status (D1)."""
+    from particles.interchange.store import import_units
+    from particles.store.subject_store import find_by_name
+
+    subject = Subject(canonical_name="Set_Aside_Widget", asserted_by="bundle-author")
+    particle = _particle("The set-aside widget is blue.", "bundle-entry", "bundle-snapshot")
+    unit = to_unit(particle.model_copy(update={"subject_ids": [subject.id]}), {subject.id: subject})
+    unit["status"] = status
+    if reason is not None:
+        unit["statusReason"] = reason
+    summary = await import_units(db_session, [unit])
+    await db_session.commit()
+    assert summary.skipped_status == {status: 1}
+    assert (summary.imported, summary.dropped, summary.subjects_created) == (0, 0, 0)
+    assert await _statuses(db_session, "The set-aside widget is blue.") == []
+    assert await find_by_name(db_session, "Set_Aside_Widget") is None
+    assert await _open_records(db_session) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("status", "reason"), _NON_ACTIVE)
+async def test_a_later_unit_lands_as_if_the_set_aside_unit_were_absent(
+    db_session: Any, stub_encoder: None, status: str, reason: str | None
+) -> None:
+    """A set-aside unit neither holds nor absorbs the bundle's later unit of the same
+    claim: that unit lands ACTIVE, alone, and no record names the set-aside one
+    (D1; security review 2026-10-31-3, AF3, AF4)."""
     from particles.core.status import Status
     from particles.interchange.store import import_units
 
     content = "The kept widget weighs two kilograms."
-    await import_units(
+    summary = await import_units(
         db_session, [_kept_unit(content, status, reason), _unit(content, "e2", "s2")]
     )
     await db_session.commit()
-    assert (Status.ACTIVE, None) in await _statuses(db_session, content)
+    assert summary.imported == 1 and summary.skipped_status == {status: 1}
+    assert await _statuses(db_session, content) == [(Status.ACTIVE, None)]
     assert await _open_records(db_session) == []
+
+
+@pytest.mark.asyncio
+async def test_an_admitted_units_status_reason_is_cleared(
+    db_session: Any, stub_encoder: None
+) -> None:
+    """An ACTIVE unit carrying a reason from its source store's history lands with none,
+    counted in ``reason_cleared``; its modality claim is untouched (D2)."""
+    from particles.core.status import Status
+    from particles.interchange.store import import_units
+
+    content = "The cleared widget weighs three kilograms."
+    plain = "The plain widget weighs one kilogram."
+    summary = await import_units(
+        db_session,
+        [_kept_unit(content, "ACTIVE", "CONFLICT_RESOLVED"), _unit(plain, "e2", "s2")],
+    )
+    await db_session.commit()
+    assert (summary.imported, summary.reason_cleared, summary.skipped_status) == (2, 1, {})
+    assert await _statuses(db_session, content) == [(Status.ACTIVE, None)]
+    imported = await _active(db_session, content)
+    assert imported.assertion_modality is AssertionModality.FALSIFIABLE
+
+
+@pytest.mark.asyncio
+async def test_a_dropped_unit_is_not_counted_as_a_cleared_reason(
+    db_session: Any, stub_encoder: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``reason_cleared`` counts particles that landed: a unit with a reason that the
+    ladder drops is counted as dropped and nowhere else (D2)."""
+    from particles.ingest import pipeline
+    from particles.interchange.store import import_units
+
+    async def _drop(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(pipeline, "apply_reconcile", _drop)
+    unit = _kept_unit("The dropped widget weighs two kilograms.", "ACTIVE", "CONFLICT_RESOLVED")
+    summary = await import_units(db_session, [unit])
+    await db_session.commit()
+    assert (summary.imported, summary.dropped, summary.reason_cleared) == (0, 1, 0)
+
+
+@pytest.mark.asyncio
+async def test_restore_keeps_a_units_lifecycle_state(db_session: Any, stub_encoder: None) -> None:
+    """Restore rebuilds the bundle's own store, so a non-ACTIVE unit keeps its status and
+    reason, untrusted or not (D4)."""
+    from particles.core.status import Status, StatusReason
+    from particles.interchange.store import restore_store_bundle
+
+    content = "The restored widget was retracted."
+    unit = _kept_unit(content, "RETRACTED", "EXPLICIT_RETRACTION")
+    await restore_store_bundle(db_session, {"particles.jsonl": json.dumps(unit) + "\n"})
+    await db_session.commit()
+    assert await _statuses(db_session, content) == [
+        (Status.RETRACTED, StatusReason.EXPLICIT_RETRACTION)
+    ]
+
+
+async def _pre_change_import_row(session: Any, content: str, status: str, reason: str) -> None:
+    """A row as an import wrote it before: the import's asserter, the bundle's
+    status, no ``retired_at``."""
+    from particles.core.status import Status, StatusReason
+    from particles.interchange.store import IMPORT_ASSERTER
+    from particles.store.particle_store import insert_particle
+
+    row = _particle(content, "bundle-entry", "bundle-snapshot", asserted_by=IMPORT_ASSERTER)
+    await insert_particle(
+        session,
+        row.model_copy(update={"status": Status(status), "status_reason": StatusReason(reason)}),
+        _encode(content)[0].tolist(),
+    )
+    await session.commit()
 
 
 @pytest.mark.asyncio
@@ -640,26 +745,50 @@ async def test_a_kept_non_active_unit_takes_no_part_in_reconciling_a_later_unit(
     ("status", "reason"),
     [("RETRACTED", "EXPLICIT_RETRACTION"), ("PROVENANCE_STALE", "CONFLICT_PENDING")],
 )
-async def test_a_status_a_bundle_chose_does_not_hold_a_later_writers_claim(
+async def test_a_status_an_earlier_import_kept_does_not_hold_a_later_writers_claim(
     db_session: Any, stub_encoder: None, status: str, reason: str
 ) -> None:
-    """A unit a bundle delivers retired by judgment, or as a pending hold, is not read
-    as a judgment made in this store: a later writer's assertion of the same claim
-    lands ACTIVE, not held behind it (security review 2026-10-31-3, AF3, AF4)."""
+    """A row an import kept non-ACTIVE before is not read as a judgment made in
+    this store: a later writer's assertion of the same claim lands ACTIVE, not held
+    behind it (D5; security review 2026-10-31-3, AF3, AF4)."""
     from particles.core.status import Status
     from particles.db import write_transaction
     from particles.ingest.pipeline import reconcile_and_insert
-    from particles.interchange.store import import_units
 
     content = "The planted widget weighs four kilograms."
-    await import_units(db_session, [_kept_unit(content, status, reason)])
-    await db_session.commit()
+    await _pre_change_import_row(db_session, content, status, reason)
     async with write_transaction(db_session):
         await reconcile_and_insert(
             db_session, _particle(content, "agent-entry", "agent-snapshot", asserted_by="mcp:agent")
         )
     assert (Status.ACTIVE, None) in await _statuses(db_session, content)
     assert await _open_records(db_session) == []
+
+
+def test_cli_import_names_the_units_it_set_aside(
+    cli_db: Any, stub_encoder: None, tmp_path: Any
+) -> None:
+    """`interchange import` says how many units it set aside, per status, and how many
+    reasons it cleared, and exits 0 (D1, D2)."""
+    from typer.testing import CliRunner
+
+    from particles.api.cli import app
+
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    units = [
+        _kept_unit("The retracted gadget is red.", "RETRACTED", "EXPLICIT_RETRACTION"),
+        _kept_unit("The held gadget is red.", "PROVENANCE_STALE", "CONFLICT_PENDING"),
+        _kept_unit("The active gadget is red.", "ACTIVE", "CONFLICT_RESOLVED"),
+    ]
+    (bundle / "particles.jsonl").write_text(
+        "".join(json.dumps(u) + "\n" for u in units), encoding="utf-8"
+    )
+    result = CliRunner().invoke(app, ["interchange", "import", str(bundle)])
+    assert result.exit_code == 0, result.output
+    assert "Set aside 2 unit(s) that were not ACTIVE" in result.output
+    assert "PROVENANCE_STALE (1), RETRACTED (1)" in result.output
+    assert "1 particle(s) carried a status reason" in result.output
 
 
 @pytest.mark.asyncio

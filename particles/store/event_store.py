@@ -66,6 +66,16 @@ class OperatorEventType(StrEnum):
     # entry; payload ``uri_r`` (the URL released) and ``released_to`` (the
     # depositor that now holds it). The entry keeps its snapshots and tags.
     CORPUS_ENTRY_URI_RELEASED = "CORPUS_ENTRY_URI_RELEASED"
+    # `particles db init` stamped the store's unstamped file://
+    # entries with the host id of the host it ran on, once per store (actor
+    # ``cli:db-init``). No record ref; payload ``host_id`` and the counts by
+    # class (``rule_files``, ``memory_files``, ``other``). Its presence is what
+    # stops a later `db init` stamping again.
+    CORPUS_ORIGIN_STAMPED = "CORPUS_ORIGIN_STAMPED"
+    # `particles corpus reorigin` moved file:// entries from one
+    # host id to another (actor ``cli:corpus-reorigin``). No record ref; payload
+    # ``from``, ``to``, ``uri_prefix`` (or null) and ``entries``.
+    CORPUS_ORIGIN_REASSIGNED = "CORPUS_ORIGIN_REASSIGNED"
     # `rules forget` removed a recorded rule-source root (actor
     # ``cli:rules-forget``). No record ref: a root is a path, not a record. The
     # payload carries the path, the verb that recorded it and when, and the
@@ -94,6 +104,15 @@ class OperatorEventType(StrEnum):
     # records each link's recovery tier and gate class. No particle is
     # superseded, so this event is the only trace of the change.
     SUBJECTS_RELINKED = "SUBJECTS_RELINKED"
+    # a provisional Subject an agent principal minted widened to
+    # every agent principal by a second principal's use (``principal``,
+    # ``shared_by``), or accepted for everyone (``via``: ``OPERATOR`` for an
+    # operator's act addressed to it by id, ``EXTERNAL_REF`` when an
+    # independent resolution reached its external reference).
+    SUBJECT_SHARED = "SUBJECT_SHARED"
+    SUBJECT_ACCEPTED = "SUBJECT_ACCEPTED"
+    # one `subjects provisional-backfill` run, with its counts.
+    SUBJECT_PROVISIONAL_BACKFILLED = "SUBJECT_PROVISIONAL_BACKFILLED"
     TRUST_CHANGED = "TRUST_CHANGED"
     REVIEW_RESOLVED = "REVIEW_RESOLVED"
     RELATION_ADDED = "RELATION_ADDED"
@@ -181,6 +200,15 @@ class OperatorEventType(StrEnum):
     # demotion cards) read rung 2.5's winner only.
     TRUST_SUPERSESSION = "TRUST_SUPERSESSION"
     DOCUMENT_SUPERSESSION = "DOCUMENT_SUPERSESSION"
+    # one event per claim `particles particle restore` returns.
+    # The retired row is never revived: a successor is minted, and this event
+    # is the restore's record. Payload: ``retired_id``, ``replacement_id``
+    # (``None`` when none is on record), ``successor_id`` and ``ruling``
+    # (``wrong``: the replacement was retracted; ``holds``: both stand, and the
+    # successor is exempt from every route that retires by replacement, read
+    # from these events). Refs: the successor, the retired claim, then the
+    # replacement.
+    RETIREMENT_RESTORED = "RETIREMENT_RESTORED"
     # one event per examination by the nightly release pass of a
     # write-time record whose stored side an autonomous pass retired, when an
     # ACTIVE claim still contradicts the held one, so nothing was written to
@@ -279,6 +307,12 @@ class OperatorEventType(StrEnum):
     # (CORPUS_ENTRY ref; payload ``withdrawn``, and ``marked`` when the entry's
     # last key went and it gained the ``scope:unattributed`` marker).
     OBSERVER_SCOPE_KEY_WITHDRAWN = "OBSERVER_SCOPE_KEY_WITHDRAWN"
+    # one entry marked ``scope:reference`` by `rescope
+    # --mark-reference` (CORPUS_ENTRY ref; payload ``source_type``, ``uri_r``),
+    # and one marker removed, by `rescope --unmark-reference` or a
+    # ``--standing`` re-deposit (payload ``by``).
+    OBSERVER_SCOPE_REFERENCE_MARKED = "OBSERVER_SCOPE_REFERENCE_MARKED"
+    OBSERVER_SCOPE_REFERENCE_UNMARKED = "OBSERVER_SCOPE_REFERENCE_UNMARKED"
 
     # the vocabulary document (the profile carrier).
     # CHANGED is the TRUST_CHANGED analogue: a version materialised, or an
@@ -319,6 +353,12 @@ class OperatorEventType(StrEnum):
     # start as the reference date and re-anchored their ``session``-basis
     # claims to it. One event per run, the counts in the payload.
     SESSION_DATES_REPAIRED = "SESSION_DATES_REPAIRED"
+    # the consolidation embed pass stored a vector on beliefs written
+    # without one (an encoder outage). One event per run that filled any: a
+    # PARTICLE ref per belief filled, which the delta scope reads, and only
+    # the count and the model in the payload (``filled``, ``model_id``); the
+    # run record carries the other counts.
+    EMBEDDING_BACKFILLED = "EMBEDDING_BACKFILLED"
     # Retired with agent-side extraction (deprecated): nothing writes
     # these any more. They stay so the events already stored remain readable;
     # never reuse the names. ASKED recorded a Stop hook's ask, CONTINUED where

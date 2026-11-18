@@ -49,7 +49,7 @@ from particles.extraction.github._shared import (
     _parse_repo_url,
     _raise_for_github_error,
 )
-from particles.secrets import get_github_api_key_optional
+from particles.http import service_credential, service_credentials_withheld
 from particles.url_safety import (
     Resolver,
     format_connect_pin,
@@ -134,8 +134,12 @@ class GitHubImporter:
     async def _fetch(self, url: str) -> tuple[str, str, _Fetched]:
         """Classify ``url`` and fetch it: ``(source_type, uri_r, fetched)``."""
         log.debug("GitHubImporter: parsing %s", url)
-        auth_present = get_github_api_key_optional() is not None
-        log.debug("GitHubImporter: GITHUB_API_KEY %s", "set" if auth_present else "not set")
+        withheld = service_credentials_withheld()
+        if withheld is not None:
+            log.debug("GitHubImporter: GITHUB_API_KEY withheld (%s)", withheld)
+        else:
+            auth_present = service_credential("github") is not None
+            log.debug("GitHubImporter: GITHUB_API_KEY %s", "set" if auth_present else "not set")
         # Pages first — it's the only pattern on a *.github.io host.
         pages = _parse_pages_url(url)
         if pages is not None:

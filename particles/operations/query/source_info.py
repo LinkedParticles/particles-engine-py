@@ -22,10 +22,26 @@ from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from particles.core.schema import Particle, ProvenanceRefType
+from particles.core.schema import HitSource, Particle, ProvenanceRefType
 
 #: (content_published_at, source_type, corpus_entry_id, uri_r, author_id)
 SourceRow = tuple[datetime | None, str, str | None, str | None, str | None]
+
+
+def hit_source(row: SourceRow | None) -> HitSource | None:
+    """The readable source of one hit, None when it has no SOURCE ref."""
+    if row is None:
+        return None
+    pub_at, source_type, _entry_id, uri_r, _author_id = row
+    return HitSource(source_type=source_type, uri=uri_r, published=pub_at)
+
+
+async def load_hit_sources(
+    session: AsyncSession, particles: list[Particle]
+) -> list[HitSource | None]:
+    """``QueryResponse.sources`` for a listing that loaded no source rows itself."""
+    rows = await load_source_rows(session, particles)
+    return [hit_source(rows.get(p.id)) for p in particles]
 
 
 async def load_source_rows(

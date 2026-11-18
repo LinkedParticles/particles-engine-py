@@ -1,6 +1,6 @@
 [
   {
-    "description": "Run a tag-aware semantic query against the particle store.\n\nArgs:\n    question: Natural-language question. Optional since: omit it\n        and set structural claim filters (or an aggregate / the predicate\n        listing) for the deterministic modes \u2014 no embedding, no LLM call.\n    tags: Subtree-expanded tag filters, repeatable.\n    subject_id: Restrict to particles about this subject.\n    min_confidence: Minimum confidence value (0.0\u20131.0).\n    top_k: Number of particles to retrieve (1\u2013200).\n    audience: \"GENERAL\" | \"EXPERT\" | \"REGULATORY\".\n    summary: When ``True``, each hit in ``particles`` is reduced to\n        ``{id, content, confidence, effective_confidence,\n        subject_ids}`` \u2014 provenance, tags, properties, and\n        embeddings are dropped. The NL ``answer`` string and\n        coverage gaps are unchanged. Use this when the agent only\n        needs to surface the answer and pick particles to\n        ``particle_show`` later. Default ``False`` preserves the\n        full ``QueryResponse`` shape for backward compatibility.\n    as_of: ISO-8601 past instant (a bare date means start of that\n        day, UTC): answer what the store believed at T.\n        Retired hits carry an ``as_of_notes`` entry (current status,\n        retirement instant + basis, and the superseding belief);\n        ``as_of_excluded_undatable`` discloses retirements the store\n        cannot date. A future instant is rejected.\n    during_start: With ``during_end``, a window of world time (ISO-8601\n        dates, inclusive; either may be omitted for an open end): answer\n        about what began in, or was in force during, that period.\n        The window prefilters the candidate set before ranking;\n        with no question it returns the claims in date order, each with a\n        ``window_hits`` reading (``BEGAN``, ``IN_FORCE``, ``HELD_AT``,\n        ``WITHIN``). A retired claim is admitted for the period it held,\n        marked with its retirement and its close. Reads ``valid_from``;\n        ``window_coverage`` discloses the undated and unkinded claims the\n        window could not judge. Resolve the anchor first (\"when did the\n        user move?\"), then ask with dates: the anchor step is the caller's.\n    during_end: The inclusive end date of the window; see ``during_start``.\n    on: The point form: what held or happened on this date (ISO-8601).\n        Alternative to ``during_start`` / ``during_end``.\n    predicate: Structural filter \u2014 claims whose predicate term\n        equals this string (case-insensitive, exact: a CURIE and its\n        expanded IRI are different strings; discover terms with\n        ``list_predicates``). With a question it prefilters the semantic\n        candidate set; without one it selects the deterministic listing.\n    object_eq: Claims whose object equals this value (typed comparison\n        when both sides normalize \u2014 numbers and ISO dates \u2014 else\n        case-insensitive text).\n    object_gt: Claims whose object is greater than this number or ISO\n        date; claims whose object would not normalize are excluded and\n        disclosed in ``claim_coverage.not_normalizable_excluded``.\n    object_lt: Claims whose object is less than this number or ISO date\n        (same normalization and disclosure as ``object_gt``).\n    object_contains: Claims whose object contains this substring\n        (case-insensitive; every term kind).\n    count: Deterministic aggregate \u2014 the number of matching claims with\n        their effective-confidence distribution. Rejects a simultaneous\n        question.\n    group_by: Deterministic aggregate \u2014 bucket matching claims by\n        \"subject\", \"predicate\", or \"object\" with per-bucket counts and\n        confidence distribution. Rejects a simultaneous question.\n    min_effective_confidence: Explicit confidence floor for the aggregate\n        modes; excluded rows are disclosed. There is no default floor.\n    list_predicates: List the distinct predicate terms with kind and\n        claim count (``predicate_vocabulary`` in the response) \u2014 the\n        discovery surface for the exact-string predicate filter.\n    all_projects: On a server bound to one project, read the whole\n        store instead of that project's view. The result says so. No effect\n        on an unbound server.\n    grounded: Compose a grounded answer: every sentence ends\n        with the ids of the retrieved particles it rests on (``[p-1a2b3c4d]``,\n        the form ``particle_show`` accepts), or with ``[inference]`` (the\n        model's own inference over cited claims) or ``[background]`` (from\n        nothing in the store). Cited ids are checked against the retrieved\n        set; a sentence with no valid citation and no label is\n        ``[unattributed]``. Nothing is dropped and nothing is stored.\n        ``answer_attribution`` carries the per-sentence labels and full\n        cited ids. Omit to use the server's ``query.grounded_answers``.\n\nReturns:\n    The full ``QueryResponse`` as JSON \u2014 answer string plus the\n    ranked particles, effective confidences, coverage gaps, and\n    any truncation warning. A structural call returns rows\n    or counts, not generated prose: the deterministic listing fills\n    ``particles`` ordered by effective confidence, the aggregates fill\n    ``structural_aggregate``, the vocabulary listing fills\n    ``predicate_vocabulary``, and every structural result carries\n    ``claim_coverage`` (the annotated-fraction footer plus the\n    non-normalizable exclusion disclosure). Each particle's ``contested`` key is\n    the id of an open INCONSISTENCY referencing it,\n    else null; the composed contested badge rides\n    beside it \u2014 the response-level ``contested`` list carries one\n    badge (fired bases + drill-downs) or null per ranked particle,\n    and with ``summary=True`` each slim hit carries\n    ``contested_bases`` (the fired basis labels, else null) beside\n    its ``contested`` id. When ``summary=True``, each particle\n    entry is a small dict instead of the full Pydantic model.",
+    "description": "Run a tag-aware semantic query against the particle store.\n\nArgs:\n    question: Natural-language question. Optional since: omit it\n        and set structural claim filters (or an aggregate / the predicate\n        listing) for the deterministic modes \u2014 no embedding, no LLM call.\n    tags: Subtree-expanded tag filters, repeatable.\n    subject_id: Restrict to particles about this subject.\n    min_confidence: Minimum confidence value (0.0\u20131.0).\n    top_k: Number of particles to retrieve, which the answer reads (1 to\n        200). Default: the server's ``query.default_top_k`` (40).\n    audience: \"GENERAL\" | \"EXPERT\" | \"REGULATORY\".\n    summary: Deprecated alias of ``detail``: ``True`` means\n        ``\"summary\"`` and ``False`` means ``\"full\"``. ``detail`` wins\n        when both are given.\n    detail: The shape of the result. ``\"compact\"`` (the\n        server default, ``mcp.query_detail``) lists slim hits and drops\n        every null, empty, zero or false key: a key that is absent is\n        unset. ``\"summary\"`` is the older slim shape. ``\"full\"`` returns\n        the whole ``QueryResponse`` with full particle records.\n    hits: The most hits the result lists (0 or more). Default: under\n        ``\"compact\"`` the server's ``mcp.query_hits`` (10); under\n        ``\"summary\"`` and ``\"full\"`` every retrieved hit. The answer still\n        reads all ``top_k`` hits; ``hits=0`` returns the answer and its\n        disclosures only.\n    as_of: ISO-8601 past instant (a bare date means start of that\n        day, UTC): answer what the store believed at T.\n        Retired hits carry an ``as_of_notes`` entry (current status,\n        retirement instant + basis, and the superseding belief);\n        ``as_of_excluded_undatable`` discloses retirements the store\n        cannot date. A future instant is rejected.\n    during_start: With ``during_end``, a window of world time (ISO-8601\n        dates, inclusive; either may be omitted for an open end): answer\n        about what began in, or was in force during, that period.\n        The window prefilters the candidate set before ranking;\n        with no question it returns the claims in date order, each with a\n        ``window_hits`` reading (``BEGAN``, ``IN_FORCE``, ``HELD_AT``,\n        ``WITHIN``). A retired claim is admitted for the period it held,\n        marked with its retirement and its close. Reads ``valid_from``;\n        ``window_coverage`` discloses the undated and unkinded claims the\n        window could not judge. Resolve the anchor first (\"when did the\n        user move?\"), then ask with dates: the anchor step is the caller's.\n    during_end: The inclusive end date of the window; see ``during_start``.\n    on: The point form: what held or happened on this date (ISO-8601).\n        Alternative to ``during_start`` / ``during_end``.\n    predicate: Structural filter \u2014 claims whose predicate term\n        equals this string (case-insensitive, exact: a CURIE and its\n        expanded IRI are different strings; discover terms with\n        ``list_predicates``). With a question it prefilters the semantic\n        candidate set; without one it selects the deterministic listing.\n    object_eq: Claims whose object equals this value (typed comparison\n        when both sides normalize \u2014 numbers and ISO dates \u2014 else\n        case-insensitive text).\n    object_gt: Claims whose object is greater than this number or ISO\n        date; claims whose object would not normalize are excluded and\n        disclosed in ``claim_coverage.not_normalizable_excluded``.\n    object_lt: Claims whose object is less than this number or ISO date\n        (same normalization and disclosure as ``object_gt``).\n    object_contains: Claims whose object contains this substring\n        (case-insensitive; every term kind).\n    count: Deterministic aggregate \u2014 the number of matching claims with\n        their effective-confidence distribution. Rejects a simultaneous\n        question.\n    group_by: Deterministic aggregate \u2014 bucket matching claims by\n        \"subject\", \"predicate\", or \"object\" with per-bucket counts and\n        confidence distribution. Rejects a simultaneous question.\n    min_effective_confidence: Explicit confidence floor for the aggregate\n        modes; excluded rows are disclosed. There is no default floor.\n    list_predicates: List the distinct predicate terms with kind and\n        claim count (``predicate_vocabulary`` in the response) \u2014 the\n        discovery surface for the exact-string predicate filter.\n    all_projects: On a server bound to one project, read the whole\n        store instead of that project's view. The result says so. No effect\n        on an unbound server.\n    grounded: Compose a grounded answer: every sentence ends\n        with the ids of the retrieved particles it rests on (``[p-1a2b3c4d]``,\n        the form ``particle_show`` accepts), or with ``[inference]`` (the\n        model's own inference over cited claims) or ``[background]`` (from\n        nothing in the store). Cited ids are checked against the retrieved\n        set; a sentence with no valid citation and no label is\n        ``[unattributed]``. Nothing is dropped and nothing is stored.\n        ``answer_attribution`` carries the per-sentence labels and full\n        cited ids. Omit to use the server's ``query.grounded_answers``.\n    include_refused_candidates: When the answer refuses (the store holds\n        nothing relevant), the nearest beliefs are withheld by default:\n        they are likely unrelated, and listing them costs the\n        caller's context. ``withheld_candidates`` then says how many were\n        withheld. Set ``True`` to receive them anyway, still marked by\n        ``answer_refused``. No effect when the answer did not refuse.\n\nReturns:\n    By default (``detail=\"compact\"``) the answer, its disclosures, and the\n    hits the answer cites, in the order it first cites them: the facts the\n    answer rests on. The answer is composed grounded for this, and its\n    citation tags are removed from the text. When the answer cites nothing\n    (all inference, a failed answer, ``grounded=False``) the top ``hits``\n    ranked hits are listed instead. Each compact hit carries ``id`` (for\n    ``particle_show``), ``content``, ``effective_confidence``, ``source``\n    (the source type, URI and publication date of its first source, with\n    ``(+N more)`` when it has several), ``valid_from``, and, when the claim\n    is contested, ``contested`` (the open conflict's id, which\n    ``particle_show`` opens) and ``contested_bases``. A listing without a\n    question adds ``predicate`` and ``object``. ``hits_omitted`` counts the\n    retrieved hits the answer read that the list leaves out; ask with\n    ``detail=\"full\"`` and a larger ``hits`` to see them.\n    ``sources_unavailable`` means the engine sent no source lines.\n    ``coverage_gaps_count`` counts the corpus entries anywhere in the store\n    still PENDING or FAILED extraction (not scoped to the question); their\n    ids are under ``coverage_gaps`` with ``detail=\"full\"``. When\n    the answer refuses, nothing is listed and ``withheld_candidates`` says\n    how many were withheld.\n\n    With ``detail=\"full\"``: the full ``QueryResponse`` as JSON, answer\n    string plus the ranked particles, effective\n    confidences, coverage gaps, and any truncation warning. A structural\n    call returns rows\n    or counts, not generated prose: the deterministic listing fills\n    ``particles`` ordered by effective confidence, the aggregates fill\n    ``structural_aggregate``, the vocabulary listing fills\n    ``predicate_vocabulary``, and every structural result carries\n    ``claim_coverage`` (the annotated-fraction footer plus the\n    non-normalizable exclusion disclosure). Each particle's ``contested`` key is\n    the id of an open INCONSISTENCY referencing it,\n    else null; the composed contested badge rides\n    beside it \u2014 the response-level ``contested`` list carries one\n    badge (fired bases + drill-downs) or null per ranked particle,\n    and with ``summary=True`` each slim hit carries\n    ``contested_bases`` (the fired basis labels, else null) beside\n    its ``contested`` id. When ``summary=True``, each particle\n    entry is a small dict instead of the full Pydantic model.",
     "inputSchema": {
       "properties": {
         "all_projects": {
@@ -29,6 +29,23 @@
           "default": false,
           "title": "Count",
           "type": "boolean"
+        },
+        "detail": {
+          "anyOf": [
+            {
+              "enum": [
+                "compact",
+                "summary",
+                "full"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Detail"
         },
         "during_end": {
           "anyOf": [
@@ -77,6 +94,23 @@
           ],
           "default": null,
           "title": "Group By"
+        },
+        "hits": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Hits"
+        },
+        "include_refused_candidates": {
+          "default": false,
+          "title": "Include Refused Candidates",
+          "type": "boolean"
         },
         "list_predicates": {
           "default": false,
@@ -197,9 +231,16 @@
           "title": "Subject Id"
         },
         "summary": {
-          "default": false,
-          "title": "Summary",
-          "type": "boolean"
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Summary"
         },
         "tags": {
           "anyOf": [
@@ -217,9 +258,16 @@
           "title": "Tags"
         },
         "top_k": {
-          "default": 40,
-          "title": "Top K",
-          "type": "integer"
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Top K"
         }
       },
       "title": "queryArguments",

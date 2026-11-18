@@ -63,6 +63,7 @@ from particles.store.event_store import (
     list_events_in_range,
     list_events_since,
 )
+from particles.store.relation_store import is_verdict_link
 
 from .cards import CardKind, CurationCard
 from .snapshot import load_collection
@@ -126,6 +127,10 @@ RIGHT_MEANS: dict[CardKind, tuple[str, str]] = {
     CardKind.DUPLICATE_PAIR: (
         "the pair was merged as one claim",
         "the two are different claims, so the finder was wrong",
+    ),
+    CardKind.DUPLICATE_GROUP: (
+        "members were merged as one claim",
+        "the members are not the same claim, so the finder was wrong (dismissed or split)",
     ),
     CardKind.UNCITED_URL: (
         "the URL was deposited",
@@ -219,6 +224,11 @@ def _is_gesture(ev: OperatorEvent) -> bool:
         return False
     if ev.event_type is OperatorEventType.EXTRACT_RUN:
         return (ev.payload or {}).get("route") == "reindex"
+    if ev.event_type is OperatorEventType.RELATION_ADDED:
+        # A link a model verdict applied (`links suggest --apply`) is disclosed
+        # in the log, but no one ruled on a card (RA3).
+        created_by = (ev.payload or {}).get("created_by")
+        return not is_verdict_link(created_by if isinstance(created_by, str) else None)
     return True
 
 
@@ -307,6 +317,10 @@ def classify_event(
             if not isinstance(key, str) or not key:
                 return []
             outcome = Outcome.DISMISSED if payload.get("snoozed_until") is None else Outcome.SNOOZED
+            # a group ruling keeps the carded pairs it withheld in
+            # its payload (``pairs``), the labelled data the duplicate judge is
+            # measured against; they are not counted here as cards, since the
+            # queue never showed them as cards.
             return [(key, outcome)]
 
         case OperatorEventType.DEPOSIT_SUGGESTION_DISMISSED:

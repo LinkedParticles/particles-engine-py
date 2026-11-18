@@ -176,6 +176,28 @@ class TestCardOption:
         assert "and 1 more: particles curate --card subjectless_source:e-1" in result.output
 
 
+class TestWithheldLine:
+    def test_the_queue_prints_the_withheld_count(self, cli_db: Path, queue: AsyncMock) -> None:
+        # one line under the freshness line, by rung stamp.
+        queue.return_value = CurationQueueResult(
+            source="live", withheld={"identifier_cross@1": 1160}
+        )
+        result = runner.invoke(app, ["curate"], catch_exceptions=False)
+        assert (
+            "1,160 duplicate candidate pairs withheld: each claim names an identifier "
+            "the other lacks (identifier_cross@1)"
+        ) in result.output
+
+    def test_an_off_rung_and_a_zero_count_read_differently(self) -> None:
+        from particles.api.cli.curate import withheld_lines
+
+        assert withheld_lines({"identifier_cross@1": 0}) == []
+        assert withheld_lines({"identifier_cross@1": None}) == [
+            "identifier_cross@1 off: every duplicate candidate pair is on the queue"
+        ]
+        assert withheld_lines({}) == []
+
+
 class TestKindOption:
     def test_unknown_kind_is_rejected_before_the_store_is_touched(
         self, cli_db: Path, queue: AsyncMock
@@ -323,6 +345,93 @@ class TestQueueListing:
         assert "--action PREFER_B|BOTH_VALID|DISCARD" in flat
         assert f"key: inconsistency:{inc.id}" in out
 
+    @pytest.mark.parametrize(
+        ("note", "shown"),
+        [
+            ("", None),
+            ("Claim A was retired by update.", "Claim A was retired by update."),
+            (None, "Open conflict: “The port is 7000.” vs “The port is 7001.”"),
+        ],
+    )
+    def test_a_conflict_card_quotes_each_side_once(
+        self, cli_db: Path, queue: AsyncMock, note: str | None, shown: str | None
+    ) -> None:
+        # The sides print below the question, so the card prints its conflict
+        # note in place of a diagnostic that quotes them again.
+        # A card with no note (built before the field) keeps its diagnostic.
+        a, b = _particle("The port is 7000."), _particle("The port is 7001.")
+        brief_a, brief_b = _brief(a.id, a.content), _brief(b.id, b.content)
+        card = _card(
+            CardKind.INCONSISTENCY,
+            particle_ids=[a.id, b.id],
+            diagnostic="Open conflict: “The port is 7000.” vs “The port is 7001.”",
+            suggested_gestures=gestures_for(CardKind.INCONSISTENCY),
+            inconsistency_id="rec-1",
+            particles=[brief_a, brief_b],
+            conflict=ConflictBrief(inconsistency_id="rec-1", a=brief_a, b=brief_b),
+            conflict_note=note,
+        )
+        queue.return_value = CurationQueueResult(source="live", cards=[card], count=1)
+        flat = " ".join(runner.invoke(app, ["curate"], catch_exceptions=False).output.split())
+        assert flat.count("The port is 7001.") == (2 if note is None else 1)
+        if shown is not None:
+            assert shown in flat
+
+    def test_a_retired_value_card_prints_its_own_question(
+        self, cli_db: Path, queue: AsyncMock
+    ) -> None:
+        # the CLI prints the card's own title and question, so a
+        # restated retired claim reads as that, not as "Open conflict".
+        from particles.operations.curation.cards import RetiredValueBrief
+
+        a = _particle("The port is 7000.")
+        b = _particle("The port is 7000.")
+        brief_a, brief_b = _brief(a.id, a.content), _brief(b.id, b.content)
+        card = _card(
+            CardKind.INCONSISTENCY,
+            particle_ids=[a.id, b.id],
+            diagnostic="Restated after retraction: held for review",
+            suggested_gestures=gestures_for(CardKind.INCONSISTENCY),
+            inconsistency_id="rec-1",
+            particles=[brief_a, brief_b],
+            conflict=ConflictBrief(inconsistency_id="rec-1", a=brief_a, b=brief_b),
+            resolve_actions=["PREFER_A", "PREFER_B", "BOTH_VALID", "DISCARD"],
+            retired_value=RetiredValueBrief(retirement="retracted", reason="Wrong port"),
+        )
+        queue.return_value = CurationQueueResult(source="live", cards=[card], count=1)
+        out = runner.invoke(app, ["curate"], catch_exceptions=False).output
+        flat = " ".join(out.split())
+        assert "1. Restated after retraction" in out
+        assert "Open conflict" not in out
+        assert "with the reason “Wrong port”" in flat
+        assert "Keep the retraction, or restore the claim?" in flat
+        assert "PREFER_A keeps the retraction" in flat
+
+    def test_a_retired_value_question_reaches_the_terminal_escaped(
+        self, cli_db: Path, queue: AsyncMock
+    ) -> None:
+        # The question carries an operator's reason and a source URI a source
+        # author controls; the listing prints it through terminal_echo, so a
+        # control or format character in either is shown, never acted on.
+        from particles.operations.curation.cards import RetiredValueBrief
+
+        card = _card(
+            CardKind.INCONSISTENCY,
+            diagnostic="Restated after retraction",
+            suggested_gestures=gestures_for(CardKind.INCONSISTENCY),
+            inconsistency_id="rec-1",
+            retired_value=RetiredValueBrief(
+                retirement="retracted",
+                reason="wrong \x1b[2Jport",
+                restated_by="https://example.org/\u202enote",
+            ),
+        )
+        queue.return_value = CurationQueueResult(source="live", cards=[card], count=1)
+        out = runner.invoke(app, ["curate"], catch_exceptions=False).output
+        assert "\x1b" not in out and "\u202e" not in out
+        assert "\\x1b[2Jport" in out
+        assert "\\u202enote" in out
+
 
 class TestHelp:
     def test_help_uses_current_terms_and_explains_the_gestures(self) -> None:
@@ -348,6 +457,48 @@ class TestApplyGesture:
         assert "✗" in result.output
         assert "not-a-real-key" in result.output
         gesture.assert_not_called()
+
+    def test_members_split_on_commas_and_reach_the_gesture(self, cli_db: Path) -> None:
+        gesture = AsyncMock(return_value="Linked.")
+        with patch("particles.operations.curation.apply_gesture", new=gesture):
+            result = runner.invoke(
+                app,
+                [
+                    "curate",
+                    "apply",
+                    "merge",
+                    "duplicate_group:p-aaa",
+                    "--members",
+                    "p-aaa,p-bbb",
+                    "--members",
+                    "p-ccc",
+                    "--keep",
+                    "p-bbb",
+                ],
+            )
+        assert result.exit_code == 0, result.output
+        assert gesture.await_args.kwargs["members"] == ["p-aaa", "p-bbb", "p-ccc"]
+        assert gesture.await_args.kwargs["keep"] == "p-bbb"
+
+    def test_members_outside_merge_and_split_are_refused(self, cli_db: Path) -> None:
+        gesture = AsyncMock()
+        with patch("particles.operations.curation.apply_gesture", new=gesture):
+            dismiss = runner.invoke(
+                app, ["curate", "apply", "dismiss", "duplicate_group:p-aaa", "--members", "x"]
+            )
+            keep = runner.invoke(
+                app, ["curate", "apply", "split", "duplicate_group:p-aaa", "--keep", "x"]
+            )
+        assert dismiss.exit_code == 1 and "apply only to merge and split" in dismiss.output
+        assert keep.exit_code == 1 and "--keep applies only to merge" in keep.output
+        gesture.assert_not_called()
+
+    def test_the_old_pair_kind_filters_duplicate_groups(
+        self, cli_db: Path, queue: AsyncMock
+    ) -> None:
+        result = runner.invoke(app, ["curate", "--kind", "duplicate_pair"], catch_exceptions=False)
+        assert result.exit_code == 0
+        assert queue.await_args.kwargs["kind"] is CardKind.DUPLICATE_GROUP
 
     def test_operation_refusal_exits_one(self, cli_db: Path) -> None:
         refuse = AsyncMock(side_effect=ValueError("Gesture 'merge': not offered."))

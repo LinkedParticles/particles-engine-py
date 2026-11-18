@@ -93,6 +93,19 @@ entries, plus a top-level `index.md`.
   (default 3 per `config.wiki.min_particles`).
 - `--min-particle-confidence F`: cross-exporter quality filter.
 
+**Your own article prompt.** Set `wiki.prompt_template` in
+`config.yaml` to replace the built-in encyclopedic prompt with one in the
+tone your domain wants. The wiki, Obsidian and Logseq exporters all use it
+for the first attempt at each article, and so do projection sections that are
+not `flowing`. The template may use `{framing}`, `{direction}` and
+`{allowed_ids}`; a literal brace is written `{{` or `}}`, and a template with
+any other placeholder is refused when the config loads. Keep the citation
+rule from the built-in prompt (every claim cited as `[^p-xxxxxxxx]`, no
+footnote definitions): an article that fails the citation check is retried
+with the built-in strict prompt, which is not tunable. The template is part
+of the synthesis cache key, so changing it regenerates each cached article
+once.
+
 The export also writes one cited article per NARRATIVE under
 `Narratives/`, using the same render path and cache as the Obsidian
 narrative notes. Disable with `wiki.emit_narrative_notes: false`.

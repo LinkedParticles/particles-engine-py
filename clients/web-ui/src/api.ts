@@ -15,6 +15,18 @@
  * preflight — the engine's lack of CORS middleware is a non-issue.
  */
 import type { components } from "./openapi";
+import {
+  ApiError,
+  CurationClient,
+  type ConnectionFacts,
+  type WireRequest,
+  type WireResponse,
+  detailOf,
+  errorForStatus,
+  networkError,
+} from "../../curation-core/src/index.ts";
+
+export { ApiError, type ApiErrorKind } from "../../curation-core/src/index.ts";
 
 type Schemas = components["schemas"];
 
@@ -68,42 +80,6 @@ export type GraphData = Schemas["GraphData"];
 export type GraphNode = Schemas["GraphNode"];
 export type GraphEdge = Schemas["GraphEdge"];
 export type GraphParticleInfo = Schemas["GraphParticleInfo"];
-
-/**
- * Categorised failure surfaced from an engine call (mirrors client).
- *
- * - `unauthorized` (401): the engine rejected the bearer token.
- * Surfaced as a clear "engine rejected the token" error.
- * - `forbidden` (403): belief writes are disabled on this store
- *   (`mcp.write.enabled_stores` default-deny), or the key's role
- *   cannot call the route. The message is the engine's detail.
- *   The feed degrades to a read-only review mode (write gestures hidden).
- * - `unavailable` (503): the engine is in dev-key mode and refuses a
- *   non-loopback caller. Surfaced as "engine refuses unauthenticated
- *   non-loopback access".
- * - `not-configured`: no engine URL or token configured — the fail-closed
- *   client posture. The PWA makes no call at all.
- */
-export type ApiErrorKind =
-  | "unauthorized"
-  | "forbidden"
-  | "unavailable"
-  | "not-configured"
-  | "not-found"
-  | "network"
-  | "http";
-
-export class ApiError extends Error {
-  readonly kind: ApiErrorKind;
-  readonly status: number | null;
-
-  constructor(kind: ApiErrorKind, message: string, status: number | null = null) {
-    super(message);
-    this.name = "ApiError";
-    this.kind = kind;
-    this.status = status;
-  }
-}
 
 export interface EngineSettings {
   /**
@@ -175,10 +151,23 @@ export type FetchFn = typeof fetch;
 export class ParticlesApiClient {
   private settings: EngineSettings;
   private readonly fetchFn: FetchFn;
+  /**
+   * The curation calls, made by the shared curation core over this client's
+   * connection: the same bearer, the same fail-closed check.
+   */
+  readonly core: CurationClient;
 
   constructor(settings: EngineSettings, fetchFn?: FetchFn) {
     this.settings = settings;
     this.fetchFn = fetchFn ?? ((...args) => fetch(...args));
+    this.core = new CurationClient({
+      transport: (req) => {
+        this.requireConfigured();
+        return this.send(req);
+      },
+      facts: () => this.facts(),
+      depositedBy: "web-ui",
+    });
   }
 
   updateSettings(settings: EngineSettings): void {
@@ -252,11 +241,36 @@ export class ParticlesApiClient {
     return h;
   }
 
+  private facts(): ConnectionFacts {
+    return { hasToken: !!this.settings.bearerToken, baseUrl: this.settings.baseUrl };
+  }
+
+  /** Put one request on the wire; the body is parsed, undefined when none. */
+  private async send(req: WireRequest): Promise<WireResponse> {
+    let resp: Response;
+    try {
+      resp = await this.fetchFn(this.url(req.path), {
+        method: req.method,
+        headers: this.headers(req.body !== undefined),
+        body: req.body !== undefined ? JSON.stringify(req.body) : undefined,
+      });
+    } catch (e) {
+      throw networkError(this.facts(), e);
+    }
+    let body: unknown;
+    try {
+      body = await resp.json();
+    } catch {
+      body = undefined;
+    }
+    return { status: resp.status, body };
+  }
+
   /**
    * Core request helper. Fail-closed both ways: refuses to send
-   * without a token, and maps 401 → unauthorized, 403 → forbidden, 503 →
-   * unavailable, 404 → not-found, other non-2xx → http with the engine's
-   * `ErrorResponse.detail` when present.
+   * without a token, and maps each failure with the curation core's rules
+   * (401 unauthorized, 403 forbidden, 503 unavailable, 404 not-found, other
+   * non-2xx http with the engine's detail).
    *
    * `open` waives the client-side token check for a route the engine serves
    * unauthenticated. Only `GET /health` qualifies, and only because the
@@ -270,93 +284,18 @@ export class ParticlesApiClient {
     opts: { open?: boolean } = {},
   ): Promise<T> {
     if (!opts.open) this.requireConfigured();
-    let resp: Response;
-    try {
-      resp = await this.fetchFn(this.url(path), {
-        method,
-        headers: this.headers(body !== undefined),
-        body: body !== undefined ? JSON.stringify(body) : undefined,
-      });
-    } catch (e) {
-      throw new ApiError(
-        "network",
-        `Could not reach the Particles engine${
-          this.settings.baseUrl ? ` at ${this.settings.baseUrl}` : ""
-        }: ${String(e)}`,
-      );
-    }
-
-    if (resp.status === 401) {
-      throw new ApiError(
-        "unauthorized",
-        this.settings.bearerToken
-          ? "The engine rejected the bearer token. Check the token in settings."
-          : "This engine requires a bearer token and none is set — it may have " +
-            "been restarted with a PARTICLES_API_KEY. Add it in settings.",
-        401,
-      );
-    }
-    if (resp.status === 403) {
-      // The engine's detail names the cause: belief writes disabled for the
-      // store, or a key whose role cannot call this route.
-      throw new ApiError(
-        "forbidden",
-        await this.detail(resp, "Belief writes are disabled on this engine (read-only)."),
-        403,
-      );
-    }
-    if (resp.status === 503) {
-      throw new ApiError(
-        "unavailable",
-        await this.detail(resp, "The engine refuses unauthenticated non-loopback access."),
-        503,
-      );
-    }
-    if (resp.status === 404) {
-      throw new ApiError("not-found", await this.detail(resp, "Not found."), 404);
-    }
-    if (!resp.ok) {
-      throw new ApiError(
-        "http",
-        await this.detail(resp, `Engine returned HTTP ${resp.status}.`),
-        resp.status,
-      );
-    }
-    return (await resp.json()) as T;
+    const resp = await this.send(body === undefined ? { method, path } : { method, path, body });
+    const failure = errorForStatus(resp.status, resp.body, this.facts());
+    if (failure) throw failure;
+    return resp.body as T;
   }
 
-  /**
-   * Pull the `detail` message when the body carries one. Handles both shapes
-   * the engine sends: the plain-string `ErrorResponse.detail`, and FastAPI's
-   * structured request-validation detail (a list of `{loc, msg}` objects on a
-   * 422) — previously the latter fell through to a useless generic
-   * "Engine returned HTTP 422." with the actual reason discarded.
-   */
   private async detail(resp: Response, fallback: string): Promise<string> {
     try {
-      const data = (await resp.json()) as { detail?: unknown };
-      const d = data ? data.detail : undefined;
-      if (typeof d === "string") {
-        return d;
-      }
-      if (Array.isArray(d) && d.length) {
-        const parts = d.map((e) => {
-          if (e && typeof e === "object") {
-            const err = e as { loc?: unknown; msg?: unknown };
-            const loc = Array.isArray(err.loc)
-              ? err.loc.filter((x) => x !== "query" && x !== "body").join(".")
-              : "";
-            const msg = typeof err.msg === "string" ? err.msg : JSON.stringify(e);
-            return loc ? `${loc}: ${msg}` : msg;
-          }
-          return String(e);
-        });
-        return parts.join(" · ");
-      }
+      return detailOf(await resp.json(), fallback);
     } catch {
-      /* fall through to the fallback message */
+      return fallback;
     }
-    return fallback;
   }
 
   // --- Read ---------------------------------------------------------------
@@ -373,19 +312,6 @@ export class ParticlesApiClient {
     return this.request<HealthResponse>("GET", "/health", undefined, { open: true });
   }
 
-  /** GET /curation — the leverage-ranked batch plus its backlog's `open_count`. */
-  async curation(opts: QueueOptions = {}): Promise<CurationQueueResponse> {
-    const params = new URLSearchParams();
-    if (opts.limit !== undefined) params.set("limit", String(opts.limit));
-    if (opts.kind) params.set("kind", opts.kind);
-    if (opts.semantic !== undefined) params.set("semantic", String(opts.semantic));
-    const qs = params.toString();
-    return this.request<CurationQueueResponse>(
-      "GET",
-      `/curation${qs ? `?${qs}` : ""}`,
-    );
-  }
-
   /**
    * POST /query — tag-aware semantic query with the NL cited answer
    * (non-streaming v1 — streaming is deferred).
@@ -393,7 +319,10 @@ export class ParticlesApiClient {
    * completion per call.
    */
   async query(question: string): Promise<QueryResponse> {
-    const req: QueryRequest = { question };
+    // a refused answer withholds its nearest beliefs by default.
+    // This view is the person-facing display they were kept for,
+    // so it asks for them; a re-query would pay for a second answer.
+    const req: QueryRequest = { question, include_refused_candidates: true };
     return this.request<QueryResponse>("POST", "/query", req);
   }
 
@@ -433,39 +362,6 @@ export class ParticlesApiClient {
 
   // --- Write gestures — each one authenticated call ----------
 
-  /**
-   * comment ("Resolve…") → POST /review/{id}. The id is the INCONSISTENCY
-   * record's (`card.inconsistency_id`), never the contested belief's: the
-   * route resolves only INCONSISTENCY particles and 404s anything else.
-   */
-  async review(
-    inconsistencyId: string,
-    action: ResolutionAction,
-    reviewerId: string,
-    note?: string,
-  ): Promise<unknown> {
-    const req: ReviewRequest = {
-      action,
-      reviewer_id: reviewerId,
-      ...(note !== undefined ? { note } : {}),
-    };
-    return this.request<unknown>(
-      "POST",
-      `/review/${encodeURIComponent(inconsistencyId)}`,
-      req,
-    );
-  }
-
-  /** merge (same-subject duplicate) → POST /links (CO_EVIDENTIAL). */
-  async link(particleA: string, particleB: string): Promise<ParticleRelation> {
-    const req: LinkRequest = {
-      particle_a: particleA,
-      particle_b: particleB,
-      relation_type: "CO_EVIDENTIAL",
-    };
-    return this.request<ParticleRelation>("POST", "/links", req);
-  }
-
   /** merge (cross-subject) → POST /subjects/{source_id}/merge. */
   async mergeSubjects(
     sourceId: string,
@@ -480,14 +376,8 @@ export class ParticlesApiClient {
   }
 
   /** deposit → POST /corpus/deposit/text. */
-  async depositText(text: string): Promise<DepositResponse> {
-    const req: DepositTextRequest = {
-      text,
-      source_type: "CONVERSATION",
-      deposited_by: "web-ui",
-      tags: [],
-    };
-    return this.request<DepositResponse>("POST", "/corpus/deposit/text", req);
+  depositText(text: string): Promise<DepositResponse> {
+    return this.core.depositText(text);
   }
 
   /**
@@ -545,150 +435,7 @@ export class ParticlesApiClient {
    * fetch the URL (paywall / 403 / SSRF-blocked); the caller falls back to a
    * manual paste.
    */
-  async depositUrl(url: string): Promise<DepositResponse> {
-    const req: DepositUrlRequest = {
-      url,
-      deposited_by: "web-ui",
-      tags: [],
-    };
-    return this.request<DepositResponse>("POST", "/corpus/deposit/url", req);
-  }
-
-  /**
-   * operator edit-as-supersede → POST /particles/{id}/supersede. Works
-   * on a belief the operator does NOT own (incl. extracted beliefs that fill a
-   * curation queue): skips only the ownership check, keeps the HUMAN_REVIEW +
-   * ACTIVE guards, and stays gated by `mcp.write.enabled_stores` (403 when off).
-   */
-  async operatorSupersede(
-    particleId: string,
-    req: OperatorSupersedeRequest,
-  ): Promise<AgentWriteResult> {
-    return this.request<AgentWriteResult>(
-      "POST",
-      `/particles/${encodeURIComponent(particleId)}/supersede`,
-      req,
-    );
-  }
-
-  /**
-   * operator per-particle retract → POST /particles/{id}/retract.
-   * Retracts one extracted/operator-sourced belief by id (vs the
-   * blunt whole-source `retractCorpusEntry`).
-   */
-  async operatorRetract(
-    particleId: string,
-    reason: string,
-  ): Promise<ParticleRetractEndpointResponse> {
-    const req: OperatorRetractRequest = { reason };
-    return this.request<ParticleRetractEndpointResponse>(
-      "POST",
-      `/particles/${encodeURIComponent(particleId)}/retract`,
-      req,
-    );
-  }
-
-  /**
-   * assign-subject → POST /particles/{id}/subjects. Attaches a subject
-   * to a NO_SUBJECT orphan in place: the belief keeps its id,
-   * confidence and provenance; only the subject link is written. Resolution by
-   * explicit subject_id or by subject_name through the standard resolver.
-   */
-  async assignSubject(
-    particleId: string,
-    req: ParticleSubjectAssignRequest,
-  ): Promise<AgentWriteResult> {
-    return this.request<AgentWriteResult>(
-      "POST",
-      `/particles/${encodeURIComponent(particleId)}/subjects`,
-      req,
-    );
-  }
-
-  /**
-   * GET /curation/cards/{key}: one open card with every belief it names
-   * briefed. The queue previews five beliefs of a source card.
-   */
-  async curationCard(key: string): Promise<CurationCard> {
-    return this.request<CurationCard>("GET", `/curation/cards/${encodeURIComponent(key)}`);
-  }
-
-  /** affirm ("still true") → POST /curation/affirm (BELIEF_AFFIRMED). */
-  async affirm(
-    particleId: string,
-    cardKey?: string,
-  ): Promise<CurationEventResponse> {
-    const req: CurationAffirmRequest = {
-      particle_id: particleId,
-      ...(cardKey !== undefined ? { card_key: cardKey } : {}),
-    };
-    return this.request<CurationEventResponse>("POST", "/curation/affirm", req);
-  }
-
-  /**
-   * snooze / dismiss a belief card → POST /curation/snooze (
-   * CURATION_CARD_SNOOZED). `snoozeDays` omitted ⇒ permanent dismiss.
-   */
-  async snoozeCard(
-    cardKey: string,
-    particleIds: string[],
-    snoozeDays?: number,
-  ): Promise<CurationEventResponse> {
-    const req: CurationSnoozeRequest = {
-      card_key: cardKey,
-      particle_ids: particleIds,
-      ...(snoozeDays !== undefined ? { snooze_days: snoozeDays } : {}),
-    };
-    return this.request<CurationEventResponse>("POST", "/curation/snooze", req);
-  }
-
-  /**
-   * retract (whole source) → POST /corpus/{entry_id}/retract. Retracts ALL live
-   * particles of the entry; the UI confirms the blast radius via a dry-run first
-   * ("this retracts all N beliefs" confirm).
-   */
-  async retractCorpusEntry(
-    entryId: string,
-    reason: string,
-    dryRun = false,
-  ): Promise<CorpusRetractResponse> {
-    const req: CorpusRetractRequest = { reason, dry_run: dryRun };
-    return this.request<CorpusRetractResponse>(
-      "POST",
-      `/corpus/${encodeURIComponent(entryId)}/retract`,
-      req,
-    );
-  }
-
-  /**
-   * relink (gated_subjects card) → POST /subjects/relink-gated.
-   * `dryRun` plans and reports; otherwise the engine links every recoverable
-   * orphan in place over its accepted tiers.
-   */
-  async relinkGated(dryRun: boolean): Promise<RelinkReport> {
-    const req: RelinkGatedRequest = { dry_run: dryRun };
-    return this.request<RelinkReport>("POST", "/subjects/relink-gated", req);
-  }
-
-  /** reindex → POST /reindex (over FAILED snapshots). */
-  async reindex(): Promise<ReindexResponse> {
-    const req: ReindexRequest = { include_failed: true, rate_limit_per_minute: 100 };
-    return this.request<ReindexResponse>("POST", "/reindex", req);
-  }
-
-  /** dismiss (uncited_url) → POST /corpus/links/dismiss. */
-  async dismissUrl(
-    url: string,
-    snoozeDays?: number,
-  ): Promise<CorpusLinksDismissResponse> {
-    const req: CorpusLinksDismissRequest = {
-      url,
-      ...(snoozeDays !== undefined ? { snooze_days: snoozeDays } : {}),
-    };
-    return this.request<CorpusLinksDismissResponse>(
-      "POST",
-      "/corpus/links/dismiss",
-      req,
-    );
+  depositUrl(url: string): Promise<DepositResponse> {
+    return this.core.depositUrl(url);
   }
 }

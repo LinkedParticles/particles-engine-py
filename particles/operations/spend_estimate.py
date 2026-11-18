@@ -231,6 +231,55 @@ def planned_extraction_estimate(
 
 
 @dataclass(frozen=True)
+class SnapshotPrice:
+    """One snapshot's two prices for pass 1's nightly budget.
+
+    ``estimate_usd`` is :func:`planned_extraction_estimate`'s high end;
+    ``worst_case_usd`` bills every planned call at ``extraction.max_tokens``
+    of output (and the retries the high end expects at their full budget),
+    input projected, the method. Both include the §6.6 probes
+    extraction makes, and both are ``None`` when a model is unpriced.
+    """
+
+    estimate_usd: float | None
+    worst_case_usd: float | None
+
+
+def snapshot_price(calls: Sequence[ExtractionCall], *, batched: bool) -> SnapshotPrice:
+    """Price one snapshot's planned calls; ``batched`` applies the batch discount.
+
+    Unlike :func:`planned_extraction_estimate`, the caller decides whether the
+    calls ride a batch: a budgeted pass 1 submits a whole round as one, so one
+    snapshot's own call count says nothing about it.
+    """
+    if not calls:
+        return SnapshotPrice(0.0, 0.0)
+    selection = get_config().llm.for_purpose("extraction")
+    estimate = estimate_extraction_calls(
+        calls, entries=1, chars_per_token=chars_per_token(selection)
+    )
+    calls_made = estimate.estimated_llm_calls + round(estimate.expected_retries)
+    prefix = _cached_prefix_usd(estimate, selection, calls_made)
+    audit = get_config().audit
+    probes = _price(
+        estimate.probe_price,
+        estimate.reconcile_probes * audit.estimate_probe_input_tokens,
+        estimate.reconcile_probes * audit.estimate_probe_output_tokens,
+    )
+    if prefix is None or (estimate.reconcile_probes and probes is None):
+        return SnapshotPrice(None, None)
+    factor = _batch_factor(batched)
+    with_retries = estimate.input_tokens + estimate.retry_input_tokens
+    high = _price(estimate.extraction_price, with_retries, estimate.output_tokens_high)
+    ceiling = _price(estimate.extraction_price, with_retries, estimate.output_tokens_ceiling)
+    extra = probes or 0.0
+    return SnapshotPrice(
+        estimate_usd=None if high is None else (high + prefix) * factor + extra,
+        worst_case_usd=None if ceiling is None else (ceiling + prefix) * factor + extra,
+    )
+
+
+@dataclass(frozen=True)
 class ExtractionRange:
     """An unbatched extraction run's band at list price, as a person reads it.
 
@@ -246,40 +295,66 @@ class ExtractionRange:
     high_usd: float | None
     ceiling_usd: float | None
     wall_seconds: float
+    #: Extraction tokens behind the band: input on first attempts (source text
+    #: plus the per-call prompt overhead), then the output band's two ends.
+    input_tokens: int = 0
+    output_tokens_low: int = 0
+    output_tokens_high: int = 0
+    #: The config keys the output model came from, for a printed estimate.
+    output_basis: str = ""
 
 
-def extraction_range(calls: Sequence[ExtractionCall], *, entries: int) -> ExtractionRange:
-    """The band of :func:`planned_extraction_estimate`, unbatched, with its wall time."""
+def extraction_range(
+    calls: Sequence[ExtractionCall], *, entries: int, reconcile_probes: bool = True
+) -> ExtractionRange:
+    """The band of :func:`planned_extraction_estimate`, unbatched, with its wall time.
+
+    ``reconcile_probes=False`` leaves out the §6.6 probes, for a caller that
+    runs the extractor outside the pipeline and so never reconciles (the
+    extractor benchmark).
+    """
     selection = get_config().llm.for_purpose("extraction")
     estimate = estimate_extraction_calls(
         calls, entries=entries, chars_per_token=chars_per_token(selection)
     )
     calls_made = estimate.estimated_llm_calls + round(estimate.expected_retries)
     audit = get_config().audit
+    probe_count = estimate.reconcile_probes if reconcile_probes else 0
     wall = (
         estimate.output_tokens_expected / audit.estimate_extraction_output_tokens_per_second
-        + estimate.reconcile_probes * audit.estimate_seconds_per_probe
+        + probe_count * audit.estimate_seconds_per_probe
     )
     if calls_made == 0:
         return ExtractionRange(0, selection.model, 0.0, 0.0, 0.0, 0.0)
     prefix = _cached_prefix_usd(estimate, selection, calls_made)
     probes = _price(
         estimate.probe_price,
-        estimate.reconcile_probes * audit.estimate_probe_input_tokens,
-        estimate.reconcile_probes * audit.estimate_probe_output_tokens,
+        probe_count * audit.estimate_probe_input_tokens,
+        probe_count * audit.estimate_probe_output_tokens,
     )
     with_retries = estimate.input_tokens + estimate.retry_input_tokens
     low = _price(estimate.extraction_price, estimate.input_tokens, estimate.output_tokens_low)
     high = _price(estimate.extraction_price, with_retries, estimate.output_tokens_high)
     ceiling = _price(estimate.extraction_price, with_retries, estimate.output_tokens_ceiling)
-    if prefix is None or (estimate.reconcile_probes and probes is None):
+    if prefix is None or (probe_count and probes is None):
         low = high = ceiling = None
     else:
         extra = prefix + (probes or 0.0)
         low = None if low is None else low + prefix
         high = None if high is None else high + extra
         ceiling = None if ceiling is None else ceiling + extra
-    return ExtractionRange(calls_made, selection.model, low, high, ceiling, wall)
+    return ExtractionRange(
+        calls_made,
+        selection.model,
+        low,
+        high,
+        ceiling,
+        wall,
+        input_tokens=estimate.input_tokens,
+        output_tokens_low=estimate.output_tokens_low,
+        output_tokens_high=estimate.output_tokens_high,
+        output_basis=estimate.output_basis,
+    )
 
 
 def _cached_prefix_usd(

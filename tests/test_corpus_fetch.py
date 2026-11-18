@@ -51,7 +51,8 @@ from particles.corpus.fetch import (
     maybe_refetch,
     path_from_file_uri,
 )
-from particles.corpus.store import CorpusEntryRow, SnapshotRow, list_snapshots_for_entry
+from particles.corpus.store import SnapshotRow, list_snapshots_for_entry
+from tests._corpus_rows import local_entry_row
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -144,7 +145,7 @@ async def _add_entry(
         mutability=mutability,
         deposited_by=deposited_by,
     )
-    session.add(CorpusEntryRow.from_model(entry))
+    session.add(local_entry_row(entry))
     await session.flush()
     return entry
 

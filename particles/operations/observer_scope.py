@@ -23,11 +23,13 @@ from collections import Counter
 from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass, field
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import get_config
 from particles.core.observer_scope import (
     PROJECT_TAG_PREFIX,
+    REFERENCE_MARKER,
     UNATTRIBUTED_MARKER,
     EntryScope,
     canonical_project_key,
@@ -38,6 +40,7 @@ from particles.core.observer_scope import (
     project_tag,
 )
 from particles.core.schema import SourceType
+from particles.corpus.rule_sources import RULE_SOURCE_TAG
 from particles.corpus.store import (
     add_entry_tags,
     get_entry,
@@ -48,6 +51,7 @@ from particles.corpus.store import (
 from particles.store.event_store import EventRefKind, OperatorEventType, list_events, record_event
 from particles.store.observer_scope_store import ScopeTarget, add_widening, remove_widening
 from particles.store.particle_store import get_particle
+from particles.store.vocabulary_store import VocabularyVersionRow
 
 #: ``(entry_id, uri_r, tags) -> project key``, or ``None`` to leave the entry alone.
 KeyResolver = Callable[[str, str | None, list[str]], str | None]
@@ -194,10 +198,11 @@ async def assign_key(session: AsyncSession, entry_id: str, key: str, *, actor: s
     if entry is None:
         raise ValueError(f"No corpus entry {entry_id!r}.")
     harness_tags = get_config().observer_scope.harness_tags
-    if classify_entry(entry.tags, harness_tags) is EntryScope.GLOBAL:
+    entry_class = classify_entry(entry.tags, harness_tags)
+    if entry_class.everywhere:
         raise ValueError(
-            f"Entry {entry_id!r} is global (keyless, not harness-harvested); giving it a project "
-            "key would hide it from every other project. Nothing was changed."
+            f"Entry {entry_id!r} is {entry_class.value} (keyless, not harness-harvested); giving "
+            "it a project key would hide it from every other project. Nothing was changed."
         )
     added = await add_entry_tags(session, entry_id, [project_tag(key)])
     if added:
@@ -391,7 +396,7 @@ async def withdraw_key(
             )
         harness_tags = get_config().observer_scope.harness_tags
         without = [tag for tag in entry.tags if tag not in spellings]
-        if classify_entry(without, harness_tags) is EntryScope.GLOBAL:
+        if classify_entry(without, harness_tags).everywhere:
             marked = bool(await add_entry_tags(session, entry_id, [UNATTRIBUTED_MARKER]))
     if not await remove_entry_tags(session, entry_id, spellings):
         return False
@@ -434,3 +439,129 @@ async def widen(
             session, actor=actor, event_type=event_type, refs=[(ref_kind, target_id)]
         )
     return changed
+
+
+@dataclass
+class ReferenceMarkReport:
+    """What one ``rescope --mark-reference`` pass found and did."""
+
+    dry_run: bool
+    listed: list[tuple[str, str, str | None]] = field(default_factory=list)
+    """``(entry_id, source_type, uri_r)`` for every global entry the step would
+    mark, before ``--except``: what the preview shows."""
+    excepted: list[str] = field(default_factory=list)
+    """Listed entries the operator kept global (``--except``)."""
+    skipped_vocabulary: int = 0
+    """Vocabulary documents, a statement route's output: never listed."""
+    marked: list[str] = field(default_factory=list)
+    """Entries marked (or that would be, on a dry run)."""
+
+
+def plan_mark_reference(
+    rows: Iterable[tuple[str, list[str], str, str]],
+    uris: dict[str, str | None],
+    *,
+    vocabulary_entries: Collection[str],
+    excepted: Collection[str],
+    harness_tags: Collection[str],
+    dry_run: bool = False,
+) -> ReferenceMarkReport:
+    """Which existing global entries the first marking run marks, from tag rows alone.
+
+    The pure half of :func:`mark_reference`. ``rows`` are ``(entry, tags,
+    depositor, source type)``. An entry is listed when it is global (keyless,
+    no harness tag, no marker) and carries no ``rule-file`` tag; a vocabulary
+    document, named by ``vocabulary_entries`` (the recorded
+    ``vocabulary_versions.corpus_entry_id`` link, never the free-text
+    depositor), is skipped and counted. ``excepted`` stay global.
+    """
+    report = ReferenceMarkReport(dry_run=dry_run)
+    keep = set(excepted)
+    for entry_id, tags, _deposited_by, source_type in rows:
+        if classify_entry(tags, harness_tags) is not EntryScope.GLOBAL:
+            continue
+        if RULE_SOURCE_TAG in tags:
+            continue
+        if entry_id in vocabulary_entries:
+            report.skipped_vocabulary += 1
+            continue
+        report.listed.append((entry_id, source_type, uris.get(entry_id)))
+        if entry_id in keep:
+            report.excepted.append(entry_id)
+        else:
+            report.marked.append(entry_id)
+    return report
+
+
+async def mark_reference(
+    session: AsyncSession,
+    *,
+    excepted: Collection[str] = (),
+    dry_run: bool = False,
+    actor: str,
+) -> ReferenceMarkReport:
+    """Mark each existing global document entry ``scope:reference``.
+
+    Entries deposited before the marker existed change only here, one
+    recorded ``OBSERVER_SCOPE_REFERENCE_MARKED`` event per entry. Refuses an
+    ``--except`` id that the step would not list, so a typo is not a silent
+    no-op. Does not commit.
+    """
+    vocabulary = {
+        entry_id
+        for (entry_id,) in (
+            await session.execute(select(VocabularyVersionRow.corpus_entry_id))
+        ).all()
+        if entry_id
+    }
+    rows = await list_entry_attribution_rows(session)
+    uris = {entry_id: uri_r for entry_id, uri_r, _tags in await list_entry_tag_rows(session)}
+    report = plan_mark_reference(
+        rows,
+        uris,
+        vocabulary_entries=vocabulary,
+        excepted=excepted,
+        harness_tags=get_config().observer_scope.harness_tags,
+        dry_run=dry_run,
+    )
+    unknown = sorted(set(excepted) - set(report.excepted))
+    if unknown:
+        raise ValueError(
+            f"--except names {', '.join(unknown)}, which this step does not list (not a global "
+            "document entry). Nothing was changed."
+        )
+    if dry_run:
+        return report
+    listed = {entry_id: (source_type, uri_r) for entry_id, source_type, uri_r in report.listed}
+    for entry_id in report.marked:
+        await add_entry_tags(session, entry_id, [REFERENCE_MARKER])
+        source_type, uri_r = listed[entry_id]
+        await record_event(
+            session,
+            actor=actor,
+            event_type=OperatorEventType.OBSERVER_SCOPE_REFERENCE_MARKED,
+            refs=[(EventRefKind.CORPUS_ENTRY, entry_id)],
+            payload={"source_type": source_type, "uri_r": uri_r},
+        )
+    return report
+
+
+async def unmark_reference(session: AsyncSession, entry_id: str, *, actor: str, by: str) -> bool:
+    """Remove one entry's ``scope:reference`` marker, so it is global again.
+
+    Returns ``False`` when the entry carries no marker. ``by`` names the act
+    for the event (``unmark-reference`` or a ``--standing`` re-deposit).
+    Records ``OBSERVER_SCOPE_REFERENCE_UNMARKED``. Does not commit.
+    """
+    if await get_entry(session, entry_id) is None:
+        raise ValueError(f"No corpus entry {entry_id!r}.")
+    removed = await remove_entry_tags(session, entry_id, [REFERENCE_MARKER])
+    if removed:
+        await record_event(
+            session,
+            actor=actor,
+            event_type=OperatorEventType.OBSERVER_SCOPE_REFERENCE_UNMARKED,
+            refs=[(EventRefKind.CORPUS_ENTRY, entry_id)],
+            payload={"by": by},
+        )
+    return bool(removed)

@@ -166,7 +166,7 @@ def _install_stub(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}/usr/bin{os.pathsep}/bin")
     import particles.api.cli.init as init_mod
 
-    assert init_mod._trusted_which("claude") == str(stub)
+    assert init_mod.trusted_which("claude") == str(stub)
     monkeypatch.setattr(init_mod, "_claude_mcp", init_mod._claude_mcp.__wrapped__)
     return stub
 
@@ -541,7 +541,10 @@ def test_the_doctor_judges_the_token_the_installed_hooks_carry(
     )
     monkeypatch.setenv("PARTICLES_CONFIG", str(config))
     reset_config()
-    assert "operator key" in hook_mod._engine_line()
+    _, lines = hook_mod._engine_token_lines("https://engine.invalid")
+    assert any(
+        line.startswith("engine token:   hooks: ⚠") and "operator key" in line for line in lines
+    )
 
 
 def _session_for(db_file: Path) -> SimpleNamespace:

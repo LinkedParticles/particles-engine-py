@@ -13,16 +13,28 @@ import re
 import time
 import unicodedata
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal
 from urllib.parse import unquote, urlsplit
 
-from fastapi import Depends, FastAPI, Form, HTTPException, Query, Request, Response, UploadFile
+from fastapi import (
+    Depends,
+    FastAPI,
+    Form,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+)
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, RedirectResponse
-from pydantic import BaseModel, BeforeValidator, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -30,12 +42,20 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from particles import __version__
 from particles.api import _keys
 from particles.api._middleware import BodySizeLimitMiddleware, HostBoundMiddleware
-from particles.api._rate_limit import ModelCallMeterMiddleware, RateLimitDep, enforce_rate_limit
+from particles.api._rate_limit import (
+    ModelCallMeterMiddleware,
+    RateLimitDep,
+    WriteRateLimitDep,
+    enforce_rate_limit,
+)
 from particles.api.auth import (
     AGENT_GATE,
     AUTH_GATE,
+    CODEX_PROOF_GATE,
+    IDENTITY_GATE,
     OPERATOR_GATE,
     READ_GATE,
+    TEXT_DEPOSIT_GATE,
     Capability,
     Principal,
     current_principal,
@@ -49,10 +69,10 @@ from particles.api.auth import (
 from particles.api.daemon import DaemonStatus, daemon_status, start_daemon, stop_daemon
 from particles.api.web_app import WEB_APP_MOUNT, build_web_ui_static_app
 from particles.config import get_config
+from particles.config_tuning import TuningReport, env_overridden_tuning, tuning_digests
 from particles.core.observer_scope import (
     PROJECT_TAG_PREFIX,
     UNATTRIBUTED_MARKER,
-    EntryScope,
     canonical_project_key,
     classify_entry,
     hides_a_character,
@@ -60,6 +80,7 @@ from particles.core.observer_scope import (
     names_a_project,
     project_keys,
     project_tag,
+    with_reference_marker,
 )
 from particles.core.schema import (
     ContestedBadge,
@@ -90,7 +111,10 @@ from particles.corpus.deposit import (
     own_entries_only_for,
     resolve_upload_source_type,
 )
-from particles.corpus.harvest_marks import reserved_marks
+from particles.corpus.deposit_role import agent_deposit
+from particles.corpus.harvest_marks import HARNESS_SOURCES, claude_project_slug, reserved_marks
+from particles.corpus.metering import PendingExtractionsFull
+from particles.corpus.origin import OtherHostEntryRefused, deposit_origin
 from particles.corpus.rule_sources import RULE_SOURCE_TAG
 from particles.db import (
     DEFAULT_STORE,
@@ -102,8 +126,10 @@ from particles.db import (
     write_transaction,
 )
 from particles.egress import EgressRefused, ensure_backstop, require_covered_loop
+from particles.extraction.codex_transcript import UnsupportedTranscript, session_uuid
 from particles.extraction.mcp_memory import SOURCE_TYPE as MIGRATION_SOURCE_TYPE
-from particles.http import SourceFetchError
+from particles.host_identity import local_host_id
+from particles.http import ServiceCredentialWithheld, SourceFetchError
 from particles.operations._llm import llm_circuit_open
 from particles.operations.agent_write import (
     AgentWriteResult,
@@ -120,9 +146,17 @@ from particles.operations.agent_write import (
     unlink_beliefs,
     untag_belief,
 )
+from particles.operations.codex_capture import (
+    CODEX_CAPTURE_PROTOCOL,
+    CodexBoundary,
+    CodexSubmission,
+    capture_remote_codex,
+    read_codex_capture,
+)
 from particles.operations.curation import (
     CurationCard,
     QueueSource,
+    apply_gesture,
     build_curation_queue,
     dismiss_source_card,
     get_curation_card,
@@ -130,6 +164,7 @@ from particles.operations.curation import (
     record_demotion_ruling,
 )
 from particles.operations.curation.cards import CardKind
+from particles.operations.curation.subject_suggestions import suggest_subjects
 from particles.operations.deposit import (
     deposit_file,
     deposit_text,
@@ -140,24 +175,34 @@ from particles.operations.deposit import (
 from particles.operations.deposit_suggest import DepositSuggestReport
 from particles.operations.digest import DigestLine
 from particles.operations.extract import extract_snapshot
+from particles.operations.extract_budget import extract_budget_warnings
 from particles.operations.graph_view import build_graph_data
 from particles.operations.lint import run_lint
 from particles.operations.llm_spend import MeteredExtractRun, reindexed_snapshots
+from particles.operations.observer_scope import unmark_reference
 from particles.operations.projection import DocManifest
+from particles.operations.projection.memory_region import MAX_REMOTE_BLOCK_BYTES
 from particles.operations.quality import get_quality_report
 from particles.operations.query import query
 from particles.operations.reconcile import reconcile_supersession
 from particles.operations.reindex import ReindexPlan, reindex
 from particles.operations.review import ResolutionRefused, list_inconsistencies, resolve
 from particles.operations.source_passage import SourcePassage, hydrate_source_passage
+from particles.operations.subject_provisional import accept_subject, operator_touched
 from particles.operations.subject_relink import (
     RelinkReport,
     apply_gated_relink,
     build_report,
     plan_gated_relink,
 )
+from particles.store.codex_capture_store import (
+    CaptureManifest,
+    CaptureStateConflict,
+    verified_prefix,
+)
 from particles.store.event_store import HTTP_KEY_ID_FIELD, OperatorEvent
 from particles.store.session_exposure_store import SessionExposure
+from particles.store.subject_provisional import SubjectView, with_mark, with_marks
 from particles.url_safety import is_network_uri
 
 log = logging.getLogger(__name__)
@@ -243,10 +288,39 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Resident daemon mode — opt-in, off by default. Started after
     # create_tables() so the first tick never races schema creation.
     start_daemon()
+    warm_up = _start_warm_up()
     try:
         yield
     finally:
+        if warm_up is not None:
+            warm_up.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await warm_up
         await stop_daemon()
+
+
+def _start_warm_up() -> asyncio.Task[None] | None:
+    """Warm each served store's render path in the background.
+
+    A request that arrives during the build waits on it, under the candidate
+    cache's lock, rather than building a second copy. A failure is logged and
+    costs only the warm-up.
+    """
+    if not get_config().api.warm_up_on_start:
+        return None
+    from particles.db import DEFAULT_STORE
+    from particles.operations.warm_up import warm_render_path
+
+    stores = [DEFAULT_STORE, *get_config().storage.stores]
+
+    async def _run() -> None:
+        for store in stores:
+            try:
+                await warm_render_path(store)
+            except Exception:  # noqa: BLE001 — a cold first render is the only cost
+                log.warning("warm-up of store %r failed", store, exc_info=True)
+
+    return asyncio.create_task(_run(), name="particles-warm-up")
 
 
 app = FastAPI(
@@ -338,6 +412,22 @@ async def _write_lock_timeout_handler(_request: Request, exc: WriteLockTimeout) 
     return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 
+@app.exception_handler(PendingExtractionsFull)
+async def _pending_full_handler(_request: Request, exc: PendingExtractionsFull) -> Response:
+    """Translate a metered key's full extraction queue into a 429.
+
+    Raised from the deposit seam on any route an agent key's request reaches
+    (the deposit routes, and an assert or supersede that deposits its
+    ``source_excerpt``), so one handler answers for all of them. The detail
+    names the setting, so an agent can tell it from the request bucket's
+    ``429``, and the entry holding the most of the key's snapshots.
+    """
+    from fastapi.responses import JSONResponse
+
+    log.info("pending extraction full: %s", exc)
+    return JSONResponse(status_code=429, content={"detail": exc.describe()})
+
+
 @app.exception_handler(EgressRefused)
 async def _egress_refused_handler(_request: Request, exc: EgressRefused) -> Response:
     """Translate a no-egress refusal into a 403 that names the destination.
@@ -358,6 +448,18 @@ async def _egress_refused_handler(_request: Request, exc: EgressRefused) -> Resp
             "port": exc.port,
         },
     )
+
+
+@app.exception_handler(RequestValidationError)
+async def _safe_capture_validation(request: Request, exc: RequestValidationError) -> JSONResponse:
+    path = request.url.path
+    if "/corpus/codex-capture/" in path or (
+        isinstance(exc.body, dict)
+        and "codex_capture" in exc.body
+        and path.endswith(("/corpus/deposit/text", "/corpus/deposit/url", "/particles/deposit"))
+    ):
+        return JSONResponse(status_code=422, content={"detail": "Invalid Codex capture request."})
+    return await request_validation_exception_handler(request, exc)
 
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
@@ -597,6 +699,26 @@ async def health(holds_key: Annotated[bool, Depends(request_holds_a_key)]) -> He
     )
 
 
+@app.get("/config/tuning", dependencies=[AUTH_GATE], response_model=TuningReport)
+async def config_tuning() -> TuningReport:
+    """The engine's matched settings as digests, and its extraction-budget warnings.
+
+    A thin client's ``hook doctor`` compares these with its own config, so a
+    setting tuned on one side only is reported. Each digest is the
+    SHA-256 of one setting's canonical JSON; no value, path or URL is served.
+    ``env_overrides`` names the settings this engine takes from its
+    environment, and ``warnings`` holds the checks evaluated on the
+    engine's config, which is the one consolidation runs with. Any
+    authenticated key may read it.
+    """
+    return TuningReport(
+        version=__version__,
+        digests=tuning_digests(get_config()),
+        env_overrides=sorted(env_overridden_tuning()),
+        warnings=extract_budget_warnings(),
+    )
+
+
 @app.get("/quality", dependencies=[READ_GATE], response_model=QualityReport)
 async def quality_dashboard(session: SessionDep) -> QualityReport:
     """Extraction quality dashboard: calibration distribution, corpus status, subject coverage."""
@@ -681,6 +803,14 @@ class CurationQueueResponse(BaseModel):
     # in ``per_kind_scope`` keeps the date of the build that last ran its
     # finder, so a client can say "contradictions as of the census of …".
     kind_as_of: dict[str, datetime] = Field(default_factory=dict)
+    # What the episode fold would withhold on the stored collection, in
+    # shadow; ``None`` on a live collection.
+    episode_shadow: dict[str, Any] | None = None
+    # Duplicate candidate pairs each withholding rung kept out of the
+    # collection, by stamp: ``{"identifier_cross@1": 1160}``, or
+    # ``null`` for a rung switched off. Empty for a collection built before the
+    # count was recorded.
+    withheld: dict[str, int | None] = Field(default_factory=dict)
 
 
 @app.get("/curation", dependencies=[AUTH_GATE], response_model=CurationQueueResponse)
@@ -750,6 +880,8 @@ async def get_curation_queue(
         collection_size=result.collection_size,
         open_count=result.open_count,
         kind_as_of=result.kind_as_of,
+        episode_shadow=result.episode_shadow,
+        withheld=result.withheld,
     )
 
 
@@ -891,6 +1023,65 @@ async def curation_affirm_endpoint(req: CurationAffirmRequest) -> CurationEventR
     )
 
 
+class DuplicateGroupGestureRequest(BaseModel):
+    """A gesture on a ``duplicate_group`` curation card.
+
+    ``members`` names the claims ruled on, as ids or unique id prefixes of the
+    group's current members, or ``["all"]`` on a group of ten or fewer.
+    ``keep`` names the hub a ``merge`` links the others to.
+    """
+
+    card_key: str
+    gesture: Literal["merge", "split", "dismiss"]
+    members: list[str] = []
+    keep: str | None = None
+
+
+class CurationGestureResponse(BaseModel):
+    """Outcome of a curation gesture: the card it ruled on and what it did."""
+
+    card_key: str
+    message: str
+
+
+@app.post(
+    "/curation/duplicate-group",
+    dependencies=[OPERATOR_GATE],
+    response_model=CurationGestureResponse,
+    responses=_ERR400,
+)
+async def curation_duplicate_group_endpoint(
+    req: DuplicateGroupGestureRequest,
+) -> CurationGestureResponse:
+    """Merge, split or dismiss members of a duplicate group.
+
+    ``merge`` links the named members to one hub as co-evidential, and every
+    belief stays active. ``split`` rules the named members not the same claim
+    as the rest. ``dismiss`` rules that no two members are the same claim. A
+    member named that is not in the group as the queue serves it, or a merge
+    across a recorded conflict or an earlier ruling, is refused with 400. 403
+    when curation writes are disabled. Refused (503) under the dev-key skip,
+    even from loopback: it needs a real bearer."""
+    _require_belief_writes_enabled()
+    if not req.card_key.startswith(f"{CardKind.DUPLICATE_GROUP.value}:"):
+        raise HTTPException(status_code=400, detail="Not a duplicate_group card key.")
+    async with session_scope(write=True) as session:
+        try:
+            card = CurationCard.from_key(req.card_key)
+            message = await apply_gesture(
+                session,
+                card,
+                req.gesture,
+                actor="http:/curation/duplicate-group",
+                members=req.members or None,
+                keep=req.keep,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        await session.commit()
+    return CurationGestureResponse(card_key=req.card_key, message=message)
+
+
 async def _record_demotion_ruling(
     session: AsyncSession, card_key: str, gesture: str, actor: str
 ) -> str | None:
@@ -937,7 +1128,9 @@ class MemoryUsefulResponse(BaseModel):
     response_model=MemoryUsefulResponse,
     responses=_ERR400,
 )
-async def memory_useful_endpoint(req: MemoryUsefulRequest) -> MemoryUsefulResponse:
+async def memory_useful_endpoint(
+    req: MemoryUsefulRequest, _wrl: WriteRateLimitDep
+) -> MemoryUsefulResponse:
     """Mark a belief useful (``BELIEF_MARKED_USEFUL`` operator event).
 
     The explicit second utility channel, for the belief class the transcript
@@ -947,7 +1140,7 @@ async def memory_useful_endpoint(req: MemoryUsefulRequest) -> MemoryUsefulRespon
     day. An agent key's press is recorded with its principal and earns none,
     so it neither adds to the credit nor uses up the operator's.
     403 when belief writes are disabled (``mcp.write.enabled_stores``
-    default-deny)."""
+    default-deny); 429 past ``api.write_rate_limit_per_minute``."""
     from particles.operations.utility_feedback import (
         HTTP_ACTOR,
         BeliefNotCreditable,
@@ -1053,6 +1246,14 @@ class DepositUrlRequest(BaseModel):
     # HTTP so the thin client's `deposit --follow-post-links` reaches the engine.
     follow_post_links: bool | None = None
     follow_comment_links: bool | None = None
+    standing: bool = Field(
+        default=False,
+        description=(
+            "Keep a deposit that names no project global, so every project's "
+            "session-start digest may list it, instead of marking it "
+            "scope:reference. Operator keys only; ignored for an agent key."
+        ),
+    )
 
 
 class DepositTextRequest(BaseModel):
@@ -1075,6 +1276,13 @@ class DepositTextRequest(BaseModel):
     deposited_by: str | None = None
     tags: list[str] = []
     author_id: str | None = None
+    standing: bool = Field(
+        default=False,
+        description=(
+            "Keep a deposit that names no project global instead of marking it "
+            "scope:reference. Operator keys only; ignored for an agent key."
+        ),
+    )
     uri_r: str | None = None
     mutability: str | None = None
     # ``"LAZY"`` asks the engine to re-check the source later.
@@ -1132,6 +1340,17 @@ class _DepositProvenance:
     confined: bool
     #: The deposit's tags, with a project-bound key's project stamped on (§4).
     tags: list[str]
+    #: An operator's ``standing``: a re-deposit onto a marked
+    #: entry unmarks it. Never set for an agent key.
+    standing: bool = False
+
+
+async def _unmark_if_standing(
+    session: AsyncSession, prov: _DepositProvenance, entry_id: str
+) -> None:
+    """A ``standing`` operator re-deposit onto a ``scope:reference`` entry makes it global."""
+    if prov.standing and not prov.confined:
+        await unmark_reference(session, entry_id, actor=prov.principal.id, by="standing")
 
 
 #: The anonymous depositor label an operator key's deposit records when the
@@ -1181,8 +1400,39 @@ def _canonical_project_tags(tags: list[str] | None) -> list[str]:
     ]
 
 
+_CODEX_SOURCE = HARNESS_SOURCES["codex"]
+
+
+def _refuse_generic_codex_intake(
+    *,
+    uri: str | None = None,
+    tags: list[str] | None = None,
+    identities: tuple[str | None, ...] = (),
+) -> None:
+    # Reject alternate spellings before any intake can normalize them.
+    scheme, colon, _ = unquote(uri or "").partition(":")
+    scheme = "".join(ch for ch in scheme if not ch.isspace() and ord(ch) >= 32)
+    if (
+        (colon and scheme.casefold() == _CODEX_SOURCE.scheme)
+        or any(tag.strip().casefold() == _CODEX_SOURCE.tag for tag in tags or ())
+        or any(
+            identity is not None and identity.strip().casefold() == _CODEX_SOURCE.depositor
+            for identity in identities
+        )
+    ):
+        raise HTTPException(
+            status_code=403, detail="Codex capture requires its own key and request."
+        )
+
+
 def _deposit_provenance(
-    deposited_by: str | None, author_id: str | None = None, tags: list[str] | None = None
+    deposited_by: str | None,
+    author_id: str | None = None,
+    tags: list[str] | None = None,
+    *,
+    standing: bool = False,
+    statement: bool = False,
+    rule_file: str | None = None,
 ) -> _DepositProvenance:
     """Stamp a deposit with the key's principal, or keep an operator's named attribution.
 
@@ -1195,6 +1445,7 @@ def _deposit_provenance(
     ``HARVEST_MARKS``: an operator, or an agent whose principal is a harvester
     (rules 1 and 5; security review 2026-10-24-2, P5).
     """
+    _refuse_generic_codex_intake(tags=tags, identities=(deposited_by, author_id))
     principal = current_principal()
     if principal is None:  # the agent gate admits no anonymous write
         raise HTTPException(status_code=401, detail="Invalid API key")
@@ -1202,12 +1453,26 @@ def _deposit_provenance(
         # An operator names what tags it likes, but a project tag is stored in
         # its canonical spelling, as an agent's is, so one project is never two
         # by normalisation form (security review 2026-10-28-2, AA25).
+        # A document an operator deposits with no project is reference unless
+        # it is standing: it answers questions everywhere and is
+        # left out of the session-start digests.
         return _DepositProvenance(
             principal=principal,
             deposited_by=deposited_by or _ANONYMOUS_DEPOSITOR,
             author_id=author_id,
             confined=False,
-            tags=_canonical_project_tags(tags),
+            # A statement route (the remote ``import vault`` arm: the operator's
+            # own writing) writes no marker and unmarks nothing.
+            tags=(
+                _canonical_project_tags(tags)
+                if statement
+                else with_reference_marker(
+                    _canonical_project_tags(tags),
+                    get_config().observer_scope.harness_tags,
+                    standing=standing,
+                )
+            ),
+            standing=standing,
         )
     for field, value in (("deposited_by", deposited_by), ("author_id", author_id)):
         if value is not None and value != principal.id:
@@ -1218,9 +1483,10 @@ def _deposit_provenance(
             principal,
             f"it may not name {', '.join(marks)}, which only the owner's harvesters write",
         )
-    if RULE_SOURCE_TAG in marks:
+    if RULE_SOURCE_TAG in marks and rule_file is None:
         # The rule-file intake (`rules sync`, `init claude-code`) runs on the
-        # engine's host only; the remote harvest never sends the mark
+        # engine's host; a remote client's push of a rule file under its key's
+        # rule roots is the one exception, judged first by _rule_file_scope
         # (security review 2026-10-26-1, W41).
         raise _provenance_refusal(
             principal,
@@ -1249,11 +1515,15 @@ def _deposit_provenance(
             )
         if principal.project not in project_keys(stamped):
             stamped.append(project_tag(principal.project))
-    elif classify_entry(stamped, get_config().observer_scope.harness_tags) is EntryScope.GLOBAL:
+    elif (
+        rule_file != "global"
+        and classify_entry(stamped, get_config().observer_scope.harness_tags).everywhere
+    ):
         # An agent's material is never global by omission: a deposit that
         # names no project and carries no harness tag is marked unattributed,
         # as the agent routes mark it (security review
-        # 2026-10-26-1, W4, W36).
+        # 2026-10-26-1, W4, W36). A user-level rule file under the key's global
+        # rule root is global by the operator's word at mint.
         stamped.append(UNATTRIBUTED_MARKER)
     return _DepositProvenance(
         principal=principal,
@@ -1342,7 +1612,101 @@ def _harvest_root_refusal(principal: Principal, path: str) -> str | None:
     return f"may not name {path!r}, which lies under none of its {'; '.join(named)}"
 
 
-def _confine_text_deposit(prov: _DepositProvenance, uri_r: str | None, source_type: str) -> None:
+def _harvest_host_refusal(principal: Principal) -> str | None:
+    """Why a harvester key may name no ``file://`` URI for want of a client host, or None.
+
+    The engine stamps each ``file://`` entry a key deposits with the key's
+    recorded ``host_id``; a key that records none would leave
+    entries no host can claim, and a key carrying this engine's own id would
+    write over HTTP onto files the engine reads from its own disk.
+    """
+    if principal.host_id is None:
+        return (
+            "records no client host id, so it names no memory or archive file; mint the "
+            "hooks a key with --host-id (`particles init claude-code` on the client prints "
+            "the command) and revoke this one"
+        )
+    if principal.host_id == local_host_id():
+        return (
+            "records this engine host's own id as its client host; a harness on the engine "
+            "host deposits in process. Mint the key with the client's --host-id"
+        )
+    return None
+
+
+def _rule_file_scope(principal: Principal | None, uri_r: str | None, tags: list[str]) -> str | None:
+    """Judge a harvester's push of a rule file; ``"global"``, ``"project"``, or ``None``.
+
+    ``None`` when the deposit carries no ``rule-file`` mark or its key is not a
+    harvester's, which :func:`_deposit_provenance` then refuses as before. For a
+    harvester the URI must be a ``file://`` path spelled as the
+    client sends it, its last segment one of ``rule_sources.filenames``, crossing
+    none of ``rule_sources.exclude_dirs`` (a worktree's branch copy is no
+    source), and lying either directly in a global rule root, with no project
+    tag, or under a rule root, with exactly that root's own project tag. Any
+    other shape is refused with 403, before the writer lock.
+    """
+    if RULE_SOURCE_TAG not in tags or principal is None:
+        return None
+    if principal.can(Capability.ATTRIBUTE_OTHERS) or not principal.can(Capability.HARVEST_MARKS):
+        # An operator names what it likes; any other agent is refused the mark
+        # by _deposit_provenance.
+        return None
+
+    def refuse(why: str) -> HTTPException:
+        return HTTPException(
+            status_code=403,
+            detail=(f"This key ({principal.role.value}, principal {principal.id}) {why} ."),
+        )
+
+    if uri_r is None or not uri_r.startswith("file://") or not _plain_file_uri(uri_r):
+        raise refuse("may push a rule file only under its file:// URI")
+    if (host := _harvest_host_refusal(principal)) is not None:
+        raise refuse(host)
+    path = unquote(urlsplit(uri_r).path)
+    if uri_r != Path(path).as_uri():
+        raise refuse(f"may name a file only as {Path(path).as_uri()!r}")
+    cfg = get_config().rule_sources
+    segments = path.split("/")[1:]
+    if segments[-1] not in cfg.filenames:
+        raise refuse(f"may push only files named {', '.join(cfg.filenames)} as rule files")
+    keys = project_keys(_canonical_project_tags(tags))
+    for root in principal.global_rule_roots or ():
+        head = root.split("/")[1:]
+        if segments[: len(head)] == head and len(segments) == len(head) + 1:
+            if keys:
+                raise refuse("may not give a global rule file a project")
+            return "global"
+    for root in principal.rule_roots or ():
+        head = root.split("/")[1:]
+        if segments[: len(head)] != head or len(segments) == len(head):
+            continue
+        if set(segments[len(head) : -1]) & set(cfg.exclude_dirs):
+            raise refuse(f"may not push {path!r}, which lies in an excluded directory")
+        if keys != {canonical_project_key(claude_project_slug(root))}:
+            raise refuse(
+                f"may push {path!r} only as project {claude_project_slug(root)!r}, its rule root's"
+            )
+        return "project"
+    raise refuse(f"may not push {path!r}, which lies under none of its rule roots")
+
+
+def _plain_file_uri(uri_r: str) -> bool:
+    """A ``file://`` URI with no host, query, fragment, dot segment or control character."""
+    if any(unicodedata.category(ch)[0] == "C" for ch in uri_r):
+        return False
+    parts = urlsplit(uri_r)
+    if parts.netloc or parts.query or parts.fragment:
+        return False
+    path = unquote(parts.path)
+    if any(unicodedata.category(ch)[0] == "C" for ch in path):
+        return False
+    return not any(segment in {".", ".."} for segment in path.split("/"))
+
+
+def _confine_text_deposit(
+    prov: _DepositProvenance, uri_r: str | None, source_type: str, rule_file: str | None = None
+) -> None:
     """An agent's text deposit names no URI and no source type of its own (rule 4).
 
     A URI is evidence: an ``http(s)`` one takes that domain's trust and joins its
@@ -1356,11 +1720,13 @@ def _confine_text_deposit(prov: _DepositProvenance, uri_r: str | None, source_ty
     if not prov.confined:
         return
     harvester = prov.principal.can(Capability.HARVEST_MARKS)
-    if uri_r is not None and not (harvester and _is_harvest_uri(uri_r)):
+    if uri_r is not None and not (harvester and (rule_file is not None or _is_harvest_uri(uri_r))):
         raise _provenance_refusal(prov.principal, f"it may not name the URI {uri_r!r}")
-    if uri_r is not None and uri_r.startswith("file://"):
+    if uri_r is not None and uri_r.startswith("file://") and rule_file is None:
         path = unquote(urlsplit(uri_r).path)
-        refusal = _harvest_root_refusal(prov.principal, path)
+        refusal = _harvest_host_refusal(prov.principal) or _harvest_root_refusal(
+            prov.principal, path
+        )
         if refusal is None and uri_r != Path(path).as_uri():
             # The one spelling the harvest sends, so the path the roots judged is
             # the URI every lookup keys on and the slug every consumer reads
@@ -1381,15 +1747,35 @@ def _confine_text_deposit(prov: _DepositProvenance, uri_r: str | None, source_ty
 
 @contextlib.contextmanager
 def _confined(prov: _DepositProvenance) -> Iterator[None]:
-    """Run an agent key's deposit under :func:`own_entries_only_for`; 409 on another's entry."""
-    if not prov.confined:
-        yield
-        return
+    """Run a deposit as its key: confined to its own entries, stamped with its host.
+
+    An agent key's deposit runs under :func:`own_entries_only_for` (409 on
+    another principal's entry). The pending-extraction cap is not applied
+    here: the auth gate binds it for the whole request. Every key's
+    deposit runs under :func:`deposit_origin` with the key's recorded
+    ``host_id``, never a value from the request, so a ``file://`` entry made
+    over HTTP records the client host its path names, and a deposit naming
+    another host's file is refused with 409 (§3.3).
+    """
     try:
-        with own_entries_only_for(prov.deposited_by):
-            yield
+        with deposit_origin(prov.principal.host_id, operator=not prov.confined):
+            if not prov.confined:
+                yield
+                return
+            # An agent key's entry is stamped as an agent's, so extracting it
+            # mints new Subjects provisional to the key's principal; a
+            # harvester's is not.
+            stamp = (
+                nullcontext()
+                if _keys.is_harvester(prov.principal.role, prov.principal.id)
+                else agent_deposit()
+            )
+            with own_entries_only_for(prov.deposited_by), stamp:
+                yield
     except ForeignEntryRefused as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except OtherHostEntryRefused as exc:
+        raise HTTPException(status_code=409, detail=exc.describe()) from exc
 
 
 def _refuse_migration_source_type(source_type: str | None) -> None:
@@ -1413,6 +1799,12 @@ def _refuse_migration_source_type(source_type: str | None) -> None:
         )
 
 
+def _legacy_deposit_body(value: Any) -> Any:
+    if isinstance(value, dict) and "codex_capture" in value:
+        raise ValueError("Codex capture fields are reserved")
+    return value
+
+
 @app.post(
     "/corpus/deposit/url",
     dependencies=[AGENT_GATE],
@@ -1420,7 +1812,9 @@ def _refuse_migration_source_type(source_type: str | None) -> None:
     responses={**_ERR400, **_ERR502},
 )
 async def corpus_deposit_url(
-    req: DepositUrlRequest, _rl: RateLimitDep, session: SessionDep
+    req: Annotated[DepositUrlRequest, BeforeValidator(_legacy_deposit_body)],
+    _rl: RateLimitDep,
+    session: SessionDep,
 ) -> DepositResponse:
     """Deposit a URL into the corpus. Returns the entry + snapshot IDs.
 
@@ -1430,7 +1824,8 @@ async def corpus_deposit_url(
     answers 409. An operator key names what it likes. The store's
     writer lock is taken around each write, never across the fetch. Rate-limited
     per principal like the agents' deposit (``api.rate_limit_per_minute``)."""
-    prov = _deposit_provenance(req.deposited_by, tags=req.tags)
+    _refuse_generic_codex_intake(uri=req.url)
+    prov = _deposit_provenance(req.deposited_by, tags=req.tags, standing=req.standing)
     _refuse_migration_source_type(req.source_type)
     if prov.confined and req.source_type is not None:
         raise _provenance_refusal(
@@ -1455,7 +1850,7 @@ async def corpus_deposit_url(
         # Each write unit committed itself; this commits, under the lock, any
         # write a unit did not cover.
         async with write_transaction(session):
-            pass
+            await _unmark_if_standing(session, prov, entry_id)
     except SourceFetchError as exc:
         # Expected upstream condition — the origin refused/failed the fetch (e.g.
         # a Reddit thread the Arctic Shift archive has not captured, the
@@ -1465,9 +1860,15 @@ async def corpus_deposit_url(
         # (the client request was well-formed; the upstream is the problem).
         log.warning("deposit_url: upstream fetch failed for %r: %s", req.url, exc)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    except (EgressRefused, HTTPException):
-        # A policy refusal, mapped to 403 by the app-level handler,
-        # or this route's own answer (the 409 for another principal's entry).
+    except ServiceCredentialWithheld as exc:
+        # The fetch has no anonymous mode and the operator's service credential
+        # is not spent on a target this key chose (security review 2026-11-17-1,
+        # RA1).
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except (EgressRefused, PendingExtractionsFull, HTTPException):
+        # A policy refusal or a metered key's full extraction queue,
+        # mapped to 403 and 429 by the app-level handlers, or
+        # this route's own answer (the 409 for another principal's entry).
         raise
     except Exception as exc:
         log.warning("deposit_url failed for %r: %s", req.url, exc, exc_info=True)
@@ -1480,9 +1881,167 @@ async def corpus_deposit_url(
     )
 
 
+class CodexDepositRequest(BaseModel):
+    """A URI-owned Codex conversation with versioned capture evidence."""
+
+    model_config = ConfigDict(extra="forbid")
+    uri_r: str
+    source_type: Literal["CONVERSATION"] = "CONVERSATION"
+    mutability: Literal["APPEND_ONLY"] = "APPEND_ONLY"
+    fetch_policy: Literal["NEVER"] = "NEVER"
+    codex_capture: CodexSubmission
+
+
+def _check_codex_path(value: str) -> None:
+    # These are inert client names. Do not resolve or open them on this host.
+    if (
+        len(value) > 4096
+        or not value.startswith("/")
+        or any(part in {"", ".", ".."} for part in value[1:].split("/"))
+        or any(unicodedata.category(ch)[0] == "C" for ch in value)
+    ):
+        raise UnsupportedTranscript("invalid_capture_path")
+
+
+async def _deposit_codex(
+    req: CodexDepositRequest, store: str, principal: Principal
+) -> DepositResponse:
+    capture = req.codex_capture
+    try:
+        identity = session_uuid(capture.session_id)
+        if req.uri_r != _CODEX_SOURCE.session_prefix + identity:
+            raise UnsupportedTranscript("invalid_codex_source_uri")
+        session_uuid(capture.home_id)
+        _check_codex_path(capture.home_path)
+        if capture.expected_capture_id is not None:
+            session_uuid(capture.expected_capture_id)
+        elif capture.prior_raw_hash is not None:
+            raise UnsupportedTranscript("unexpected_prior_raw_hash")
+        if capture.launch_root is not None:
+            _check_codex_path(capture.launch_root)
+        project = capture.project_key
+        if project is not None and (
+            not names_a_project(project)
+            or lookalike_reason(project) is not None
+            or canonical_project_key(project) != project
+        ):
+            raise UnsupportedTranscript("invalid_codex_project")
+        root_project = (
+            canonical_project_key(claude_project_slug(capture.launch_root))
+            if capture.launch_root is not None
+            else None
+        )
+        if project != root_project:
+            raise UnsupportedTranscript("capture_project_root_mismatch")
+        if capture.parent is not None and session_uuid(capture.parent.session_id) == identity:
+            raise UnsupportedTranscript("fork_ancestry_cycle")
+        if capture.raw_size == 0:
+            raise UnsupportedTranscript("empty_capture_rollout")
+        if capture.prefix is not None and (
+            capture.prefix.byte_offset > capture.raw_size
+            or capture.prefix.ordinal > capture.prefix.byte_offset
+            or (
+                capture.prefix.byte_offset == capture.raw_size
+                and capture.prefix.sha256 != capture.raw_hash
+            )
+        ):
+            raise UnsupportedTranscript("invalid_fork_boundary")
+        text_size = len(capture.text.encode("utf-8"))
+    except UnsupportedTranscript as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    except UnicodeError:
+        raise HTTPException(status_code=400, detail="invalid_capture_text") from None
+
+    if principal.project is not None and project != principal.project:
+        raise HTTPException(status_code=403, detail="The capture project must match the key.")
+    limit = get_config().codex.harvest.max_rollout_bytes
+    if capture.raw_size > limit or text_size > limit:
+        raise HTTPException(status_code=413, detail="Codex capture exceeds the rollout size limit.")
+
+    try:
+        async with session_scope(store, write=True) as session:
+            manifest, unchanged = await capture_remote_codex(
+                session, capture, project_binding=principal.project
+            )
+            await session.commit()
+    except ForeignEntryRefused:
+        raise HTTPException(status_code=409, detail="foreign_codex_entry") from None
+    except (UnsupportedTranscript, CaptureStateConflict) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    return DepositResponse(
+        entry_id=manifest.entry_id, snapshot_id=manifest.snapshot_id, unchanged=unchanged
+    )
+
+
+class CodexProofResponse(BaseModel):
+    """A committed capture head or an exact recorded prefix for a single session."""
+
+    manifest: CaptureManifest | None = None
+    prefix: CodexBoundary | None = None
+
+
+@app.get(
+    "/corpus/codex-capture/{session_id}",
+    dependencies=[CODEX_PROOF_GATE],
+    response_model=CodexProofResponse,
+)
+async def codex_capture_proof(
+    session_id: str,
+    response: Response,
+    store: StoreDep,
+    _rl: RateLimitDep,
+    home_id: Annotated[str, Header(alias="X-Particles-Codex-Home-Id")],
+    encoded_home: Annotated[str, Header(alias="X-Particles-Codex-Home")],
+    byte_offset: Annotated[int | None, Query(ge=0, le=2**31 - 1)] = None,
+    ordinal: Annotated[int | None, Query(ge=0, le=2**31 - 1)] = None,
+) -> CodexProofResponse:
+    """Return continuity metadata for a capture key's session and home."""
+    principal = current_principal()
+    assert principal is not None
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        identity = session_uuid(session_id)
+        session_uuid(home_id)
+        home_path = unquote(encoded_home, errors="strict")
+        _check_codex_path(home_path)
+        if (byte_offset is None) != (ordinal is None):
+            raise UnsupportedTranscript("incomplete_fork_boundary")
+    except UnsupportedTranscript as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    except UnicodeError:
+        raise HTTPException(status_code=400, detail="invalid_capture_path") from None
+
+    try:
+        async with session_scope(store) as session:
+            manifest = await read_codex_capture(
+                session,
+                identity,
+                home_path=home_path,
+                home_id=home_id,
+                project_binding=principal.project,
+            )
+            if manifest is not None:
+                if byte_offset is None or ordinal is None:
+                    return CodexProofResponse(manifest=manifest)
+                digest = await verified_prefix(
+                    session, identity, byte_offset, ordinal, home_path, home_id
+                )
+                if digest is not None:
+                    return CodexProofResponse(
+                        prefix=CodexBoundary(
+                            byte_offset=byte_offset, ordinal=ordinal, sha256=digest
+                        )
+                    )
+    except ForeignEntryRefused:
+        pass
+    except UnsupportedTranscript as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    raise HTTPException(status_code=404, detail="Codex capture proof not found.")
+
+
 @app.post(
     "/corpus/deposit/text",
-    dependencies=[AGENT_GATE],
+    dependencies=[TEXT_DEPOSIT_GATE],
     response_model=DepositResponse,
     responses={
         **_ERR400,
@@ -1493,7 +2052,9 @@ async def corpus_deposit_url(
     },
 )
 async def corpus_deposit_text(
-    req: DepositTextRequest, _rl: RateLimitDep, store: StoreDep
+    req: CodexDepositRequest | Annotated[DepositTextRequest, BeforeValidator(_legacy_deposit_body)],
+    _rl: RateLimitDep,
+    store: StoreDep,
 ) -> DepositResponse:
     """Deposit raw text into the corpus (no fetch).
 
@@ -1519,12 +2080,26 @@ async def corpus_deposit_text(
     key names what it likes. A ``content_published_at`` after the
     deposit is stored as the deposit time. Rate-limited per principal like the
     agents' deposit (``api.rate_limit_per_minute``)."""
+    principal = current_principal()
+    assert principal is not None
+    if isinstance(req, CodexDepositRequest):
+        if not principal.can(Capability.CODEX_CAPTURE):
+            raise HTTPException(status_code=403, detail="A Codex capture key is required.")
+        return await _deposit_codex(req, store, principal)
+    if principal.can(Capability.CODEX_CAPTURE):
+        raise HTTPException(
+            status_code=403, detail="A versioned Codex capture request is required."
+        )
+    _refuse_generic_codex_intake(uri=req.uri_r)
     # Every refusal that reads no row comes before the store's writer lock, so
     # a refused or malformed request holds up no other writer (security review
     # 2026-10-28-2, AA6, AA43).
-    prov = _deposit_provenance(req.deposited_by, req.author_id, req.tags)
+    rule_file = _rule_file_scope(current_principal(), req.uri_r, req.tags)
+    prov = _deposit_provenance(
+        req.deposited_by, req.author_id, req.tags, standing=req.standing, rule_file=rule_file
+    )
     _refuse_migration_source_type(req.source_type)
-    _confine_text_deposit(prov, req.uri_r, req.source_type)
+    _confine_text_deposit(prov, req.uri_r, req.source_type, rule_file=rule_file)
     if req.uri_r is None:
         text_unchanged: list[bool] = []
         async with session_scope(store, write=True) as session:
@@ -1538,6 +2113,7 @@ async def corpus_deposit_text(
                     author_id=prov.author_id,
                     out_unchanged=text_unchanged,
                 )
+            await _unmark_if_standing(session, prov, entry_id)
             await session.commit()
         return DepositResponse(
             entry_id=entry_id, snapshot_id=snapshot_id, unchanged=any(text_unchanged)
@@ -1574,21 +2150,10 @@ async def corpus_deposit_text(
 
     async with session_scope(store, write=True) as session:
         existing = await get_entry_by_uri(session, req.uri_r)
-        if (
-            existing is not None
-            and existing.fetch_policy is FetchPolicy.LAZY
-            and not is_network_uri(existing.uri_r or "")
-        ):
-            # The engine enrolled this file from its own disk (rules sync, the
-            # local harvest). An HTTP caller appending to it would replace the
-            # file's content until the next refresh (security review N19).
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    "uri_r names a file the engine refreshes from its own disk; it "
-                    "cannot be written over HTTP."
-                ),
-            )
+        # An entry of another host's file, the engine's own included, is refused
+        # inside the deposit with 409. That keeps N19's refusal of an HTTP caller
+        # writing over a file the engine refreshes from its own disk, and drops
+        # it for a client's own file.
         if existing is not None and existing.source_type != req.source_type:
             # A retype would also move the entry's re-fetch floor (N19).
             raise HTTPException(
@@ -1610,6 +2175,7 @@ async def corpus_deposit_text(
                 content_published_at=req.content_published_at,
                 fetch_policy=fetch_policy,
             )
+        await _unmark_if_standing(session, prov, entry_id)
         await session.commit()
     return DepositResponse(entry_id=entry_id, snapshot_id=snapshot_id, unchanged=unchanged)
 
@@ -1620,12 +2186,15 @@ _UPLOAD_CHUNK = 1024 * 1024
 
 @app.post("/corpus/deposit/file", dependencies=[AGENT_GATE], response_model=DepositResponse)
 async def corpus_deposit_file(
+    request: Request,
     file: UploadFile,
     _rl: RateLimitDep,
     deposited_by: Annotated[str | None, Form()] = None,
     source_type: Annotated[str | None, Form()] = None,
     tags: Annotated[list[str] | None, Form()] = None,
     content_date: Annotated[datetime | None, Form()] = None,
+    standing: Annotated[bool, Form()] = False,
+    statement: Annotated[bool, Form()] = False,
 ) -> DepositResponse:
     """Deposit a file upload into the corpus. The file is hashed +
     stored under the blob directory; metadata + initial snapshot are
@@ -1648,7 +2217,9 @@ async def corpus_deposit_file(
     ``source_type``."""
     import tempfile
 
-    prov = _deposit_provenance(deposited_by, tags=tags)
+    if "codex_capture" in await request.form():
+        raise HTTPException(status_code=403, detail="Codex capture fields are reserved.")
+    prov = _deposit_provenance(deposited_by, tags=tags, standing=standing, statement=statement)
     _refuse_migration_source_type(source_type)
 
     max_bytes = get_config().local_files.max_bytes
@@ -1705,6 +2276,7 @@ async def corpus_deposit_file(
                     out_unchanged=file_unchanged,
                     untrusted_caller=True,
                 )
+            await _unmark_if_standing(session, prov, entry_id)
             await session.commit()
     finally:
         if tmp_path is not None:
@@ -2272,6 +2844,7 @@ async def run_links_suggest(
             threshold=req.threshold,
             mode=req.mode,
             confirmed=req.confirmed,
+            actor="http:/links/suggest",
         )
     except ApplyConfirmationRequired as exc:
         # Handler-owned message built from the exception's typed fields (not a
@@ -2528,53 +3101,98 @@ class CreateSubjectRequest(BaseModel):
     external_ids: list[ExternalRef] = []
 
 
-@app.get("/subjects", dependencies=[READ_GATE], response_model=list[Subject])
+@app.get("/subjects", dependencies=[READ_GATE], response_model=list[SubjectView])
 async def list_subjects(
     session: SessionDep,
     limit: int | None = Query(None, ge=1),
     offset: int = Query(0, ge=0),
     order: Literal["name", "degree"] = Query("name"),
-) -> list[Subject]:
+) -> list[SubjectView]:
     """List Subjects (alphabetical). ``limit``/``offset`` paginate (MCP-friendly);
     an omitted ``limit`` returns the first ``storage.max_page_size`` and any
     ``limit`` is clamped to that cap (security review F5; formerly unbounded).
     ``order=degree`` sorts by descending ACTIVE-particle link count instead
-    (most-connected first, e.g. the web UI's Browse seed)."""
+    (most-connected first, e.g. the web UI's Browse seed). A provisional
+    Subject carries ``provisional``."""
     from particles.store.subject_store import list_all_subjects
 
-    return await list_all_subjects(session, limit=_bounded_limit(limit), offset=offset, order=order)
+    return await with_marks(
+        session,
+        await list_all_subjects(session, limit=_bounded_limit(limit), offset=offset, order=order),
+    )
 
 
-@app.get("/subjects/search", dependencies=[READ_GATE], response_model=list[Subject])
+@app.get("/subjects/search", dependencies=[READ_GATE], response_model=list[SubjectView])
 async def search_subjects_endpoint(
     session: SessionDep,
     q: str = Query(..., min_length=1, max_length=200),
     limit: int | None = Query(None, ge=1),
     offset: int = Query(0, ge=0),
-) -> list[Subject]:
+    order: Literal["name", "relevance"] = Query("name"),
+) -> list[SubjectView]:
     """Full-text search Subjects by canonical name or alias. ``limit``/``offset``
     paginate; an omitted ``limit`` returns up to ``storage.max_page_size``
     matches and any ``limit`` is clamped to it. ``q`` is bounded to 1–200 chars
-    and its LIKE wildcards are escaped in the store (security review F5 / F7)."""
+    and its LIKE wildcards are escaped in the store (security review F5 / F7).
+    ``order=relevance`` lists an exact name or alias first, then names that
+    begin with ``q``, then names with a word that begins with it, then the
+    rest, shorter names first; the default, ``name``, is alphabetical."""
     from particles.store.subject_store import search_subjects
 
-    return await search_subjects(session, q, limit=_bounded_limit(limit), offset=offset)
+    return await with_marks(
+        session,
+        await search_subjects(session, q, limit=_bounded_limit(limit), offset=offset, order=order),
+    )
 
 
 @app.get(
     "/subjects/{subject_id}",
     dependencies=[READ_GATE],
-    response_model=Subject,
+    response_model=SubjectView,
     responses=_ERR404,
 )
-async def get_subject_endpoint(subject_id: str, session: SessionDep) -> Subject:
-    """Fetch a Subject by ID. 404 if not present."""
+async def get_subject_endpoint(subject_id: str, session: SessionDep) -> SubjectView:
+    """Fetch a Subject by ID. 404 if not present. A provisional Subject carries
+    ``provisional``; a read by id is never filtered."""
     from particles.store.subject_store import get_subject
 
-    s = await get_subject(session, subject_id)
+    s = await with_mark(session, await get_subject(session, subject_id))
     if s is None:
         raise HTTPException(status_code=404, detail="Subject not found")
     return s
+
+
+class SubjectAcceptResponse(BaseModel):
+    """Outcome of an accept: the Subject, and whether it was provisional."""
+
+    subject: SubjectView
+    accepted: bool
+
+
+@app.post(
+    "/subjects/{subject_id}/accept",
+    dependencies=[OPERATOR_GATE],
+    response_model=SubjectAcceptResponse,
+    responses={**_ERR400, **_ERR404},
+)
+async def accept_subject_endpoint(subject_id: str) -> SubjectAcceptResponse:
+    """Accept a provisional Subject (HTTP mirror of `subjects accept`).
+
+    A Subject an agent principal minted answers only agent principals until an
+    operator accepts it by id; afterwards every extraction, import and operator
+    write that names it resolves to it. ``accepted`` is false when the Subject
+    was already confirmed, which changes nothing. 404 if absent."""
+    from particles.store.subject_store import SubjectNotFoundError
+
+    async with session_scope(write=True) as session:
+        try:
+            subject, accepted = await accept_subject(session, subject_id, actor=_actor_label())
+        except SubjectNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except ValueError as exc:  # an id prefix several Subjects share
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        await session.commit()
+    return SubjectAcceptResponse(subject=subject, accepted=accepted)
 
 
 @app.get(
@@ -2751,6 +3369,7 @@ class WhoAmIResponse(BaseModel):
     """The presented key, as the engine resolved it."""
 
     anonymous: bool
+    codex_capture_protocol: int | None = Field(default=None, exclude_if=lambda value: value is None)
     principal: str | None = None
     role: str | None = None
     key_id: str | None = None
@@ -2759,9 +3378,21 @@ class WhoAmIResponse(BaseModel):
     #: client's doctor can compare them with its own; absent otherwise.
     memory_roots: list[str] | None = None
     archive_roots: list[str] | None = None
+    #: A harvester key's client host id, which the client's
+    #: doctor compares with its own; absent otherwise.
+    host_id: str | None = None
+    #: A harvester key's rule roots; absent otherwise.
+    rule_roots: list[str] | None = None
+    global_rule_roots: list[str] | None = None
+    #: The stores that accept this key's belief writes (the assert, supersede
+    #: and retract routes, ``/session-exposures``, the link and tag writes): the
+    #: engine's ``mcp.write.enabled_stores`` when the key's role may write as an
+    #: agent, empty otherwise, so a client's doctor can tell a 403 coming
+    #: without a write. Absent from an engine that predates it.
+    belief_write_stores: list[str] | None = None
 
 
-@app.get("/auth/whoami", dependencies=[AUTH_GATE], response_model=WhoAmIResponse)
+@app.get("/auth/whoami", dependencies=[IDENTITY_GATE], response_model=WhoAmIResponse)
 async def whoami() -> WhoAmIResponse:
     """Say which principal, role and project the presented key stands for.
 
@@ -2770,19 +3401,35 @@ async def whoami() -> WhoAmIResponse:
     required (401 otherwise); a keyless engine answers ``anonymous`` to a
     loopback caller. ``key_id`` is ``env`` for ``PARTICLES_API_KEY``, which is
     the operator's key. A harvester key also returns the client directories it
-    records, which its own memory and archive files must lie under.
+    records, which its own memory and archive files must lie under, and the
+    client host id its file deposits are stamped with. ``belief_write_stores``
+    names the stores that accept the key's belief writes, so a client checks
+    the write switch without making a write; it is empty for a reader key and
+    for an anonymous caller, since a keyless engine refuses every write.
     """
     principal = current_principal()
     if principal is None:
-        return WhoAmIResponse(anonymous=True)
+        return WhoAmIResponse(anonymous=True, belief_write_stores=[])
+    write_stores = (
+        list(get_config().mcp.write.enabled_stores) if principal.can(Capability.AGENT_WRITE) else []
+    )
     return WhoAmIResponse(
         anonymous=False,
+        codex_capture_protocol=(
+            CODEX_CAPTURE_PROTOCOL if principal.can(Capability.CODEX_CAPTURE) else None
+        ),
         principal=principal.id,
         role=principal.role.value,
         key_id=principal.key_id,
         project=principal.project,
         memory_roots=list(principal.memory_roots) if principal.memory_roots else None,
         archive_roots=list(principal.archive_roots) if principal.archive_roots else None,
+        host_id=principal.host_id,
+        rule_roots=list(principal.rule_roots) if principal.rule_roots else None,
+        global_rule_roots=(
+            list(principal.global_rule_roots) if principal.global_rule_roots else None
+        ),
+        belief_write_stores=write_stores,
     )
 
 
@@ -3047,6 +3694,7 @@ class DigestResponse(BaseModel):
     """The compiled session-start memory digest as one Markdown document."""
 
     markdown: str
+    observer_engaged: bool | None = Field(default=None, exclude_if=lambda value: value is None)
     lines: list[DigestLine] = Field(
         default_factory=list,
         description=(
@@ -3063,6 +3711,8 @@ class DigestResponse(BaseModel):
 async def get_digest_endpoint(
     store: str,
     project: Annotated[str | None, Query(min_length=1)] = None,
+    retired_since: datetime | None = None,
+    strict_scope: bool = False,
 ) -> DigestResponse:
     """Render the session-start memory digest for a store.
 
@@ -3075,15 +3725,67 @@ async def get_digest_endpoint(
     Bearer-gated regardless of ``api.require_auth_for_reads`` (F2): the digest
     is the provenance-ranked roll-up of the full belief store, including
     contested beliefs, which is confidential operator context. The dev-key loopback
-    skip keeps it open for local development."""
-    from particles.operations.digest import build_digest_located
+    skip keeps it open for local development.
+
+    ``strict_scope`` returns 409 if the requested project cannot be applied.
+
+    ``retired_since`` opens the window of the automatic-retirement section under
+    the header: the caller's previous digest. Without it the section
+    looks back ``mcp.recall.digest_retirement_window_days``."""
+    from particles.operations.digest import DigestScopeUnavailable, build_digest_located
 
     try:
-        rendered = await build_digest_located(store, project)
+        rendered = (
+            await build_digest_located(store, project, retired_since, strict_scope=True)
+            if strict_scope
+            else await build_digest_located(store, project, retired_since)
+        )
+    except DigestScopeUnavailable:
+        raise HTTPException(status_code=409, detail="project_scope_unavailable") from None
     except (KeyError, ValueError) as exc:
         # db.py raises KeyError for an unknown store handle.
         raise HTTPException(status_code=404, detail=f"Unknown store {store!r}") from exc
-    return DigestResponse(markdown=rendered.markdown, lines=rendered.lines)
+    return DigestResponse(
+        markdown=rendered.markdown, lines=rendered.lines, observer_engaged=rendered.observer_engaged
+    )
+
+
+class RetirementNoticeResponse(BaseModel):
+    """The digest's automatic-retirement section on its own."""
+
+    markdown: str = Field(
+        description=(
+            "One header line and one line per source that retired claims as replaced, "
+            "each with its restore command. Empty when nothing was retired in the window."
+        )
+    )
+
+
+@app.get(
+    "/digest/{store}/retirements",
+    dependencies=[AUTH_GATE],
+    response_model=RetirementNoticeResponse,
+    responses=_ERR404,
+)
+async def get_retirement_notice_endpoint(
+    store: str,
+    project: Annotated[str | None, Query(min_length=1)] = None,
+    retired_since: datetime | None = None,
+) -> RetirementNoticeResponse:
+    """Render the automatic-retirement section of the digest alone.
+
+    A session start that injects no digest (the projected memory region is
+    current) still names the claims an automatic rung retired since the
+    previous session. Read-only, gated as the digest is, since it carries
+    claim text. ``project`` reads through that observer; ``retired_since`` opens
+    the window, else ``mcp.recall.digest_retirement_window_days``."""
+    from particles.operations.retirement_notice import build_retirement_notice
+
+    try:
+        markdown = await build_retirement_notice(store, project, retired_since)
+    except (KeyError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown store {store!r}") from exc
+    return RetirementNoticeResponse(markdown=markdown)
 
 
 class MemoryProjectionRequest(BaseModel):
@@ -3091,7 +3793,8 @@ class MemoryProjectionRequest(BaseModel):
 
     manifest: DocManifest = Field(
         description=(
-            "The client's parsed memory manifest. A section that includes a file is refused."
+            "The client's parsed memory manifest. Each section that includes a file needs "
+            "its text in `blocks`."
         )
     )
     observer_project: str | None = Field(
@@ -3104,6 +3807,14 @@ class MemoryProjectionRequest(BaseModel):
     fold_targets: list[str] = Field(
         default_factory=list,
         description="File URIs whose fold verdicts the client needs.",
+    )
+    blocks: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "The text of each file section, keyed by the section's `block` string as the "
+            "manifest spells it. A key is looked up, never opened. At most "
+            f"{MAX_REMOTE_BLOCK_BYTES} UTF-8 bytes in all."
+        ),
     )
 
 
@@ -3126,7 +3837,10 @@ class MemoryProjectionResponse(BaseModel):
         **_ERR404,
         422: {
             "model": ErrorResponse,
-            "description": "Manifest names a client file this engine cannot read",
+            "description": (
+                "A file section of the manifest has no text in `blocks`, `blocks` names a "
+                "section the manifest does not have, or the texts exceed the size limit"
+            ),
         },
     },
 )
@@ -3138,9 +3852,11 @@ async def memory_projection_endpoint(
     The client sends its own manifest, so its projection policy governs, and
     splices the returned body into its memory directory itself; this route
     writes nothing. Deterministic, with no model call. ``fold_targets`` are
-    answered against the body just rendered. 404 if the store handle is not
-    configured on this engine; 422 for a manifest with a file section, which
-    names a client path this engine cannot read.
+    answered against the body just rendered. A file section's text arrives in
+    ``blocks``, read by the client; this route looks it up by the section's own
+    string, opens no path and keeps none of it. 404 if the store
+    handle is not configured on this engine; 422 when ``blocks`` does not match
+    the manifest's file sections or exceeds the size limit.
 
     Bearer-gated regardless of ``api.require_auth_for_reads``, like
     ``GET /digest/{store}``: the region is the same confidential roll-up."""
@@ -3158,6 +3874,7 @@ async def memory_projection_endpoint(
                 observer_project=req.observer_project,
                 exclude_source_tags=req.exclude_source_tags,
                 fold_targets=req.fold_targets,
+                block_texts=req.blocks,
             )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"Unknown store {store!r}") from exc
@@ -3266,6 +3983,48 @@ async def get_particle_endpoint(particle_id: str, session: SessionDep) -> Partic
     if p is None:
         raise HTTPException(status_code=404, detail="Particle not found")
     return p
+
+
+class SubjectSuggestionItem(BaseModel):
+    """One subject suggested for a belief, and why."""
+
+    subject: Subject
+    named: bool = Field(description="Its name or an alias appears in the claim.")
+    neighbours: int = Field(
+        description="How many of the nearest linked beliefs carry it; 0 when only named."
+    )
+
+
+@app.get(
+    "/particles/{particle_id}/subject-suggestions",
+    dependencies=[READ_GATE],
+    response_model=list[SubjectSuggestionItem],
+    responses=_ERR404,
+)
+async def subject_suggestions_endpoint(
+    particle_id: str,
+    session: SessionDep,
+    limit: int | None = Query(None, ge=1),
+    observer_project: str | None = Query(None),
+) -> list[SubjectSuggestionItem]:
+    """The subjects a belief is most likely about, best first.
+
+    Two signals, with no model call: the subjects whose name or alias the
+    claim spells, then the subjects its nearest linked ACTIVE beliefs carry.
+    A subject the belief already carries is never suggested. ``limit``
+    defaults to ``curation.subject_suggestions.limit`` and is clamped to 20.
+    ``observer_project`` reads the neighbours as that project sees them. A
+    read: it writes nothing. 404 if the belief is absent."""
+    from particles.store.particle_store import get_particle
+
+    p = await get_particle(session, particle_id)
+    if p is None:
+        raise HTTPException(status_code=404, detail="Particle not found")
+    found = await suggest_subjects(session, p, limit=limit, observer_project=observer_project)
+    return [
+        SubjectSuggestionItem(subject=s.subject, named=s.named, neighbours=s.neighbours)
+        for s in found
+    ]
 
 
 class ParticleTagsRequest(BaseModel):
@@ -3439,6 +4198,10 @@ async def add_subject_aliases_endpoint(
         if await get_subject(session, subject_id) is None:
             raise HTTPException(status_code=404, detail="Subject not found")
         subject, added = await add_aliases(session, subject_id, req.aliases)
+        # An operator's alias confirms a provisional Subject and folds the
+        # provisional ones its new names reach.
+        await operator_touched(session, subject.id, actor=_actor_label(), act="alias")
+        subject = await get_subject(session, subject.id) or subject
         await session.commit()
     return SubjectAliasResponse(subject=subject, added=added)
 
@@ -3493,6 +4256,8 @@ async def _merge_subjects_response(
             target = plan.target
         else:
             target, plan = await merge_subjects_many(session, source_ids, target_id)
+            # The merge target is the operator's chosen node.
+            await operator_touched(session, target.id, actor=_actor_label(), act="merge")
     except SubjectNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -3928,12 +4693,13 @@ async def particle_supersede_endpoint(
     responses=_ERR400,
 )
 async def particle_retract_endpoint(
-    req: ParticleRetractRequest, store: StoreDep
+    req: ParticleRetractRequest, _wrl: WriteRateLimitDep, store: StoreDep
 ) -> ParticleRetractEndpointResponse:
     """Retract a belief (HTTP mirror of MCP ``particle_retract``). Own-beliefs-only;
     operator (HUMAN_REVIEW) particles are not agent-mutable. 400 on a guard
     violation or empty reason; 403 when belief writes are disabled for
-    the store; 404 on an unknown ``store``."""
+    the store; 404 on an unknown ``store``; 429 past
+    ``api.write_rate_limit_per_minute``."""
     identity, project_key = _agent_mutation_checks(store, req.project_key)
     async with session_scope(store, write=True) as session:
         try:
@@ -3976,7 +4742,7 @@ class AgentDepositResponse(BaseModel):
     responses=_ERR400,
 )
 async def agent_deposit_endpoint(
-    req: AgentDepositRequest,
+    req: Annotated[AgentDepositRequest, BeforeValidator(_legacy_deposit_body)],
     _rl: RateLimitDep,
     store: StoreDep,
 ) -> AgentDepositResponse:
@@ -3986,9 +4752,12 @@ async def agent_deposit_endpoint(
     another principal or project deposited are never reused or rescoped. 400 on
     a guard violation; 403 when belief writes are disabled for the store; 404 on
     an unknown ``store``; 429 past ``api.rate_limit_per_minute``, since each
-    deposit queues a snapshot for model extraction."""
+    deposit queues a snapshot for model extraction, or when an agent key's
+    principal already holds ``api.max_pending_extractions_per_principal``
+    snapshots waiting to be read."""
     # The 403s come before the writer lock (security review 2026-10-28-1, O47).
     _require_belief_writes_enabled(store)
+    _refuse_generic_codex_intake(tags=req.tags, identities=(_agent_identity(),))
     project_key = _bound_project(req.project_key)
     async with session_scope(store, write=True) as session:
         try:
@@ -4030,11 +4799,14 @@ class AgentTagRequest(BaseModel):
 @app.post(
     "/particles/link", dependencies=[AGENT_GATE], response_model=ParticleRelation, responses=_ERR400
 )
-async def agent_link_endpoint(req: AgentLinkRequest, store: StoreDep) -> ParticleRelation:
+async def agent_link_endpoint(
+    req: AgentLinkRequest, _wrl: WriteRateLimitDep, store: StoreDep
+) -> ParticleRelation:
     """Link two beliefs as an agent (HTTP mirror of MCP ``link_add``). Both
     endpoints are own-beliefs-only, never HUMAN_REVIEW, and in view for
     ``project_key``. 400 on a guard violation; 403 when belief writes are
-    disabled for the store; 404 on an unknown ``store``."""
+    disabled for the store; 404 on an unknown ``store``; 429 past
+    ``api.write_rate_limit_per_minute``."""
     identity, project_key = _agent_mutation_checks(store, req.project_key)
     async with session_scope(store, write=True) as session:
         try:
@@ -4059,10 +4831,13 @@ async def agent_link_endpoint(req: AgentLinkRequest, store: StoreDep) -> Particl
     response_model=LinkDeleteResponse,
     responses=_ERR400,
 )
-async def agent_unlink_endpoint(req: AgentLinkRequest, store: StoreDep) -> LinkDeleteResponse:
+async def agent_unlink_endpoint(
+    req: AgentLinkRequest, _wrl: WriteRateLimitDep, store: StoreDep
+) -> LinkDeleteResponse:
     """Withdraw an agent-written link (HTTP mirror of MCP ``link_remove``). 400 on
     a guard violation, including a link an agent did not write; 403 when belief
-    writes are disabled for the store; 404 on an unknown ``store``."""
+    writes are disabled for the store; 404 on an unknown ``store``; 429 past
+    ``api.write_rate_limit_per_minute``."""
     identity, project_key = _agent_mutation_checks(store, req.project_key)
     async with session_scope(store, write=True) as session:
         try:
@@ -4087,10 +4862,12 @@ async def agent_unlink_endpoint(req: AgentLinkRequest, store: StoreDep) -> LinkD
     response_model=ParticleTagsResponse,
     responses=_ERR400,
 )
-async def agent_tag_endpoint(req: AgentTagRequest, store: StoreDep) -> ParticleTagsResponse:
+async def agent_tag_endpoint(
+    req: AgentTagRequest, _wrl: WriteRateLimitDep, store: StoreDep
+) -> ParticleTagsResponse:
     """Tag a belief as an agent (HTTP mirror of MCP ``particle_tag``). 400 on a
     guard violation; 403 when belief writes are disabled for the store; 404 on
-    an unknown ``store``."""
+    an unknown ``store``; 429 past ``api.write_rate_limit_per_minute``."""
     identity, project_key = _agent_mutation_checks(store, req.project_key)
     async with session_scope(store, write=True) as session:
         try:
@@ -4114,10 +4891,12 @@ async def agent_tag_endpoint(req: AgentTagRequest, store: StoreDep) -> ParticleT
     response_model=ParticleTagsResponse,
     responses=_ERR400,
 )
-async def agent_untag_endpoint(req: AgentTagRequest, store: StoreDep) -> ParticleTagsResponse:
+async def agent_untag_endpoint(
+    req: AgentTagRequest, _wrl: WriteRateLimitDep, store: StoreDep
+) -> ParticleTagsResponse:
     """Untag a belief as an agent (HTTP mirror of MCP ``particle_untag``). 400 on
     a guard violation; 403 when belief writes are disabled for the store; 404
-    on an unknown ``store``."""
+    on an unknown ``store``; 429 past ``api.write_rate_limit_per_minute``."""
     identity, project_key = _agent_mutation_checks(store, req.project_key)
     async with session_scope(store, write=True) as session:
         try:

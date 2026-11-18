@@ -89,10 +89,12 @@ from particles.benchmark.resolution import (
     run_resolution,
 )
 from particles.benchmark.schema import BenchmarkSuite
-from particles.config import get_config
+from particles.config import TokenPrice, get_config
 from particles.core.schema import ExtractorRef, Particle
 from particles.extraction.general import candidate_to_particle
 from particles.extraction.registry import ExtractorPlugin
+from particles.operations.audit import ExtractionCall, chunk_sizes
+from particles.operations.spend_estimate import ExtractionRange, extraction_range
 
 log = logging.getLogger(__name__)
 
@@ -300,10 +302,14 @@ class BenchmarkRunEstimate:
     """Projected LLM cost of a (possibly repeated) benchmark run.
 
     Computed before any call is made, from the resolved case bytes and the
-    same chunk math the memory harness's estimate uses.
-    ``estimated_extraction_calls`` is a floor: an
-    extractor may issue extra calls per source (subject resolution,
-    classifier passes) that this cannot see.
+    audit's extraction model: one call per source at
+    or under ``extraction.html_chunk_size``, else one per chunk, each call's
+    output a fixed part plus a part proportional to the characters it reads,
+    scaled for the extraction model, priced from ``llm.price_per_mtok``.
+    ``estimated_extraction_calls`` is a floor: an extractor may issue extra
+    calls per source (subject resolution, classifier passes) that this cannot
+    see. The benchmark extracts outside the pipeline, so no §6.6 probe is
+    counted.
     """
 
     suites: int
@@ -311,7 +317,14 @@ class BenchmarkRunEstimate:
     runs: int
     total_chars: int
     estimated_extraction_calls: int
+    #: Source text alone at ~4 characters a token, the figure printed before pricing.
     estimated_tokens: int
+    #: ``provider:model`` the run would extract on (``llm.extraction``).
+    extraction_provider_model: str = ""
+    #: The list price used, ``None`` when the model has no entry.
+    price_per_mtok: TokenPrice | None = None
+    #: The priced band; ``None`` only on an estimate built without one.
+    band: ExtractionRange | None = None
 
 
 def estimate_benchmark_run(
@@ -321,16 +334,18 @@ def estimate_benchmark_run(
     fixture_dir: Path,
     runs: int,
 ) -> BenchmarkRunEstimate:
-    """Project extraction-call count + token volume for ``runs`` passes.
+    """Project extraction calls, tokens and dollars for ``runs`` passes.
 
     Cases the extractor declines, or whose content will not resolve, are
     excluded — they cost nothing and the runner skips them with a quality
     note. Resolution reads local fixture bytes only; no network, no LLM.
+    Repeat runs are uncached, so the calls of one pass are counted ``runs``
+    times.
     """
-    cfg = get_config().extraction
     case_count = 0
-    calls_per_pass = 0
     total_chars = 0
+    sources = 0
+    calls_per_pass: list[ExtractionCall] = []
     for suite in suites:
         for case in suite.cases:
             try:
@@ -340,33 +355,69 @@ def estimate_benchmark_run(
             if source_type and not extractor.accepts(source_type):
                 continue
             case_count += 1
-            n = len(content)
-            total_chars += n
-            if n <= 0:
-                continue
-            if n <= cfg.html_chunk_size:
-                calls_per_pass += 1
-            else:
-                calls_per_pass += min(-(-n // cfg.html_chunk_size), cfg.max_llm_calls_per_source)
+            total_chars += len(content)
+            sizes = chunk_sizes(len(content))
+            if sizes:
+                sources += 1
+            calls_per_pass.extend(ExtractionCall(chars=size) for size in sizes)
+    llm = get_config().llm
+    selection = llm.for_purpose("extraction")
+    band = extraction_range(calls_per_pass * runs, entries=sources * runs, reconcile_probes=False)
     return BenchmarkRunEstimate(
         suites=len(suites),
         cases=case_count,
         runs=runs,
         total_chars=total_chars * runs,
-        estimated_extraction_calls=calls_per_pass * runs,
+        estimated_extraction_calls=len(calls_per_pass) * runs,
         estimated_tokens=(total_chars * runs) // 4,
+        extraction_provider_model=f"{selection.provider}:{selection.model}",
+        price_per_mtok=llm.price_for(selection),
+        band=band,
     )
+
+
+def _usd(value: float) -> str:
+    return f"US${value:,.2f}"
 
 
 def render_benchmark_estimate(estimate: BenchmarkRunEstimate) -> str:
     """Human rendering of the estimate — printed before any LLM call."""
-    return (
+    head = (
         f"Estimate: {estimate.cases} case(s) across {estimate.suites} suite(s) × "
         f"{estimate.runs} run(s) → ≥{estimate.estimated_extraction_calls} extraction "
-        f"call(s), ~{estimate.estimated_tokens:,} input tokens. Repeat runs are "
-        f"deliberately uncached — measuring sampling variance is the point — so "
-        f"cost scales linearly with --runs."
+        f"call(s)"
     )
+    band = estimate.band
+    if band is None:
+        head += f", ~{estimate.estimated_tokens:,} input tokens."
+    else:
+        head += (
+            f" on {estimate.extraction_provider_model}, ~{band.input_tokens:,} input and "
+            f"~{band.output_tokens_low:,}–{band.output_tokens_high:,} output tokens; "
+        )
+        price = estimate.price_per_mtok
+        if price is None or band.low_usd is None or band.high_usd is None:
+            head += (
+                f"no dollar figure, because {estimate.extraction_provider_model} has no "
+                f"llm.price_per_mtok entry."
+            )
+        else:
+            head += (
+                f"about {_usd(band.low_usd)}–{_usd(band.high_usd)} at list price "
+                f"(US${price.input:g} in / US${price.output:g} out per MTok)."
+            )
+    lines = [
+        head + " Repeat runs are deliberately uncached — measuring sampling variance is the "
+        "point — so cost scales linearly with --runs."
+    ]
+    if band is not None and band.output_basis:
+        lines.append(
+            f"  Output per call is a fixed part plus a rate per source character "
+            f"({band.output_basis}); input adds extraction.estimate_prompt_overhead_tokens "
+            f"per call, and the cached instruction prefix "
+            f"(extraction.estimate_cached_prefix_tokens) is priced in the dollar figure."
+        )
+    return "\n".join(lines)
 
 
 async def run_benchmark_repeated(

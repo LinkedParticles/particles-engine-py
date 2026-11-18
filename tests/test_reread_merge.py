@@ -462,6 +462,10 @@ class TestApply:
         undo = await unmerge_exact_duplicates(db_session, run_id=merged.run_id, dry_run=False)
         assert undo.groups[0].restored_ids == [_pid(2)]
         assert undo.groups[0].relations_deleted == 1
+        assert undo.groups[0].relation_tag is RelationCreatedBy.REREAD_DUPLICATE
+        from particles.api.cli.links import _render_unmerge_markdown
+
+        assert "1 REREAD_DUPLICATE link(s) dropped" in _render_unmerge_markdown(undo, 10)
         assert (await db_session.execute(select(ParticleRelationRow))).scalars().all() == []
         with _finder((1, 2, 0.96)):
             again = await rm.apply_reread(db_session)
@@ -502,3 +506,13 @@ class TestCli:
         result = CliRunner().invoke(app, ["links", "dedup", "--reread", "--labels", str(sheet)])
         assert result.exit_code == 0, result.output
         assert "100/100" in result.output and "passes" in result.output
+
+
+def test_labels_needed_matches_the_admission_bar() -> None:
+    """The fewest labels that pass, per miss count."""
+    assert [rm.labels_needed(m) for m in range(4)] == [100, 110, 142, 173]
+    for misses in range(4):
+        n = rm.labels_needed(misses)
+        assert rm.wilson_lower_bound(n - misses, n) >= 0.95
+        assert n == 100 or rm.wilson_lower_bound(n - 1 - misses, n - 1) < 0.95
+    assert rm.labels_needed(10_000, cap=200) == 200

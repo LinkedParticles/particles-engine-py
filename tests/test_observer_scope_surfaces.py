@@ -111,6 +111,121 @@ class TestDigest:
         assert "particles memory rescope" in digest
 
 
+_REGION_MANIFEST = """\
+name: memory-index
+sections:
+  - title: "Memory index"
+    render: bullets
+    top_k: 60
+"""
+
+
+async def _reference_world(session: Any) -> dict[str, str]:
+    """The world above plus one hand-deposited article marked reference."""
+    w = await _world(session)
+    article = await source(session, "dk", ["scope:reference"])
+    dk = await belief(session, "Donkey Kong was released in 1981.", article)
+    await session.commit()
+    return {**w, "dk": dk.id, "entry_dk": article[0]}
+
+
+class TestReferenceEntries:
+    """A reference entry answers questions everywhere and stays out of digests."""
+
+    async def test_a_project_digest_withholds_it_and_counts_it(self, db_session: Any) -> None:
+        from particles.operations.digest import build_digest
+
+        await _reference_world(db_session)
+
+        digest = await build_digest(DEFAULT_STORE, A)
+
+        assert "Donkey Kong" not in digest
+        assert "Pluto has five" in digest and "Project A deploys" in digest
+        assert (
+            f"_Observer: project `{A}` — 2 of 4 ACTIVE belief(s) in scope (global, or "
+            "observed in this project); 1 reference belief(s) answer questions but are "
+            "not listed" in digest
+        )
+
+    async def test_the_store_wide_digest_withholds_it_too(self, db_session: Any) -> None:
+        from particles.operations.digest import build_digest
+
+        await _reference_world(db_session)
+
+        digest = await build_digest(DEFAULT_STORE)
+
+        assert "Donkey Kong" not in digest and "Project B deploys" in digest
+        assert "_1 reference belief(s) answer questions but are not listed" in digest
+
+    async def test_a_store_with_no_marked_entry_is_unchanged(self, db_session: Any) -> None:
+        from particles.operations.digest import build_digest
+
+        await _world(db_session)
+
+        assert "reference belief" not in await build_digest(DEFAULT_STORE)
+        assert "reference belief" not in await build_digest(DEFAULT_STORE, A)
+
+    async def test_a_widening_admits_it(self, db_session: Any) -> None:
+        from particles.operations.digest import build_digest
+        from particles.operations.observer_scope import widen
+        from particles.store.observer_scope_store import ScopeTarget
+
+        w = await _reference_world(db_session)
+        await widen(db_session, ScopeTarget.PARTICLE, w["dk"], actor="test")
+        await db_session.commit()
+
+        assert "Donkey Kong" in await build_digest(DEFAULT_STORE, A)
+
+    async def test_every_question_surface_still_finds_it(self, db_session: Any) -> None:
+        from particles.operations.query.observer_scope import filter_visible
+        from particles.store.particle_store import get_particles_by_ids
+
+        w = await _reference_world(db_session)
+        found = list((await get_particles_by_ids(db_session, [w["dk"]])).values())
+
+        for observer in (A, B, None):
+            assert w["dk"] in (await filter_visible(db_session, found, observer)).visible_ids
+            standing = await filter_visible(db_session, found, observer, standing_only=True)
+            assert w["dk"] not in standing.visible_ids
+            assert standing.reference_withheld == 1
+
+    async def test_the_write_gate_counts_it_global(self, db_session: Any) -> None:
+        from particles.core.observer_scope import PairPrecondition, pair_precondition
+        from particles.ingest.observer_gate import ObserverGate
+
+        w = await _reference_world(db_session)
+        gate = await ObserverGate.open(db_session)
+        scope = await gate.entry_scope(db_session, w["entry_dk"])
+
+        assert scope.is_global and scope.reference
+        assert (
+            pair_precondition(await gate.entry_scope(db_session, w["entry_a"]), scope)
+            is PairPrecondition.REVIEW
+        )
+
+    async def test_the_memory_region_withholds_it_and_counts_it(
+        self, db_session: Any, tmp_path: Any
+    ) -> None:
+        from particles.operations.projection import load_manifest
+        from particles.operations.projection.memory_region import render_memory_region
+
+        await _reference_world(db_session)
+        path = tmp_path / "memory.yaml"
+        path.write_text(_REGION_MANIFEST)
+
+        region = await render_memory_region(
+            db_session,
+            load_manifest(path),
+            base_dir=tmp_path,
+            observer_project=A,
+            exclude_source_tags=["rule-file"],
+        )
+
+        assert "Donkey Kong" not in region.body and "Pluto has five" in region.body
+        assert "<!-- 1 reference belief(s) answer questions but are not listed" in region.body
+        assert region.body.rstrip().endswith(f"<!-- observer: project {A} -->")
+
+
 class TestBoundMcpServer:
     async def test_reads_go_through_the_bound_project(
         self, db_session: Any, bound_to_a: None

@@ -121,13 +121,25 @@ a model pass over the store stops calling the model when the allowance is
 spent, returns what it has, and reports the calls it refused in the
 `X-Particles-Model-Calls-Refused` header. An operator key is charged per
 request, by design, and its report requests record their verdicts. With
-`api.rate_limit_per_minute` set to `0` nothing is metered. Three limits
-remain: the extraction an HTTP deposit queues runs later, outside any caller's
-allowance, bounded per run by `consolidation.max_pending_entries`;
-the agent writes that make no model call have no volume limit;
-and no check refuses one extraction call whose input exceeds a
-stated budget, so a chunking defect in an extractor can send an oversized
-call.
+`api.rate_limit_per_minute` set to `0` nothing is metered. The agent writes
+that make no model call (retract, link, unlink, tag, untag and the useful
+press) are held, for every key, to a separate per-principal allowance,
+`api.write_rate_limit_per_minute`, which `0` turns off.
+
+**An agent key's deposits are bounded in the extraction queue.** The
+extraction an HTTP deposit queues runs later, in consolidation, outside any
+caller's allowance. For an agent key that is not one of the owner's
+harvesters, each principal holds at most
+`api.max_pending_extractions_per_principal` snapshots waiting to be read,
+counted on every route that deposits, the excerpt an assertion or a
+supersession stores included (a deposit past it is refused with `429` and
+stores nothing), and a consolidation
+run reads at most `consolidation.max_pending_per_metered_principal` of them,
+whatever the run's own cap and budget. The bound is a count of snapshots of at
+most `api.max_request_body_bytes` each, which bounds reading, not cost.
+Operator and harvester keys are not bounded this way. One limit
+remains: no check refuses one extraction call whose input exceeds a stated
+budget, so a chunking defect in an extractor can send an oversized call.
 
 Only an operator's press on `POST /memory/useful` (`PARTICLES_API_KEY` or an
 operator key) earns that belief its usefulness credit, which ranks it higher,
@@ -643,16 +655,18 @@ guarantee against any path, also deny network access at the operating system.
 The two fetches that run as subprocesses (`curl` for Reddit, `git` for a gist)
 are pinned to addresses this process vetted, inherit no proxy, CA,
 `SSLKEYLOGFILE` or `SSH_ASKPASS` variable, read no `~/.curlrc`, and `curl`
-expands no URL glob, so one deposited URL is one request. They, and the other
-programs Particles starts (`claude` for `init claude-code`, `git` for the
-`MEMORY.md` history, `hook doctor` and `subjects fold-artifacts --repo`, the
-query-latency benchmark's helpers), run with a trusted `PATH`: only absolute
-entries that exist, that you or root own, and that no other user may write,
-judged with every link an entry resolves through and the directories above
-each, falling back to the trusted default path when every entry is dropped,
-so a program is never looked up in the working directory. An entry that an
-administrative group (`root`, `wheel`, `admin`, `sudo`) may write is kept (an
-accepted limit).
+expands no URL glob, so one deposited URL is one request.
+
+Particles never looks up a program it starts in the working directory or in a
+directory another user may write. It names each program by absolute path or
+finds it on a trusted `PATH`, and a program it finds that way runs with that
+`PATH` too. The trusted `PATH` keeps only absolute entries that exist, that
+you or root own, and that no other user may write, judged with every link an
+entry resolves through and the directories above each, and falls back to the
+trusted default path when every entry is dropped. Two limits are accepted: an
+entry that an administrative group (`root`, `wheel`, `admin`, `sudo`) may
+write is kept, and the hook command you installed runs as you installed it,
+with only its relative `PATH` entries removed.
 
 Telemetry is off by default. With it on, spans describe outbound
 work, so an exporter pointed at a third-party collector ships that metadata
@@ -694,8 +708,9 @@ Particles tracks provenance and confidence for that content but does **not**
 sanitise or scan it. In particular, **any secret in a deposited document (an
 API key, a password, a token) is persisted content-addressed in the corpus and
 can resurface** in particle content, query answers, the session digest, and
-exporter files. Only the Claude Code harness intakes (session transcripts,
-memory files, rule files) pass a best-effort secret mask, described below, and
+exporter files. The Claude Code harness intakes (session transcripts, memory files, rule
+files) and Codex conversation capture pass a best-effort secret mask, described
+below, and
 the nightly refresh applies it again only to an entry tagged as a rule or
 memory file; an agent key's own text deposit is stored as sent. Do not deposit
 material you are unwilling to store unredacted, and treat the corpus blob
@@ -784,10 +799,13 @@ belief's successor. Every imported particle is asserted by the import, with
 the asserter the bundle claimed kept as an author. An import, and a restore
 without `--trust-bundle`, stores each belief as falsifiable and keeps a
 declared assertion modality, scope or polarity that would take the claim off
-the conflict surface only as the bundle's claim. An import keeps each unit's
-lifecycle status as the bundle states it, and a status other than
-ACTIVE that the import kept, rather than one this store reached, holds no
-later claim for review and absorbs none.
+the conflict surface only as the bundle's claim. An import admits ACTIVE
+units only: it sets aside every unit with another lifecycle status, writing
+nothing for it and naming how many per status, and stores an admitted unit
+with no status reason, so its lifecycle here is what this store's
+reconciliation decides. A restore keeps each unit's lifecycle
+status. A status other than ACTIVE that an earlier import kept, rather than
+one this store reached, holds no later claim for review and absorbs none.
 
 (Prompt injection from deposited content is *contained but not eliminated*:
 outside the benchmark harness, every model prompt that carries deposited,
@@ -835,6 +853,13 @@ document declares about itself, each on by default:
   collection per host or per depositor. The declaring frontmatter is read
   under the bounded alias budget, and its record type and number only as plain
   values.
+
+A model verdict can also merge two claims without retiring either. When an
+operator applies `links suggest` (`--apply`, or mode `APPLY` over HTTP with an
+operator key), each pair the duplicate judge reads as a paraphrase is linked as
+co-evidential, and a query then shows the higher-ranked claim of the pair with
+their pooled confidence. Each such link is recorded in the operator event log
+with the judge that decided it, and `links remove` undoes it.
 
 Each prompt fences the claims it reads, so a claim cannot answer the probe for
 the model. The re-anchor and release passes are belief writers, so a claim
@@ -910,6 +935,36 @@ Once the SessionEnd hook has recorded both repositories,
 the MCP reads do not. A `.git` file that is a link to another checkout's does
 not adopt that repository's key. Keep material that must not reach an agent in
 a separate store.
+
+### Codex capture is local, best effort and grants no use credit
+
+Codex uses the same path-derived project key as Claude Code. A collision
+shares scope across both harnesses; their doctors read the union of recorded
+roots and disclose the collision. The integration does not prevent it.
+
+The local macOS adapter opens only identity-checked, contained regular
+rollouts under its bound Codex home, including archived sessions. It never
+follows an arbitrary transcript path from a hook event. Unknown complete
+envelopes, ambiguous self-echo, changed captured prefixes and unverified fork
+ancestry quarantine the whole session. Redaction precedes corpus deposit and
+provenance hashing, but arbitrary secrets can still be missed. Captured
+conversations retain the corpus's sensitivity.
+
+A session deleted or pruned before capture can lose testimony, potentially
+without a diagnostic hint if the process died before writing one. There is no
+minimum rollout retention promise and no second durable transcript copy.
+Home identity and prefix checks prevent accidental source conflation; they
+are not isolation from code running as the same user. A home moved or
+restored to a different path is refused in the initial release.
+
+The installer requires explicit hook trust and an enabled learning schedule.
+It reuses existing jobs for the same physical store without acquiring their
+ownership. A scoped scheduled-consolidation credential context can read its
+store/provider/endpoint-bound Keychain item without UI. Job definitions,
+arguments and installer output contain no extraction key. Keychain is
+storage within the same user's trust boundary. Ordinary hook, MCP and library
+secret lookup remains environment-only. Delivery is unknown: Codex capture
+creates no exposure rows, utility credit or rank-lift signal.
 
 ### The Claude Code harness writes your sessions into the store and the store into your sessions
 
@@ -1028,16 +1083,18 @@ operator key can move such a belief to neutral source trust, by design: a
 generic deposit of the same bytes as an agent excerpt retypes the agent's
 entry, and an entry deposited under the agent's depositor label is reused by
 the agent's next excerpt deposit of those bytes. An agent key under another
-principal can do neither, and a reader key writes nothing. An agent's assertion that names a Subject the
-store does not know, through an agent key, the stdio MCP server or the
-memory-server facade's entity tools, mints a local Subject, which every
-principal's later mention of that name, and a later extraction's, then
-resolves to, so one agent or project can choose what another
-project's mention of a new name means. The owner has chosen a fix for the
-agent-key case (a new Subject an agent key names is minted provisional and
-scoped to that key's principal until an operator or a second principal
-confirms it); it needs its own decision record, and until it ships this is a
-known limit.
+principal can do neither, and a reader key writes nothing.
+
+A Subject an agent principal mints for a name the store does not know, through
+an agent key, the stdio MCP server, the memory-server facade or the extraction
+of a document an agent deposited, is never what an extraction, an import or an
+operator write resolves that name to, until an operator accepts it by id or an
+independent resolution reaches the same external reference. Its
+limits: between agent principals, a second principal's use of the name shares
+the Subject with every agent principal; an operator key accepts any Subject; a
+harvester's deposits are not covered; and a Subject minted before
+this was in place stays confirmed unless the operator runs the provisional
+backfill.
 
 Particles is a **single-operator** tool. Per-client keys bound what each
 client may write and record who wrote it, but they do not isolate callers:
@@ -1088,21 +1145,22 @@ file swapped for a link, or written through a hard link, in that window ships
 bytes the recorded commit does not hold. A ruleset in the repository where release tags are cut lets only
 the release-tagger app create, move or delete one, the PyPI publishing
 environments of both code repositories admit only `main` and release tags with
-no administrator bypass, and `main`'s required checks (`Unit tests`,
-`Lint & type-check`) must pass on a branch that is up to date with `main`
-(repository settings, checked 2026-10-30).
+no administrator bypass, and every change reaches `main` through a merge
+queue, which lands a commit only after `main`'s required checks (`Unit tests`,
+`Lint & type-check`, `Docs & process checks`, the container image build and
+the change gate) passed on that commit (repository settings, checked
+2026-11-03).
 
 These limits remain:
 
 - **The repository settings have gaps.** The release-tagger app's private key
   is a repository secret that a workflow on any branch can read, so anyone who
-  can push a branch can act as the app. `main`'s branch protection
-  is not enforced for administrators, who can merge without the required
-  checks passing.
+  can push a branch can act as the app. Organization
+  administrators can merge to `main` around the merge queue, without the
+  required checks passing.
 - **CI does not run everything on every commit.** The run on `main` may skip
-  the unit-test shards and the image build when a pull request's run passed
-  them on the same tree, and it vouches on the newest passing pull request
-  run even when a newer run on that tree failed. The SDK-range job,
+  the unit-test shards and the image build when the merge queue's run passed
+  them on the same commit. The SDK-range job,
   which runs the Anthropic client's guard on the published core's `anthropic`
   floor (`1.17.0`) and the newest admitted 2.x, and the OpenTelemetry extra's
   real SDK, is advisory: it blocks no merge, and when it runs on `main` and

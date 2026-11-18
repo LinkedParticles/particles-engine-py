@@ -1096,3 +1096,63 @@ def test_the_remote_engine_refusal_names_the_engine_without_its_credential() -> 
     assert "https://engine.invalid:8443" in message
     assert "audit6-userinfo-pw" not in message
     assert "svc-user" not in message
+
+
+# -- provisional Subjects ------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_facade_entity_is_provisional_to_the_facade(db_session: Any, facade: Any) -> None:
+    """The facade writes as an agent principal, so its new Subject answers only agents."""
+    from particles.store.subject_provisional import mark_of
+    from particles.store.subject_store import find_by_name
+
+    await _create(db_session, [_bare("Zelda")])
+    subject = await find_by_name(db_session, "Zelda")
+    assert subject is not None
+    mark = await mark_of(db_session, subject.id)
+    assert mark is not None and mark.principal == facade.asserter_identity
+    assert await find_by_name(db_session, "Zelda", confirmed_only=True) is None
+
+
+@pytest.mark.asyncio
+async def test_the_facade_shares_another_agents_provisional_subject(
+    db_session: Any, facade: Any
+) -> None:
+    from particles.core.provisional import ResolutionKind
+    from particles.ingest.subject_resolver import resolve_subject
+    from particles.store.subject_provisional import mark_of
+
+    other = await resolve_subject(
+        db_session, "Ganon", "mcp:other", principal="mcp:other", kind=ResolutionKind.MINTING
+    )
+    await ops.add_observations(
+        db_session,
+        store=DEFAULT_STORE,
+        observations=[{"entityName": "Ganon", "contents": ["Ganon holds the Triforce of Power."]}],
+    )
+    mark = await mark_of(db_session, other.id)
+    assert mark is not None and mark.shared_by == facade.asserter_identity
+
+
+@pytest.mark.asyncio
+async def test_a_relation_that_already_exists_shares_nothing(db_session: Any, facade: Any) -> None:
+    from particles.core.provisional import ResolutionKind
+    from particles.ingest.subject_resolver import resolve_subject
+    from particles.store.subject_provisional import mark_of, share
+
+    await _create(db_session, [_bare("Link"), _bare("Zant")])
+    await _relate(db_session, [{"from": "Link", "to": "Zant", "relationType": "fights"}])
+    other = await resolve_subject(
+        db_session, "Midna", "mcp:other", principal="mcp:other", kind=ResolutionKind.MINTING
+    )
+    # The relation exists already: create_relations binds nothing, so shares nothing.
+    created, _ = await ops.create_relations(
+        db_session,
+        store=DEFAULT_STORE,
+        relations=[{"from": "Link", "to": "Zant", "relationType": "fights"}],
+    )
+    assert created == []
+    assert not await share(db_session, other.id, "mcp:other")  # still scoped to its own
+    mark = await mark_of(db_session, other.id)
+    assert mark is not None and mark.shared_by is None

@@ -92,9 +92,12 @@ class TestBuildExtractPrompt:
         assert "DECLINED" in prompt
         assert "HYPOTHETICAL" in prompt
         # F3: source moved to a fenced user turn; the trusted prompt ends with
-        # the JSON schema, no "SOURCE TEXT:" label.
+        # the JSON schema and the REFERENCE DATE line (0.21.0), no "SOURCE TEXT:"
+        # label.
         assert "SOURCE TEXT:" not in prompt
-        assert prompt.rstrip().endswith("}")
+        assert prompt.rstrip().endswith(
+            "}\n\nREFERENCE DATE: the source was published/captured on {reference_date}."
+        )
 
     def test_polarity_clause_absent_when_disabled(self) -> None:
         prompt = _build_extract_prompt(
@@ -102,7 +105,9 @@ class TestBuildExtractPrompt:
         )
         assert '"polarity"' not in prompt
         assert "SOURCE TEXT:" not in prompt
-        assert prompt.rstrip().endswith("}")
+        assert prompt.rstrip().endswith(
+            "}\n\nREFERENCE DATE: the source was published/captured on {reference_date}."
+        )
 
 
 # --------------------------------------------------------------------------

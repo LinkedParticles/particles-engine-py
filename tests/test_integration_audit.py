@@ -76,7 +76,7 @@ def test_fixture_audit_renders_nonzero_headline_classes(
     # one takes the singular noun).
     m = re.search(r"(\d+) potential contradictions?\b", out)
     assert m and int(m.group(1)) > 0, out
-    m = re.search(r"(\d+) likely-duplicate belief pairs?\b", out)
+    m = re.search(r"(\d+) groups? of likely duplicates\b", out)
     assert m and int(m.group(1)) > 0, out
     m = re.search(r"(\d+) probably-stale facts?\b", out)
     assert m and int(m.group(1)) > 0, out

@@ -581,3 +581,93 @@ def test_cascade_still_promotes_b_over_an_a_that_has_left_active() -> None:
     assert verdict is not None
     assert verdict.winner is b
     assert verdict.promote_winner is True
+
+
+# -- Mutation-testing follow-ups ------------------------------------
+
+
+def _census_sides(a: tuple[Particle, ...], b: tuple[Particle, ...]) -> Particle:
+    """A census record with the given members on each side, every pair confirmed."""
+    from particles.core.contradiction_disclosure import (
+        ConfirmedPair,
+        NoteLabel,
+        Sides,
+        build_census_record,
+    )
+
+    members = {p.id: p for p in (*a, *b)}
+    return build_census_record(
+        sides=Sides(a=tuple(p.id for p in a), b=tuple(p.id for p in b)),
+        pairs=[ConfirmedPair(a=x.id, b=y.id, same_source=False, reason="r") for x in a for y in b],
+        members=members,
+        labels={pid: NoteLabel("n", "d") for pid in members},
+        sources={pid: ["e"] for pid in members},
+        trigger_entry_id="e",
+        trigger_snapshot_id=None,
+    )
+
+
+def test_further_member_ids_name_every_extra_member_of_each_side() -> None:
+    from particles.core.conflict_review import further_member_ids
+
+    a, b, b2, b3 = _claim(), _claim(), _claim(), _claim()
+    assert further_member_ids(_census_sides((a,), (b, b2, b3))) == ([], [b2.id, b3.id])
+    a2 = _claim()
+    assert further_member_ids(_census_sides((a, a2), (b, b2))) == ([a2.id], [b2.id])
+    assert further_member_ids(_wrapper(a.id, b.id)) == ([], [])
+
+
+def test_both_valid_mints_each_quarantined_claim_further_members_included() -> None:
+    from particles.core.conflict_review import FurtherMembers
+
+    a, b = _claim(), _quarantined()
+    a2, b2 = _quarantined("entry-c"), _claim(entry="entry-d")
+    gone = _claim(Status.RETRACTED, StatusReason.EXPLICIT_RETRACTION)
+    record = _census_sides((a, a2, gone), (b, b2))
+    plan = decide_resolution(
+        ResolutionAction.BOTH_VALID, record, a, b, FurtherMembers(a=(a2, gone), b=(b2,))
+    )
+    assert [(m.particle.id, m.mint) for m in plan.aleatory] == [
+        (a.id, False),
+        (b.id, True),
+        (a2.id, True),
+        (b2.id, False),
+    ]
+
+
+def test_a_refusal_of_a_claim_with_no_status_reason_names_its_status_alone() -> None:
+    stale = _claim(Status.PROVENANCE_STALE, None)
+    reason = refusal_reason(ResolutionAction.PREFER_A, stale, _claim())
+    assert reason is not None
+    assert reason.startswith(f"claim A is {Status.PROVENANCE_STALE.value}, and ")
+
+
+def test_a_cascade_review_cut_short_names_no_record() -> None:
+    from particles.core.conflict_review import cascade_reviewed_record_id
+
+    assert cascade_reviewed_record_id("CASCADE REVIEW: auto-resolved INCONSISTENCY rec-1") is None
+
+
+@pytest.mark.parametrize(
+    ("status", "reason", "kind"),
+    [
+        (Status.RETRACTED, StatusReason.EXPLICIT_RETRACTION, "retracted"),
+        (Status.SUPERSEDED, StatusReason.EXPLICIT_SUPERSESSION, "superseded"),
+        (Status.PROVENANCE_STALE, StatusReason.CONFLICT_RESOLVED, "reviewed"),
+        (Status.RETRACTED, StatusReason.CONFLICT_RESOLVED, None),
+        (Status.ACTIVE, None, None),
+    ],
+)
+def test_retirement_kind_names_the_judgment_retirements(
+    status: Status, reason: StatusReason | None, kind: str | None
+) -> None:
+    """A retired-value card names how claim A was retired."""
+    from particles.core.conflict_review import retirement_kind
+
+    assert retirement_kind(_claim(status, reason)) == kind
+
+
+def test_retirement_kind_of_a_missing_claim_is_none() -> None:
+    from particles.core.conflict_review import retirement_kind
+
+    assert retirement_kind(None) is None

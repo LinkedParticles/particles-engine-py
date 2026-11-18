@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 
 from particles.core.scoring.relevance import owner_rank_bonus, sweep_owner_rank_lift
-from particles.core.scoring.utility import SweepRow, rank_lift_grid
+from particles.core.scoring.utility import RankLiftBand, SweepRow, rank_lift_grid
 
 # ---------------------------------------------------------------------------
 # owner_rank_bonus — the pure term (tests/AGENTS.md: pure functions are required)
@@ -109,6 +109,32 @@ def test_share_ceiling_rejects_a_cohort_that_takes_the_head() -> None:
     assert head.owner_share == pytest.approx(1.0)
     assert not head.share_bounded
     assert not head.admissible
+
+
+def test_share_ceiling_defaults_to_half_the_head() -> None:
+    """The nightly monitor relies on the default ceiling, so it is pinned."""
+    rows = [_row(f"o{i}", 0.5, owner=True) for i in range(8)]
+    rows += [_row(f"d{i}", 0.9) for i in range(2)]
+    sweep = sweep_owner_rank_lift(rows, grid=(1.0,), head_sizes=[8], lambda_=0.0)
+    head = sweep.points[0].head(8)
+    assert head is not None
+    assert head.owner_in_head == 8
+    assert head.max_owner_share == 0.5
+    assert not head.share_bounded
+    assert not head.admissible
+
+
+def test_utility_term_uses_the_belief_s_own_reinforcement_below_one() -> None:
+    """The fixed λ term is λ·ln(1 + R) for R < 1 too, never a floor of ln 2.
+
+    ``b`` outranks ``a`` only on its utility lift: 0.75 + 0.1·ln 2 > 0.80.
+    Flooring R at 1 would also lift ``a`` (R = 0) by 0.1·ln 2 and keep it first.
+    """
+    rows = [_row("a", 0.80), _row("b", 0.75, r=1.0)]
+    sweep = sweep_owner_rank_lift(
+        rows, grid=(0.0,), head_sizes=[1], lambda_=0.1, target_ids=["a", "b"]
+    )
+    assert dict(sweep.points[0].heads[0].target_ranks) == {"b": 1, "a": 2}
 
 
 def test_utility_target_non_regression_is_criterion_three() -> None:
@@ -252,3 +278,44 @@ def test_report_flags_an_unresolved_viewer_rather_than_an_empty_band() -> None:
     )
     report = render_owner_rank_lift_sweep(sweep)
     assert "owner_lens.subjects" in report
+
+
+def test_a_target_absent_from_the_store_is_disclosed_and_never_blocks() -> None:
+    """A named target the scored set lacks ranks 0 and is reported, not judged."""
+    rows = [_row("d", 0.9), _row("o", 0.5, owner=True)]
+    sweep = sweep_owner_rank_lift(
+        rows, grid=(0.0, 0.5), head_sizes=[2], lambda_=0.0, target_ids=["ghost"]
+    )
+    head = sweep.points[0].head(2)
+    assert head is not None
+    assert head.target_ranks == (("ghost", 0),)
+    assert head.baseline_targets_in_head == frozenset()
+    assert head.targets_absent_at_baseline == ("ghost",)
+    assert head.targets_in_head
+    assert sweep.bands[0][1] == RankLiftBand(low=0.0, high=0.5, contiguous=True)
+    assert not sweep.intersection.empty
+
+
+def test_empty_rows_still_name_each_surface() -> None:
+    sweep = sweep_owner_rank_lift(
+        [], grid=(0.0,), head_sizes=[10, 0], lambda_=0.0, configured_rank_lift=0.05
+    )
+    assert sweep.points == ()
+    assert sweep.bands == ((10, RankLiftBand(low=None, high=None, contiguous=True)),)
+    assert sweep.intersection == RankLiftBand(low=None, high=None, contiguous=True)
+    assert sweep.configured_rank_lift == 0.05
+
+
+def test_no_positive_head_size_scores_but_sweeps_nothing() -> None:
+    rows = [_row("d", 0.9), _row("o", 0.5, owner=True)]
+    sweep = sweep_owner_rank_lift(rows, grid=(0.0,), head_sizes=[0], lambda_=0.0)
+    assert sweep.points == ()
+    assert sweep.bands == ()
+    assert (sweep.scored, sweep.owner_population) == (2, 1)
+
+
+def test_a_zero_head_size_is_dropped() -> None:
+    rows = [_row("d", 0.9), _row("o", 0.5, owner=True)]
+    sweep = sweep_owner_rank_lift(rows, grid=(0.0,), head_sizes=[0, 2], lambda_=0.0)
+    assert [n for n, _band in sweep.bands] == [2]
+    assert [h.head_size for h in sweep.points[0].heads] == [2]

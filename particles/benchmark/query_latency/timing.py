@@ -167,6 +167,8 @@ def instrument(timer: StageTimer) -> Iterator[StageTimer]:
     """Swap the query path's seams for timed wrappers; restore them on exit."""
     import particles.corpus.store as corpus_store
     import particles.operations.query.main as main
+    import particles.store.candidate_cache as candidate_cache
+    import particles.store.particle_store as particle_store
     from particles.store.particle_store import ParticleRow
 
     saved_main = {
@@ -181,6 +183,11 @@ def instrument(timer: StageTimer) -> Iterator[StageTimer]:
         )
     }
     saved_to_model = ParticleRow.to_model
+    # Both bindings of the vector decoder: the uncached loader's and the
+    # candidate cache's, which reads vectors apart from the rows it hydrates.
+    saved_decoders = {
+        module: module.decode_embedding for module in (particle_store, candidate_cache)
+    }
     saved_corpus = {
         name: getattr(corpus_store, name)
         for name in ("get_snapshot_source_meta", "get_source_types_for_entries")
@@ -202,8 +209,17 @@ def instrument(timer: StageTimer) -> Iterator[StageTimer]:
         out = saved_to_model(self)
         timer.marks.hydrate += time.perf_counter() - t0
         timer.marks.models_hydrated += 1
-        timer.marks.embedding_json_bytes += len(self.embedding_json or "")
         return out
+
+    def counting_decoder(decode: Any) -> Any:
+        # The vector bytes are counted where a vector is decoded: the cache
+        # build defers the column, so the row may not hold it.
+        def wrapper(raw: str) -> Any:
+            if timer.marks.in_loader:
+                timer.marks.embedding_json_bytes += len(raw)
+            return decode(raw)
+
+        return wrapper
 
     async def loader(session: Any, *args: Any, **kwargs: Any) -> Any:
         # Patched on the class for the loader call only: the session type may
@@ -277,6 +293,8 @@ def instrument(timer: StageTimer) -> Iterator[StageTimer]:
     for name, fn in patches_main.items():
         setattr(main, name, fn)
     setattr(ParticleRow, "to_model", to_model)  # noqa: B010 — a method swap mypy would refuse
+    for module, decode in saved_decoders.items():
+        setattr(module, "decode_embedding", counting_decoder(decode))  # noqa: B010
     corpus_store.get_snapshot_source_meta = snapshot_meta
     corpus_store.get_source_types_for_entries = source_types
     try:
@@ -285,6 +303,8 @@ def instrument(timer: StageTimer) -> Iterator[StageTimer]:
         for name, fn in saved_main.items():
             setattr(main, name, fn)
         setattr(ParticleRow, "to_model", saved_to_model)  # noqa: B010
+        for module, decode in saved_decoders.items():
+            setattr(module, "decode_embedding", decode)  # noqa: B010
         for name, fn in saved_corpus.items():
             setattr(corpus_store, name, fn)
 

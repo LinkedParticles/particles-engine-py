@@ -38,6 +38,12 @@ storage:
   database_url: sqlite+aiosqlite:////data/particles.db
   blob_dir: /data/corpus_blobs
 
+host:
+  # This engine's host id: on the volume, so it survives an image
+  # upgrade and is never the client's. The engine reads no file:// entry a
+  # client pushed, whatever its path.
+  id_file: /data/host-id
+
 claude_code:
   # Holds the consolidation lockfile (and the integration
   # state, unused in a container). On the volume so a restart does not lose it.

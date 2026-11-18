@@ -240,6 +240,16 @@ body {
 /* The LLM judge's advisory same-claim verdict on a duplicate-pair card:
    rendered under the brief so the merge decision reads the model's
    verdict, not raw cosine. */
+/* A belief assigned a subject here: kept on its card, marked, until the card is left. */
+.card .refs .particle.assigned {
+  border-color: var(--ok);
+}
+.card .refs .assigned-note {
+  margin-top: 6px;
+  color: var(--ok);
+  font-size: 0.85rem;
+  font-weight: 600;
+}
 .card .refs .verdict {
   margin: 8px 0 0;
   color: var(--text);
@@ -502,11 +512,46 @@ body {
   margin-top: 3px;
   flex: none;
 }
+/* A subject field's matches: one button per subject, the picked one marked. */
+.sheet .subject-results {
+  margin-top: 6px;
+}
+.sheet .subject-results:empty {
+  display: none;
+}
+.sheet .subject-pick {
+  flex-direction: column;
+  text-align: left;
+  width: 100%;
+  font-family: inherit;
+}
+.sheet .subject-pick.picked {
+  border-color: var(--accent);
+}
 .sheet .choice .choice-detail {
   display: block;
   margin-top: 2px;
   color: var(--muted);
   font-size: 0.8rem;
+}
+/* The heading over a subject field's suggestions. */
+.sheet .subject-heading {
+  margin: 0 0 4px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--muted);
+}
+/* The claim a sheet acts on: the sheet covers the card that shows it. */
+.sheet .sheet-about {
+  margin: 0 0 8px;
+  padding-left: 10px;
+  border-left: 3px solid var(--accent);
+  color: var(--muted);
+  /* Room for a conflict's two shortened claims on a phone. */
+  max-height: 10em;
+  overflow-y: auto;
+  /* A conflict's two claims, one per line. */
+  white-space: pre-line;
 }
 
 /* --- Query route -------------------------------------------- */

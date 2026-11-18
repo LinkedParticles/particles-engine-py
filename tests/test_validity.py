@@ -106,6 +106,17 @@ class TestInterval:
     def test_coarse_end_month(self) -> None:
         assert coarse_end(D(2024, 2, 1), "month").date() == D(2024, 2, 29).date()
 
+    def test_coarse_end_is_the_last_instant_of_the_unit(self) -> None:
+        """The end is 23:59:59 on the unit's last day, not just the right date."""
+        assert coarse_end(D(2019, 1, 1), "year") == datetime(2019, 12, 31, 23, 59, 59, tzinfo=UTC)
+        assert coarse_end(D(2024, 2, 1), "month") == datetime(2024, 2, 29, 23, 59, 59, tzinfo=UTC)
+
+    def test_coarse_end_of_a_day(self) -> None:
+        """A day (or no granularity) ends at the last second of that day."""
+        end = datetime(2026, 10, 10, 23, 59, 59, tzinfo=UTC)
+        assert coarse_end(D(2026, 10, 10), "day") == end
+        assert coarse_end(D(2026, 10, 10), None) == end
+
 
 # ---------------------------------------------------------------------------
 # The two readings of --during and the point form
@@ -196,6 +207,61 @@ class TestReadWindow:
         at = window_for_day(D(2026, 10, 8))
         assert read_window(_facts(D(2026, 10, 8), None), at) is None
 
+    def test_state_started_after_window_matches_nothing(self) -> None:
+        """A STATE that begins after the window was not in force during it."""
+        assert read_window(_facts(D(2026, 10, 20), ValidKind.STATE), WEEK) is None
+        as_of = _facts(D(2026, 10, 20), ValidKind.STATE, basis=ValidFromBasis.AS_OF)
+        assert read_window(as_of, WEEK) is None
+
+    def test_state_in_force_through_an_open_ended_window(self) -> None:
+        after = TimeWindow(start=D(2026, 10, 10))
+        f = _facts(D(2026, 9, 1), ValidKind.STATE)
+        assert read_window(f, after) is WindowReading.IN_FORCE
+
+    def test_point_state_began_on_the_day(self) -> None:
+        at = window_for_day(D(2026, 10, 8))
+        f = _facts(D(2026, 10, 8), ValidKind.STATE)
+        assert read_window(f, at) is WindowReading.BEGAN
+
+    def test_point_state_closing_on_the_instant_is_in_force(self) -> None:
+        """The point form's interval is closed: a close at the instant still covers it."""
+        at = window_for_day(D(2026, 10, 8))
+        f = _facts(D(2026, 10, 1), ValidKind.STATE, closed_at=D(2026, 10, 8))
+        assert read_window(f, at) is WindowReading.IN_FORCE
+
+    def test_state_closing_as_the_window_opens_is_in_force(self) -> None:
+        f = _facts(D(2026, 9, 1), ValidKind.STATE, closed_at=D(2026, 10, 10))
+        assert read_window(f, WEEK) is WindowReading.IN_FORCE
+
+    def test_as_of_at_the_window_end_is_held_at(self) -> None:
+        window = TimeWindow(start=D(2026, 10, 1), end=D(2026, 10, 9))
+        f = _facts(D(2026, 10, 9), ValidKind.STATE, basis=ValidFromBasis.AS_OF)
+        assert read_window(f, window) is WindowReading.HELD_AT
+
+    def test_event_at_the_window_end_began(self) -> None:
+        before = TimeWindow(end=D(2026, 10, 9))
+        assert read_window(_facts(D(2026, 10, 9)), before) is WindowReading.BEGAN
+
+
+class TestWindowEndOfDay:
+    def test_a_date_reads_as_its_last_instant(self) -> None:
+        assert window_end_of_day(D(2026, 10, 16)) == datetime(
+            2026, 10, 16, 23, 59, 59, 999_999, tzinfo=UTC
+        )
+
+    @pytest.mark.parametrize(
+        "end",
+        [
+            datetime(2026, 10, 16, 5, 0, 0, tzinfo=UTC),
+            datetime(2026, 10, 16, 0, 30, 0, tzinfo=UTC),
+            datetime(2026, 10, 16, 0, 0, 5, tzinfo=UTC),
+            datetime(2026, 10, 16, 0, 0, 0, 7, tzinfo=UTC),
+        ],
+        ids=["hour", "minute", "second", "microsecond"],
+    )
+    def test_an_end_with_a_time_is_kept(self, end: datetime) -> None:
+        assert window_end_of_day(end) == end
+
 
 class TestResolveClose:
     def test_earliest_of_three(self) -> None:
@@ -216,6 +282,25 @@ class TestResolveClose:
 
     def test_nothing_known(self) -> None:
         assert resolve_close(valid_until=None, successor_valid_from=None, retired_at=None) is None
+
+    def test_a_tie_goes_to_the_claims_own_valid_until(self) -> None:
+        """At equal instants the first candidate wins, not the alphabetical basis."""
+        same = D(2026, 10, 12)
+        assert resolve_close(valid_until=same, successor_valid_from=same, retired_at=same) == (
+            same,
+            "valid_until",
+        )
+        assert resolve_close(valid_until=None, successor_valid_from=same, retired_at=same) == (
+            same,
+            "successor",
+        )
+
+
+class TestWindowForDay:
+    def test_the_time_of_day_is_truncated(self) -> None:
+        w = window_for_day(datetime(2026, 10, 10, 15, 30, 45, 123, tzinfo=UTC))
+        assert w.start == D(2026, 10, 10)
+        assert w.end == D(2026, 10, 10)
 
 
 # ---------------------------------------------------------------------------
@@ -284,6 +369,16 @@ class TestAnchorFromProse:
     def test_session_date_is_not_a_cue(self) -> None:
         a = anchor_from_prose("The user moved to Mumbai, as stated in a session dated 2026-10-09.")
         assert a == ProseSkip("no_cue")
+
+    def test_an_unparseable_cue_falls_through_to_the_next(self) -> None:
+        """An impossible date behind the first cue does not stop the search."""
+        a = anchor_from_prose("Moved on 2026-02-30, since 2026-03-01.")
+        assert isinstance(a, ProseAnchor)
+        assert (a.valid_from, a.valid_kind, a.cue) == (
+            D(2026, 3, 1),
+            ValidKind.STATE,
+            "since 2026-03-01",
+        )
 
     def test_two_dates_skip(self) -> None:
         a = anchor_from_prose("From 2026-10-08 the user was away, returning on 2026-10-15.")

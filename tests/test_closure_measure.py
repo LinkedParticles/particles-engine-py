@@ -27,6 +27,7 @@ from particles.core.closure_measure import (
     Retirement,
     closure_from_payload,
     contested_fraction,
+    share,
     tally_closures,
     tally_transitions,
 )
@@ -173,6 +174,39 @@ class TestTally:
         )
         assert (tally.autonomous, tally.gesture) == (3, 1)
         assert tally.autonomous_share == 0.75
+
+    def test_a_whole_share_is_one(self) -> None:
+        assert share(1, 1) == 1.0
+        assert share(0, 1) == 0.0
+
+    def test_retirements_add_up_by_reason_and_by_actor(self) -> None:
+        """Two retirements of one reason count two; two gestures by one actor count two."""
+        tally = tally_transitions(
+            retirements=[
+                Retirement("p1", "DUPLICATE_MERGED"),
+                Retirement("p2", "DUPLICATE_MERGED"),
+                Retirement("p3", "EXPLICIT_RETRACTION"),
+                Retirement("p4", "EXPLICIT_RETRACTION"),
+            ],
+            gestures=[GestureEvent("PARTICLE_RETRACTED", "curate", ("p3", "p4"))],
+            autonomous_closures=0,
+            promoted_ids=[],
+            accepted_promotions=[],
+        )
+        assert tally.by_kind["retirement"] == {"autonomous": 2, "gesture": 2}
+        assert tally.autonomous_by_reason == {"DUPLICATE_MERGED": 2}
+        assert tally.gesture_by_actor == {"curate": 2}
+
+    def test_promotions_split_and_credit_the_accepting_actor(self) -> None:
+        tally = tally_transitions(
+            retirements=[],
+            gestures=[],
+            autonomous_closures=0,
+            promoted_ids=["d1", "d2", "d3"],
+            accepted_promotions=[GestureEvent("ABSTRACTION_RESOLVED", "agent", ("d2",))],
+        )
+        assert tally.by_kind["promotion"] == {"autonomous": 2, "gesture": 1}
+        assert tally.gesture_by_actor == {"agent": 1}
 
 
 class TestClosures:

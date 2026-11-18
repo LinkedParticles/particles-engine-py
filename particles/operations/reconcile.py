@@ -31,6 +31,7 @@ rung); the multi-contributor extension is deferred.
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -60,7 +61,11 @@ from particles.corpus.supersession import iter_supersession_entry_pairs
 from particles.db import store_of, write_transaction
 from particles.embeddings import cosine_similarity
 from particles.extraction.registry import infer_domain
-from particles.ingest.conflict_plan import plan_retirement_event, plan_update_event
+from particles.ingest.conflict_plan import (
+    plan_retirement_event,
+    plan_update_event,
+    source_entry_id,
+)
 from particles.ingest.observer_gate import ObserverGate
 from particles.ingest.pair_selection import admits_update_first
 from particles.ingest.pipeline import (
@@ -76,6 +81,8 @@ from particles.ingest.pipeline import (
     update_decided_by,
     update_prompt_hash,
 )
+from particles.ingest.retirement_cap import admits_retirement, restored_to_hold
+from particles.ingest.second_reading import ClaimContext, snapshot_claim_context
 from particles.ingest.update_supersession import speaker_forms, speaker_openers_digest
 from particles.llm.usage import observe_sampling
 from particles.operations._llm import _llm_call, record_unusable_reply
@@ -147,15 +154,27 @@ UPDATE_SWEEP_ACTOR = "update-sweep"
 FIXED_SLOT_ORIGIN = "update_sweep_fixed_slot"
 
 
-async def _read_update_slot(earlier: str, later: str) -> SlotReading:
+async def _read_update_slot(
+    earlier: str, later: str, contexts: tuple[ClaimContext, ClaimContext] | None = None
+) -> SlotReading:
     """The rung 2.5 update probe the sweep asks: the one every route asks.
 
     :func:`particles.ingest.pipeline.read_update_slot`, through the
     breaker seam, with its second reading on ``verification`` before any
-    ``CHANGES`` stands. The reading says which purpose decided, which the
-    ledger records.
+    ``CHANGES`` stands, reading the passages ``contexts`` gives.
+    The reading says which purpose decided, which the ledger records.
     """
-    return await read_update_slot(earlier, later)
+    return await read_update_slot(earlier, later, contexts=contexts)
+
+
+async def stored_pair_contexts(
+    session: AsyncSession, earlier: Particle, later: Particle
+) -> tuple[ClaimContext, ClaimContext]:
+    """Two stored claims' passage contexts, each from its own snapshot."""
+    return (
+        await snapshot_claim_context(session, earlier, later),
+        await snapshot_claim_context(session, later, earlier),
+    )
 
 
 async def _has_update_signal(earlier: str, later: str) -> SlotVerdict | None:
@@ -353,6 +372,7 @@ async def reconcile_supersession(
         "probed": 0,
         "probe_cap": probe_cap,
         "demoted": 0,
+        "restored_held": 0,
         "demotions": [],
     }
 
@@ -390,6 +410,7 @@ async def reconcile_supersession(
     candidates.sort(key=lambda c: c[0], reverse=True)
     demoted_ids: set[str] = set()
     probed = 0
+    held = 0
     demotions: list[dict[str, object]] = []
     for best_sim, sub_p, best_sup, sup_entry, sub_entry in candidates:
         if probed >= probe_cap:
@@ -415,6 +436,11 @@ async def reconcile_supersession(
         # outcome (CORROBORATES / INCONSISTENT / ALEATORY fallthrough) leaves
         # both claims ACTIVE — the sweep never manufactures an INCONSISTENCY.
         if verdict is not ConflictVerdict.DOCUMENT_SUPERSEDES:
+            continue
+        if await restored_to_hold(session, sub_p.id):
+            # Restored under a ``holds`` ruling: never retired by a replacement
+            # again, a superseding document's included.
+            held += 1
             continue
 
         demotions.append(
@@ -466,6 +492,7 @@ async def reconcile_supersession(
     summary["candidate_pairs"] = len(candidates)
     summary["probed"] = probed
     summary["demoted"] = len(demoted_ids)
+    summary["restored_held"] = held
     summary["demotions"] = demotions
     if probed < len(candidates):
         msg = (
@@ -654,8 +681,9 @@ async def reconcile_updates(  # noqa: PLR0912 — one linear two-phase sweep
 
     Two phases, mirroring :func:`reconcile_supersession`:
 
-    1. **Collect, free.** Group ACTIVE reconcilable particles by subject
-       (every subject a particle names), pair each group above
+    1. **Collect, free.** Group ACTIVE reconcilable particles by their
+       about-subject key (widens it for a
+       speaker-anchored claim), pair each group above
        ``update_supersession.subject_floor``, and keep only pairs
        :func:`~particles.ingest.update_supersession.update_order` already
        qualifies — same lineage, both extractor-asserted, strictly dated.
@@ -710,6 +738,7 @@ async def reconcile_updates(  # noqa: PLR0912 — one linear two-phase sweep
         "probed": 0,
         "update_probed": 0,
         "different_slot": 0,
+        "entry_capped": 0,
         "fixed_slot": 0,
         "reviews": [],
         "previously_cleared": 0,
@@ -760,6 +789,9 @@ async def reconcile_updates(  # noqa: PLR0912 — one linear two-phase sweep
     demotions: list[dict[str, object]] = []
     cap_reached = False
     not_reached = 0
+    entry_capped = 0
+    # A dry run records no event, so its own retirements count here.
+    dry_won: Counter[str] = Counter()
     for position, (sim, newer, older) in enumerate(candidates):
         if probed >= probe_cap:
             # The cap stopped the sweep with pairs still in order behind it.
@@ -767,6 +799,17 @@ async def reconcile_updates(  # noqa: PLR0912 — one linear two-phase sweep
             not_reached = len(candidates) - position
             break
         if newer.id in demoted_ids or older.id in demoted_ids:
+            continue
+        if not await admits_retirement(
+            session,
+            source_entry_id(newer),
+            pair=(older.id, newer.id),
+            retired_id=older.id,
+            pending=dry_won,
+        ):
+            # the winning entry reached its bound; the pair stays
+            # for the contradiction census, unprobed.
+            entry_capped += 1
             continue
         probed += 1
         # the update question first, unless the older claim records a
@@ -838,6 +881,8 @@ async def reconcile_updates(  # noqa: PLR0912 — one linear two-phase sweep
             }
         )
         demoted_ids.add(older.id)
+        if dry_run and (won_by := source_entry_id(newer)) is not None:
+            dry_won[won_by] += 1
         if not dry_run:
             # One commit per demotion, as in the document sweep.
             async with write_transaction(session):
@@ -849,7 +894,11 @@ async def reconcile_updates(  # noqa: PLR0912 — one linear two-phase sweep
                 )
                 await _set_supersedes_if_unset(session, newer.id, older.id)
                 event = plan_update_event(
-                    older.id, newer.id, route="sweep", decided_by=update_decided_by()
+                    older.id,
+                    newer.id,
+                    route="sweep",
+                    decided_by=update_decided_by(),
+                    winner_entry_id=source_entry_id(newer),
                 )
                 await record_event(
                     session,
@@ -868,6 +917,7 @@ async def reconcile_updates(  # noqa: PLR0912 — one linear two-phase sweep
     summary["probed"] = probed
     summary["update_probed"] = update_probed
     summary["different_slot"] = different_slot
+    summary["entry_capped"] = entry_capped
     summary["fixed_slot"] = len(reviews)
     summary["reviews"] = reviews
     summary["previously_cleared"] = cleared
@@ -934,8 +984,9 @@ async def _sweep_slot(
     session: AsyncSession, older: Particle, newer: Particle
 ) -> SlotVerdict | None:
     """The sweep's update probe on one pair; the ledger keeps whether it may retire."""
+    contexts = await stored_pair_contexts(session, older, newer)
     with observe_sampling() as sampling:
-        reading = await _read_update_slot(older.content, newer.content)
+        reading = await _read_update_slot(older.content, newer.content, contexts=contexts)
     slot = reading.verdict
     if slot is not None:
         await remember(

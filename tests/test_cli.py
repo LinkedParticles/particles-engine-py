@@ -2951,6 +2951,13 @@ class TestDbInitUncreatableDirectory:
         assert "Traceback" not in result.output
 
 
+_SCHEMA_CHECK = "particles.api.cli.memory._refuse_a_store_this_install_cannot_serve"
+
+
+async def _store_is_servable(store: str) -> None:
+    """Stand-in for ``memory serve``'s schema check, for tests of the rules before it."""
+
+
 _SERVE_VERBS = [
     pytest.param(["mcp", "serve"], "particles.mcp.main", id="mcp-serve"),
     pytest.param(["memory", "serve"], "particles.mcp.memory_compat.main", id="memory-serve"),
@@ -3005,7 +3012,9 @@ class TestServeStoreDirectory:
         monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_dir / 'particles.db'}")
         reset_config()
 
-        with patch(serve_target) as serve_main:
+        # The directory rule only: ``memory serve`` would then refuse the
+        # uninitialized store, which its own tests cover.
+        with patch(serve_target) as serve_main, patch(_SCHEMA_CHECK, _store_is_servable):
             result = runner.invoke(app, argv)
 
         assert result.exit_code == 0, result.output

@@ -4,7 +4,7 @@
 
 """Deterministic changing-world generator for the memory-rot benchmark.
 
-:func:`generate_world` is a pure function of ``(seed, days, checkpoints)``: no
+:func:`generate_world` is a pure function of ``(seed, days, checkpoints, profile)``: no
 I/O, no LLM, no wall clock. A seed *is* the fixture, so nothing is vendored,
 and :attr:`RotWorld.fingerprint` (pinned by the unit tests) makes any change to
 what a seed produces a visible diff rather than a silent re-baseline — bump
@@ -15,6 +15,12 @@ slot draws its values from its own pool of distinctive proper nouns, and
 :func:`check_value_invariants` refuses a pool set in which two values overlap
 or a value occurs in any fixed template text — the invariant that lets the
 scorer identify a value's slot by substring alone.
+
+A **profile** (:data:`PROFILES`) sizes the world. ``full`` is the
+world, and its output is unchanged by the profile machinery (the pinned
+fingerprints hold). ``quick`` is the development world: six slots,
+three checkpoints and sparse filler, with one case of every phenomenon the
+metrics need, at about a quarter of the sessions.
 """
 
 from __future__ import annotations
@@ -40,6 +46,31 @@ from particles.benchmark.rot.schema import (
 
 #: Bump when a seed's output is meant to change. Recorded on the run tuple.
 GENERATOR_VERSION = 1
+
+
+@dataclass(frozen=True)
+class WorldProfile:
+    """How large a world is. Joins the run tuple by name."""
+
+    name: str
+    #: Slots in play; fewer than all twelve draws a seeded subset.
+    slots: int
+    controls: int
+    reverts: int
+    #: Poisoned slots per channel (three channels).
+    poison_per_channel: int
+    #: Filler sessions fall on every ``filler_every``-th day...
+    filler_every: int
+    #: ...one to ``filler_max`` of them.
+    filler_max: int
+    checkpoints: tuple[int, ...]
+
+
+#: The world. Its draws are the generator's original ones, in order.
+FULL_PROFILE = WorldProfile("full", 12, 2, 3, 2, 1, 2, (15, 30, 45, 60, 75, 90))
+#: The development world: about 50 sessions and 24 probes.
+QUICK_PROFILE = WorldProfile("quick", 6, 1, 2, 1, 3, 1, (30, 60, 90))
+PROFILES: dict[str, WorldProfile] = {p.name: p for p in (FULL_PROFILE, QUICK_PROFILE)}
 
 #: URI scheme of a deposited chat session.
 SESSION_URI_SCHEME = "rotbench"
@@ -557,18 +588,30 @@ def generate_world(  # noqa: PLR0912, PLR0915 — one linear build, kept in one 
     *,
     days: int = 90,
     checkpoints: list[int] | None = None,
+    profile: str = "full",
 ) -> RotWorld:
-    """Build the deterministic world for ``seed``."""
+    """Build the deterministic world for ``seed``.
+
+    Raises:
+        ValueError: On an unknown profile, or checkpoints past the last day.
+    """
     check_value_invariants()
-    cps = checkpoints if checkpoints is not None else [15, 30, 45, 60, 75, 90]
+    if profile not in PROFILES:
+        raise ValueError(f"unknown world profile {profile!r}; known: {sorted(PROFILES)}")
+    prof = PROFILES[profile]
+    cps = checkpoints if checkpoints is not None else list(prof.checkpoints)
     if not cps or cps[-1] > days:
         raise ValueError(f"checkpoints {cps} must be non-empty and end at or before day {days}")
     rng = random.Random(seed)
     keys = [s.key for s in SLOTS]
+    if prof.slots < len(keys):
+        # Only a smaller profile draws here, so the full world's draws are untouched.
+        chosen = set(rng.sample(keys, prof.slots))
+        keys = [k for k in keys if k in chosen]
 
-    controls = sorted(rng.sample(keys, 2))
+    controls = sorted(rng.sample(keys, prof.controls))
     changing = [k for k in keys if k not in controls]
-    reverts = set(rng.sample(changing, 3))
+    reverts = set(rng.sample(changing, prof.reverts))
 
     events: list[WorldEvent] = []
     true_values: dict[str, set[str]] = {}
@@ -637,17 +680,13 @@ def generate_world(  # noqa: PLR0912, PLR0915 — one linear build, kept in one 
             continue
         events.append(WorldEvent(day=day, slot=ev.slot, kind=EventKind.HISTORY, value=ev.previous))
 
-    # Poison: six distinct slots, two per channel, each a value the slot never
-    # truly takes.
-    poison_slots = rng.sample(keys, 6)
-    channels = [
-        PoisonChannel.RELAY,
-        PoisonChannel.RELAY,
-        PoisonChannel.TOOL_TURN,
-        PoisonChannel.TOOL_TURN,
-        PoisonChannel.SOURCE,
-        PoisonChannel.SOURCE,
-    ]
+    # Poison: distinct slots, ``poison_per_channel`` per channel (two in the
+    # full world), each a value the slot never truly takes.
+    per = prof.poison_per_channel
+    poison_slots = rng.sample(keys, 3 * per)
+    channels = (
+        [PoisonChannel.RELAY] * per + [PoisonChannel.TOOL_TURN] * per + [PoisonChannel.SOURCE] * per
+    )
     rng.shuffle(channels)
     for key, channel in zip(poison_slots, channels, strict=True):
         candidates = [v for v in SLOTS_BY_KEY[key].pool if v not in true_values[key]]
@@ -663,13 +702,15 @@ def generate_world(  # noqa: PLR0912, PLR0915 — one linear build, kept in one 
 
     events.sort(key=lambda e: (e.day, keys.index(e.slot), e.kind.value))
 
-    # Sessions: one per event, plus one or two filler sessions a day.
+    # Sessions: one per event, plus filler (one or two a day in the full world).
     sessions: list[RotSession] = []
     by_day: dict[int, list[RotSession]] = {}
     for idx, ev in enumerate(events):
         by_day.setdefault(ev.day, []).append(_event_session(rng, seed, idx, ev))
     for day in range(1, days + 1):
-        topics = rng.sample(range(len(FILLER)), rng.randint(1, 2))
+        if day % prof.filler_every:
+            continue
+        topics = rng.sample(range(len(FILLER)), rng.randint(1, prof.filler_max))
         for t in topics:
             user, reply, claim = FILLER[t]
             by_day.setdefault(day, []).append(
@@ -701,7 +742,7 @@ def generate_world(  # noqa: PLR0912, PLR0915 — one linear build, kept in one 
 
     probes: list[Probe] = []
     for cp in cps:
-        probes += [Probe(checkpoint=cp, slot=s.key, question=s.question) for s in SLOTS]
+        probes += [Probe(checkpoint=cp, slot=k, question=SLOTS_BY_KEY[k].question) for k in keys]
         probes += [
             Probe(checkpoint=cp, slot=k, question=q, negative=True) for k, q in NEGATIVE_PROBES
         ]
@@ -711,12 +752,13 @@ def generate_world(  # noqa: PLR0912, PLR0915 — one linear build, kept in one 
         days=days,
         generator_version=GENERATOR_VERSION,
         checkpoints=cps,
-        pools={s.key: list(s.pool) for s in SLOTS},
-        nouns={s.key: s.noun for s in SLOTS},
+        pools={k: list(SLOTS_BY_KEY[k].pool) for k in keys},
+        nouns={k: SLOTS_BY_KEY[k].noun for k in keys},
         control_slots=controls,
         events=events,
         sessions=sessions,
         probes=probes,
+        profile=profile,
     )
     world.fingerprint = _fingerprint(world)
     return world
@@ -785,12 +827,15 @@ def _cap(text: str) -> str:
 
 
 def _fingerprint(world: RotWorld) -> str:
-    payload = {
+    payload: dict[str, object] = {
         "events": [e.model_dump(mode="json") for e in world.events],
         "sessions": [s.model_dump(mode="json") for s in world.sessions],
         "probes": [p.model_dump(mode="json") for p in world.probes],
         "controls": world.control_slots,
     }
+    if world.profile != "full":
+        # Only a non-full world names its profile, so every full fingerprint holds.
+        payload["profile"] = world.profile
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(blob).hexdigest()
 

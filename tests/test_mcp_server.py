@@ -783,6 +783,41 @@ class TestDiagnostics:
 
 class TestQuerySummary:
     @pytest.mark.asyncio
+    async def test_query_passes_include_refused_candidates_and_reports_withheld(
+        self, db_session: AsyncSession
+    ) -> None:
+        """the MCP parameter reaches the request, and a withheld
+        refusal's count rides the result, in the full and the slim shape."""
+        from unittest.mock import AsyncMock, patch
+
+        from particles.core.schema import QueryResponse
+        from particles.mcp import build_server
+
+        fake_resp = QueryResponse(
+            answer="Nothing relevant.",
+            particles=[],
+            effective_confidences=[],
+            answer_refused=True,
+            withheld_candidates=5,
+        )
+        op = AsyncMock(return_value=fake_resp)
+        with patch("particles.operations.query.query", new=op):
+            server = build_server()
+            default = await _call_tool(server, "query", {"question": "anything?"})
+            slim = await _call_tool(server, "query", {"question": "anything?", "summary": True})
+            opted = await _call_tool(
+                server, "query", {"question": "anything?", "include_refused_candidates": True}
+            )
+
+        assert default["withheld_candidates"] == 5
+        assert default["particles"] == []
+        assert slim["withheld_candidates"] == 5
+        assert slim["particles"] == []
+        assert opted["answer_refused"] is True
+        requests = [call.args[1] for call in op.call_args_list]
+        assert [r.include_refused_candidates for r in requests] == [False, False, True]
+
+    @pytest.mark.asyncio
     async def test_query_summary_returns_slim_hits(self, db_session: AsyncSession) -> None:
         from unittest.mock import AsyncMock, patch
 
@@ -834,8 +869,8 @@ class TestQuerySummary:
         assert "properties" not in hit
 
     @pytest.mark.asyncio
-    async def test_query_default_returns_full_particles(self, db_session: AsyncSession) -> None:
-        """Backward-compat: omitting ``summary`` returns full Particle dumps."""
+    async def test_query_default_returns_compact_hits(self, db_session: AsyncSession) -> None:
+        """omitting ``detail`` returns the compact shape."""
         from unittest.mock import AsyncMock, patch
 
         from particles.core.schema import QueryResponse
@@ -850,11 +885,34 @@ class TestQuerySummary:
 
         with patch("particles.operations.query.query", new=AsyncMock(return_value=fake_resp)):
             server = build_server()
-            result = await _call_tool(
-                server,
-                "query",
-                {"question": "anything?"},  # summary defaults to False
-            )
+            result = await _call_tool(server, "query", {"question": "anything?"})
+
+        assert result["answer"] == "The answer."
+        assert result["particles"] == [
+            {"id": p.id, "content": "atomic claim", "effective_confidence": 0.42}
+        ]
+
+    @pytest.mark.asyncio
+    async def test_query_full_detail_returns_full_particles(self, db_session: AsyncSession) -> None:
+        """``detail="full"`` (and the older ``summary=False``) return full Particle dumps."""
+        from unittest.mock import AsyncMock, patch
+
+        from particles.core.schema import QueryResponse
+        from particles.mcp import build_server
+
+        p = _make_particle(content="atomic claim", subject_ids=["s-1"])
+        fake_resp = QueryResponse(
+            answer="The answer.",
+            particles=[p],
+            effective_confidences=[0.42],
+        )
+
+        with patch("particles.operations.query.query", new=AsyncMock(return_value=fake_resp)):
+            server = build_server()
+            result = await _call_tool(server, "query", {"question": "anything?", "detail": "full"})
+            legacy = await _call_tool(server, "query", {"question": "anything?", "summary": False})
+
+        assert legacy == result
 
         # Full Particle Pydantic dump includes these fields the slim
         # variant strips out.

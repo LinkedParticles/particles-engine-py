@@ -54,12 +54,31 @@ from particles.operations.audit import (
 from particles.operations.curation.cards import (
     CardKind,
     CurationCard,
+    DuplicateEdge,
     DuplicateVerdict,
     ParticleBrief,
     gestures_for,
 )
 from particles.operations.curation.collect import collect_cards
 from tests._client_fixtures import stream_via_create
+
+
+def _group(a: str, b: str, verdict: JudgeVerdictKind | None = None) -> CurationCard:
+    """A one-pair ``duplicate_group`` card, as the finder now emits."""
+    edge = DuplicateEdge(
+        a=a,
+        b=b,
+        similarity=0.95,
+        verdict=DuplicateVerdict(verdict=verdict) if verdict is not None else None,
+    )
+    return CurationCard(
+        kind=CardKind.DUPLICATE_GROUP,
+        particle_ids=[a, b],
+        diagnostic="diag",
+        suggested_gestures=gestures_for(CardKind.DUPLICATE_GROUP),
+        pairs=[edge],
+        survivor_id=a,
+    )
 
 
 def _card(
@@ -802,9 +821,9 @@ class TestRunMemoryAudit:
     @pytest.mark.asyncio
     async def test_judged_duplicate_verdict_census(self, db_session: AsyncSession) -> None:
         cards = [
-            _card(CardKind.DUPLICATE_PAIR, "a", "b", verdict=JudgeVerdictKind.PARAPHRASE),
-            _card(CardKind.DUPLICATE_PAIR, "c", "d", verdict=JudgeVerdictKind.DISTINCT),
-            _card(CardKind.DUPLICATE_PAIR, "e", "f"),  # judge returned nothing → unsure
+            _group("a", "b", verdict=JudgeVerdictKind.PARAPHRASE),
+            _group("c", "d", verdict=JudgeVerdictKind.DISTINCT),
+            _group("e", "f"),  # judge returned nothing → unsure
         ]
         with patch(
             "particles.operations.audit.collect_cards", AsyncMock(return_value=cards)
@@ -828,10 +847,10 @@ class TestRunMemoryAudit:
             "f": "Run 6 passed.",
         }
         cards = [
-            _card(CardKind.DUPLICATE_PAIR, "a", "b"),
-            _card(CardKind.DUPLICATE_PAIR, "c", "d"),
+            _group("a", "b"),
+            _group("c", "d"),
             # A judged pair keeps the judge's verdict, number or not.
-            _card(CardKind.DUPLICATE_PAIR, "e", "f", verdict=JudgeVerdictKind.DISTINCT),
+            _group("e", "f", verdict=JudgeVerdictKind.DISTINCT),
         ]
         by_id = {pid: SimpleNamespace(content=text) for pid, text in contents.items()}
         with (
@@ -840,9 +859,27 @@ class TestRunMemoryAudit:
         ):
             report = await run_memory_audit(db_session, semantic=False)
         assert report.duplicate_number_variants == 1
-        assert report.count(CardKind.DUPLICATE_PAIR) == 2
+        assert report.count(CardKind.DUPLICATE_GROUP) == 2
         assert report.duplicate_candidate_pairs_total == 2
         assert "1 candidate pair set aside as not duplicates" in render_audit_report(report)
+
+    @pytest.mark.asyncio
+    async def test_the_withheld_count_is_recorded_and_rendered(
+        self, db_session: AsyncSession
+    ) -> None:
+        """the pairs the identifier rung withheld are disclosed."""
+
+        async def collect(*_: object, withheld: dict[str, int | None], **__: object) -> list:
+            withheld["identifier_cross@1"] = 12
+            return []
+
+        with patch("particles.operations.audit.collect_cards", collect):
+            report = await run_memory_audit(db_session, semantic=False)
+        assert report.duplicate_withheld == {"identifier_cross@1": 12}
+        assert (
+            "12 candidate pairs withheld across the store: each claim names an identifier "
+            "the other lacks (identifier_cross@1)"
+        ) in render_audit_report(report)
 
     @pytest.mark.asyncio
     async def test_default_duplicates_stay_report_mode(self, db_session: AsyncSession) -> None:
@@ -1159,13 +1196,13 @@ class TestDuplicateScanScoping:
         # Headline counts only the harvest-touching pair; the store-wide total M
         # is retained for the tail disclosure.
         assert report.duplicate_scope == "harvested"
-        assert report.count(CardKind.DUPLICATE_PAIR) == 1
+        assert report.count(CardKind.DUPLICATE_GROUP) == 1
         assert report.duplicate_candidate_pairs_total == 2
 
         text = render_audit_report(report)
-        assert "1 likely-duplicate belief pair " in text
+        assert "1 group of likely duplicates over" in text
         assert (
-            "duplicate scan is store-wide; 2 candidate pairs total, 1 involve this harvest"
+            "duplicate scan is store-wide; 2 candidate groups total, 1 involve this harvest"
         ) in text
 
     @pytest.mark.asyncio
@@ -1184,7 +1221,7 @@ class TestDuplicateScanScoping:
         # A re-audit / --scope store leaves the duplicate scan store-wide: both
         # pairs count and no tail line is printed.
         assert report.duplicate_scope == "store"
-        assert report.count(CardKind.DUPLICATE_PAIR) == 2
+        assert report.count(CardKind.DUPLICATE_GROUP) == 2
         assert report.duplicate_candidate_pairs_total == 2
         assert "duplicate scan is store-wide;" not in render_audit_report(report)
 
@@ -1214,7 +1251,7 @@ class TestRenderer:
         text = render_audit_report(_report())
         # Zero counts still render — an audit never hides a class (§5).
         assert "0 potential contradictions" in text
-        assert "0 likely-duplicate belief pairs" in text
+        assert "0 groups of likely duplicates" in text
         assert "0 probably-stale facts" in text
         assert "(0 across files, 0 contested at extract time)" in text
         assert "(unjudged similarity candidates; --judge to verify)" in text
@@ -1232,7 +1269,7 @@ class TestRenderer:
         text = render_audit_report(_report(buckets=buckets))
         assert "4 potential contradictions" in text
         assert "(2 across files, 2 contested at extract time)" in text
-        assert "11 likely-duplicate belief pairs" in text
+        assert "11 groups of likely duplicates" in text
         assert "7 probably-stale facts" in text
         assert "(5 aged past their source's decay horizon, 2 expired)" in text
 
@@ -1313,7 +1350,8 @@ class TestRenderer:
         ]
         text = render_audit_report(_report(buckets=buckets))
         assert (
-            "next: particles links suggest --judge · particles curate --kind duplicate_pair" in text
+            "next: particles links suggest --judge · particles curate --kind duplicate_group"
+            in text
         )
         assert "next: particles curate --kind stale" in text
 
@@ -1323,11 +1361,11 @@ class TestRenderer:
             _report(
                 buckets=buckets,
                 judged=True,
-                duplicate_verdicts={"PARAPHRASE": 1, "DISTINCT": 1},
+                duplicate_verdicts={"PARAPHRASE": 1, "DISTINCT": 1, "UNSURE": 1},
             )
         )
-        assert "3 verified duplicate belief pairs" in text
-        assert "(LLM-judged: 1 paraphrase, 1 distinct, 1 unsure)" in text
+        assert "3 groups of possible duplicates" in text
+        assert "(LLM-judged pairs: 1 paraphrase, 1 distinct, 1 unsure)" in text
         assert "unjudged similarity candidates" not in text
 
     def test_skip_line_mirrors_semantic_skipped(self) -> None:
@@ -2013,14 +2051,14 @@ class TestSingularCounts:
             _report(buckets=buckets, contradiction_disagreements=1, contradiction_grouped_pairs=2)
         )
         assert "1 potential contradiction " in text
-        assert "1 likely-duplicate belief pair " in text
+        assert "1 group of likely duplicates over" in text
         assert "1 probably-stale fact " in text
         assert "2 contradiction claim pairs count as 1 disagreement:" in text
 
     def test_plural_counts_are_unchanged(self) -> None:
         text = render_audit_report(_report())
         assert "0 potential contradictions" in text
-        assert "0 likely-duplicate belief pairs" in text
+        assert "0 groups of likely duplicates" in text
         assert "0 probably-stale facts" in text
 
 

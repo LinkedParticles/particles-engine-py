@@ -611,6 +611,40 @@ class TestSearchSubjectsAliases:
         ]
         assert pages == [["A speaker", "B"], ["C speaker", "D"], ["E"]]
 
+    @pytest.mark.asyncio
+    async def test_relevance_lists_the_closest_names_first(self, db_session: AsyncSession) -> None:
+        """A picker's order: exact, then prefix, then word start, then the rest."""
+        from particles.store.subject_store import search_subjects
+
+        for name in (
+            "$PARTICLES_TOKEN",
+            "Particles spec",
+            "Particles",
+            "the particles store",
+            # Not the private repository's name: the publication export
+            # rewrites that to the public repo's, which starts with the query
+            # and so changes this name's rank in the exported tree.
+            "big-particles",
+        ):
+            await self._add(db_session, name)
+        await self._add(db_session, "Z", aliases=["particles"])
+        alphabetical = [x.canonical_name for x in await search_subjects(db_session, "particles")]
+        assert alphabetical[0] == "$PARTICLES_TOKEN"
+        ranked = [
+            x.canonical_name
+            for x in await search_subjects(db_session, "particles", order="relevance")
+        ]
+        assert ranked == [
+            "Z",  # an exact alias, ranked with the exact name and shorter
+            "Particles",
+            "Particles spec",
+            "the particles store",
+            "big-particles",
+            "$PARTICLES_TOKEN",
+        ]
+        first_two = await search_subjects(db_session, "particles", order="relevance", limit=2)
+        assert [x.canonical_name for x in first_two] == ranked[:2]
+
 
 class TestSubjectResolver:
     @pytest.mark.asyncio

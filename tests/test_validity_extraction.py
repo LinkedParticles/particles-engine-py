@@ -319,6 +319,43 @@ class TestGateValidFrom:
         assert "VALID_FROM_SESSION_OUTSIDE_TRANSCRIPT" in note
         assert basis == ValidFromBasis.STATED
 
+    # a session anchor stays inside the session's span of days.
+    @pytest.mark.parametrize(
+        ("day", "kept"),
+        [("2026-10-09", True), ("2026-10-12", True), ("2026-10-08", False), ("2026-10-13", False)],
+    )
+    def test_session_event_outside_the_span_is_dropped(self, day: str, kept: bool) -> None:
+        from datetime import date
+
+        vf, *_, note, _basis = _gate_valid_from(
+            day,
+            "EVENT",
+            0.9,
+            "the tests passed",
+            floor=0.75,
+            raw_basis="session",
+            session_source=True,
+            session_span=(date(2026, 10, 9), date(2026, 10, 12)),
+        )
+        if kept:
+            assert vf is not None and note is None
+        else:
+            assert vf is None and note is not None and "VALID_FROM_SESSION_OUTSIDE_SPAN" in note
+
+    def test_a_stated_start_is_not_bounded_by_the_span(self) -> None:
+        from datetime import date
+
+        vf, *_, note, _basis = _gate_valid_from(
+            "2019-01-01",
+            "EVENT",
+            0.9,
+            "in 2019",
+            floor=0.75,
+            session_source=True,
+            session_span=(date(2026, 10, 9), date(2026, 10, 12)),
+        )
+        assert vf is not None and note is None
+
     def test_session_state_reads_as_as_of(self) -> None:
         vf, kind, _, _, note, basis = _gate_valid_from(
             "2026-10-14", "STATE", 0.9, "x", floor=0.75, raw_basis="session", session_source=True

@@ -60,6 +60,8 @@ async def test_co_evidential_group_is_threshold_gated(db_session: object) -> Non
         RelationType.CO_EVIDENTIAL,
         RelationCreatedBy.AUTO_CLUSTER_V1,
         confidence=0.5,
+        decided_by="cluster@test",
+        run_id="run-1",
     )
     await session.commit()  # type: ignore[attr-defined]
 

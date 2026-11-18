@@ -92,6 +92,10 @@ def pytest_configure(config: pytest.Config) -> None:
     )
     os.close(fd)
     os.environ["PARTICLES_CONFIG"] = str(empty_config)
+    # Never let hook/installer tests reach the developer's Codex state/locks.
+    os.environ["CODEX_HOME"] = str(config_dir / "codex-home")
+    os.environ["PARTICLES_CODEX_STATE_DIR"] = str(config_dir / "codex-state")
+    os.environ["PARTICLES_PROJECT_IDENTITY_LOCK"] = str(config_dir / "project-identity.lock")
     # Benchmark-run persistence is on by default; keep test runs out of the
     # developer's real ~/.particles/benchmark/runs (worker-suffixed like the
     # blob dir).
@@ -106,6 +110,10 @@ def pytest_configure(config: pytest.Config) -> None:
     os.environ["PARTICLES_API_KEYS_FILE"] = (
         f"/tmp/particles_test_engine_keys{('_' + worker) if worker else ''}.json"
     )
+    # This installation's host id defaults under the real
+    # ~/.particles; the suite mints its own in the private config directory, so
+    # it never reads or writes the developer's.
+    os.environ["PARTICLES_HOST_ID_FILE"] = str(config_dir / "host-id")
     # Hypothesis's too_slow health check times input generation, and the first
     # integer draw in a process also pays Hypothesis's one-off harvest of
     # literal constants: it AST-parses every local module in ``sys.modules``

@@ -30,7 +30,7 @@ import logging
 from collections import defaultdict
 from collections.abc import Mapping
 from collections.abc import Set as AbstractSet
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from itertools import combinations
 from pathlib import Path
@@ -40,6 +40,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from particles.config import get_config, is_broad_root
+from particles.core.provisional import ProvisionalMark
 from particles.core.schema import (
     AsOfNote,
     ContestedBadge,
@@ -76,6 +77,7 @@ from particles.store.particle_store import (
     get_superseding_particle,
     is_born_retired,
 )
+from particles.store.subject_provisional import list_marks
 from particles.store.subject_store import (
     find_by_name,
     get_particles_for_subject,
@@ -322,6 +324,7 @@ async def build_graph_data(
             dropped_below_threshold=dropped_below_threshold,
             excluded_undatable=excluded_undatable,
             missing_disputants=missing_disputants,
+            provisional=dict(await list_marks(session)),
         ),
         max_nodes=node_cap,
         max_particles_per_subject=cfg.max_particles_per_subject,
@@ -371,6 +374,9 @@ class GraphLayoutInputs:
     dropped_below_threshold: int
     excluded_undatable: int
     missing_disputants: int
+    #: The provisional marks of the subjects in scope; a
+    #: confirmed Subject is absent.
+    provisional: Mapping[str, ProvisionalMark] = field(default_factory=dict)
 
 
 def layout_graph(
@@ -522,6 +528,8 @@ def layout_graph(
     nodes = [
         GraphNode(
             subject_id=sid,
+            # A provisional Subject's node carries its mark.
+            provisional=inputs.provisional.get(sid),
             label=(naming.display_name(subjects_by_id[sid]) if sid in subjects_by_id else sid),
             subject_class=(subjects_by_id[sid].subject_class if sid in subjects_by_id else None),
             hop=hop_by_subject.get(sid, 0),

@@ -12,6 +12,7 @@ need.
 |---|---|
 | [Getting started](getting-started.md) | First-time setup → first query |
 | [Concepts](concepts.md) | What's a particle, subject, status, confidence, provenance |
+| [When sources disagree](conflicts.md) | Which claim wins a conflict, what is kept, how you are asked, and how to audit or undo it |
 | [Querying](querying.md) | Semantic search, tag filters, structural filters, MCP, what the ranking does |
 | [As-of time travel](as-of.md) | What the store believed at a past instant, and what replaced it |
 | [Exporting](exporting.md) | Obsidian vault, Anki deck, wiki articles, Logseq graph |

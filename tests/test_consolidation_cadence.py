@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 
 from particles.core.consolidation_cadence import (
     CENSUS_DRIFT_TOLERANCE,
+    CensusDecision,
     decide_census,
     is_due,
 )
@@ -56,6 +57,7 @@ class TestDecideCensus:
         decision = decide_census(enabled=True, interval_hours=WEEK, last_ran=last, now=NOW)
         assert decision.run
         assert decision.next_due == last + timedelta(hours=WEEK)
+        assert decision.last_ran == last
 
     def test_a_scheduler_a_little_early_still_finds_it_due(self) -> None:
         # Last week's run started a few minutes later than this one: without
@@ -84,3 +86,18 @@ class TestDecideCensus:
         )
         assert not decision.run
         assert decision.reason == "consolidation.census.enabled is false"
+
+    def test_disabled_still_discloses_when_it_last_ran(self) -> None:
+        """The report reads ``last_ran`` off the decision even when the switch is off."""
+        last = NOW - timedelta(days=2)
+        decision = decide_census(enabled=False, interval_hours=WEEK, last_ran=last, now=NOW)
+        assert decision == CensusDecision(
+            run=False, reason="consolidation.census.enabled is false", last_ran=last
+        )
+
+    def test_due_exactly_at_the_tolerance_runs(self) -> None:
+        """``now`` plus the tolerance landing on ``next_due`` is due: the bound is inclusive."""
+        last = NOW - timedelta(hours=WEEK) + CENSUS_DRIFT_TOLERANCE
+        decision = decide_census(enabled=True, interval_hours=WEEK, last_ran=last, now=NOW)
+        assert decision.next_due == NOW + CENSUS_DRIFT_TOLERANCE
+        assert decision.run

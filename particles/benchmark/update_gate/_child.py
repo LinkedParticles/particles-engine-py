@@ -40,6 +40,9 @@ EXIT_REFUSED = 2
 
 RESULT_FILE = "result.json"
 PINS_FILE = "pins.json"
+#: The project the notes belong to: the key of their ``~/.claude/projects``
+#: directory inside the child's HOME.
+CHILD_PROJECT = "-bench-trip-vs-move"
 #: The module the parent runs with ``python -m``.
 ENTRY_MODULE = "particles.api.cli._trip_vs_move_child"
 
@@ -135,8 +138,12 @@ def run(
         log = RequestLog()
         overrides = scripted_providers([p for p in all_purposes() if p != "default"], table, log)
 
-    notes_dir = run_dir / "notes"
-    notes_dir.mkdir()
+    # The notes sit where Claude Code keeps a project's memory, inside the
+    # child's private HOME, so the harvest stamps the project key a real
+    # session's memory files carry. Without it they would be unattributed,
+    # and two unattributed files are two lineages.
+    notes_dir = run_dir / "home" / ".claude" / "projects" / CHILD_PROJECT / "memory"
+    notes_dir.mkdir(parents=True)
     notes = CASES[case].variants[variant]
     result: dict[str, Any] = {"exits": {}, "incomplete": None}
     # The ceiling is checked against measured spend between steps, never handed

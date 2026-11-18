@@ -288,7 +288,7 @@ def probes() -> Generator[dict[str, SlotVerdict], None, None]:
 
     slot = {"verdict": SlotVerdict.DIFFERENT}
 
-    async def updates(earlier: str, later: str) -> SlotVerdict:
+    async def updates(earlier: str, later: str, contexts: Any = None) -> SlotVerdict:
         return slot["verdict"]
 
     original = ep._embedding_model

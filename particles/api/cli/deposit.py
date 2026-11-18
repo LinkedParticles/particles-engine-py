@@ -95,6 +95,18 @@ def deposit_cmd(
         ),
     ),
     tags: str | None = typer.Option(None, help="Comma-separated tags"),
+    standing: bool = typer.Option(
+        False,
+        "--standing",
+        help=(
+            "Keep this deposit in every project's standing memory. A deposit that "
+            "names no project is reference by default: it answers questions from "
+            "every project, and the session-start digest and the agent-memory "
+            "region leave it out and count it. Pass --standing for a "
+            "document every project should start from. On a re-deposit of an entry "
+            "already marked reference, it removes the mark."
+        ),
+    ),
     date: str | None = typer.Option(
         None,
         "--date",
@@ -203,7 +215,9 @@ def deposit_cmd(
         st_text = source_type or ("JOURNAL" if journal else None)
         tag_list = [t.strip() for t in tags.split(",")] if tags else []
         refuse_reserved_marks(tag_list, deposited_by)
-        entry_id, snapshot_id = run(_deposit_text(text, deposited_by, st_text, tag_list))
+        entry_id, snapshot_id = run(
+            _deposit_text(text, deposited_by, st_text, tag_list, standing=standing)
+        )
         typer.echo(f"entry_id:    {entry_id}")
         typer.echo(f"snapshot_id: {snapshot_id}")
         return
@@ -244,7 +258,7 @@ def deposit_cmd(
             )
             raise typer.Exit(1)
         try:
-            rows = run(_deposit_split(source, deposited_by, st, tag_list))
+            rows = run(_deposit_split(source, deposited_by, st, tag_list, standing=standing))
         except ValueError as exc:
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(1)
@@ -275,6 +289,7 @@ def deposit_cmd(
                 content_date=content_date,
                 mutability=mutability,
                 fetch_policy=fetch_policy,
+                standing=standing,
             )
         )
     except (ValueError, SourceFetchError) as exc:
@@ -319,6 +334,7 @@ async def _deposit(
     content_date: datetime | None = None,
     mutability: str | None = None,
     fetch_policy: str | None = None,
+    standing: bool = False,
 ) -> tuple[str, str, list[tuple[str, str, str]], bool]:
     backend = get_backend()
     if source.startswith("http://") or source.startswith("https://"):
@@ -345,6 +361,7 @@ async def _deposit(
             tags=tags,
             follow_post_links=follow_post_links,
             follow_comment_links=follow_comment_links,
+            standing=standing,
         )
     else:
         outcome = await backend.deposit_file(
@@ -355,6 +372,7 @@ async def _deposit(
             content_date=content_date,
             mutability=mutability,
             fetch_policy=fetch_policy,
+            standing=standing,
         )
     follow_targets = [(f.entry_id, f.snapshot_id, f.uri) for f in outcome.follow_targets]
     return outcome.entry_id, outcome.snapshot_id, follow_targets, outcome.unchanged
@@ -365,6 +383,8 @@ async def _deposit_text(
     deposited_by: str,
     source_type: str | None,
     tags: list[str],
+    *,
+    standing: bool = False,
 ) -> tuple[str, str]:
     """Deposit a literal string as one corpus entry.
 
@@ -379,6 +399,7 @@ async def _deposit_text(
         store=DEFAULT_STORE,
         deposited_by=deposited_by,
         source_type=source_type,
+        standing=standing,
     )
 
 
@@ -387,6 +408,8 @@ async def _deposit_split(
     deposited_by: str,
     source_type: str | None,
     tags: list[str],
+    *,
+    standing: bool = False,
 ) -> list[tuple[str, str]]:
     """Split a multi-entry local file into N corpus entries."""
     backend = get_backend()
@@ -395,5 +418,6 @@ async def _deposit_split(
         deposited_by=deposited_by,
         source_type=source_type,
         tags=tags,
+        standing=standing,
     )
     return [(o.entry_id, o.snapshot_id) for o in outcomes]

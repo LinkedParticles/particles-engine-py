@@ -325,7 +325,14 @@ class TestDogfoodTagQuery:
         from particles.operations.query import query as query_op
 
         _ = populated_db
-        req = QueryRequest(question="what coins exist?", tags=["coins"], top_k=200)
+        # The test encoder scores every hit below the relevance floor; asking
+        # for refused candidates keeps the tag filter observable.
+        req = QueryRequest(
+            question="what coins exist?",
+            tags=["coins"],
+            top_k=200,
+            include_refused_candidates=True,
+        )
         async with session_scope() as session:
             response = await query_op(session, req)
 
@@ -344,7 +351,12 @@ class TestDogfoodTagQuery:
         from particles.operations.query import query as query_op
 
         _ = populated_db
-        req = QueryRequest(question="?", tags=["coins/by-region/germany"], top_k=200)
+        req = QueryRequest(
+            question="?",
+            tags=["coins/by-region/germany"],
+            top_k=200,
+            include_refused_candidates=True,
+        )
         async with session_scope() as session:
             response = await query_op(session, req)
         assert len(response.particles) == 3

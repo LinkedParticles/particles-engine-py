@@ -28,7 +28,7 @@ import logging
 from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, time
+from datetime import UTC, date, datetime, time
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -45,7 +45,7 @@ from particles.core.validity import (
     anchor_from_prose,
     prose_rule_digest,
 )
-from particles.corpus.harvest_marks import is_owner_harvest
+from particles.corpus.harvest_marks import harness_session_source, is_owner_harvest
 from particles.corpus.store import get_entry, list_entry_tag_rows, set_snapshots_published_at
 from particles.store.event_store import EventRefKind, OperatorEventType, record_event
 from particles.store.particle_store import (
@@ -319,8 +319,26 @@ async def date_particle(
 #: maps to a transcript on disk is its convention, never the Engine's.
 SessionStartResolver = Callable[[str, str | None, list[str]], datetime | None]
 
+#: ``(entry_id, uri_r, tags) -> the UTC days the session's turns fall on``, the
+#: first day first; empty when the transcript is gone. The harness
+#: adapter supplies it (``_claude_code.session_turn_days``).
+SessionDaysResolver = Callable[[str, str | None, list[str]], Sequence[date]]
+
 #: Event actor for the CLI repair verb.
 REDATE_ACTOR = "cli:memory-redate"
+
+
+@dataclass(frozen=True)
+class MultiDaySession:
+    """A harvested session whose turns fall on more than one day."""
+
+    entry_id: str
+    days: int
+    """The distinct days its turns fall on."""
+    span_days: int
+    """Days from its first turn's day to its last's."""
+    first_day_claims: int
+    """Its ``session`` claims on the first day: an upper bound on the misdated ones."""
 
 
 @dataclass
@@ -336,6 +354,7 @@ class RedateReport:
     claims_redated: int = 0
     claims_unchanged: int = 0
     claims_failed: list[str] = field(default_factory=list)
+    multi_day: list[MultiDaySession] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -348,6 +367,7 @@ class RedateReport:
             "claims_redated": self.claims_redated,
             "claims_unchanged": self.claims_unchanged,
             "claims_failed": len(self.claims_failed),
+            "multi_day_sessions": len(self.multi_day),
         }
 
 
@@ -380,6 +400,7 @@ async def redate_sessions(
     session: AsyncSession,
     *,
     started_at_for: SessionStartResolver,
+    turn_days_for: SessionDaysResolver | None = None,
     dry_run: bool = False,
     actor: str = REDATE_ACTOR,
 ) -> RedateReport:
@@ -404,11 +425,18 @@ async def redate_sessions(
     The date written is never later than the entry's first capture, the bound
     a deposit's own ``content_published_at`` already keeps (security review
     2026-10-25-2, R30).
+
+    With ``turn_days_for``, a claim already on any day the
+    session's turns fall on is left alone, since an act after the first day is
+    dated by its own turn; only a day the session never saw is moved to the
+    start. Each session whose turns span more than one day is listed in
+    ``multi_day``, the sessions ``memory redate --reread`` re-reads.
     """
     report = RedateReport(dry_run=dry_run)
     session_basis = ValidFromBasis.SESSION.value
     for entry_id, uri_r, tags in await list_entry_tag_rows(session):
-        if "claude-code" not in tags or not (uri_r or "").startswith("claude-code://session/"):
+        source = harness_session_source(uri_r)
+        if source is None or source.tag not in tags:
             continue
         entry = await get_entry(session, entry_id)
         if entry is None or not is_owner_harvest(entry):
@@ -420,7 +448,15 @@ async def redate_sessions(
             continue
         report.resolved += 1
         anchor = session_anchor(_no_later_than_capture(started, entry.snapshots))
-        if not dry_run:
+        turn_days = set(turn_days_for(entry_id, uri_r, tags)) if turn_days_for else set()
+        kept_days = turn_days | {anchor.date()}
+        first_day_claims = 0
+        if dry_run:
+            # The rows the real run's write would reach: those with no date yet.
+            report.snapshots_dated += sum(
+                1 for snap in entry.snapshots if snap.content_published_at is None
+            )
+        else:
             report.snapshots_dated += await set_snapshots_published_at(session, entry_id, anchor)
         for particle in await get_particles_for_entry(session, entry_id):
             props = particle.properties or {}
@@ -431,6 +467,8 @@ async def redate_sessions(
                 continue
             report.claims_examined += 1
             if particle.valid_from is not None and particle.valid_from.date() == anchor.date():
+                first_day_claims += 1
+            if particle.valid_from is not None and particle.valid_from.date() in kept_days:
                 report.claims_unchanged += 1
                 continue
             report.claims_redated += 1
@@ -452,6 +490,15 @@ async def redate_sessions(
                 log.warning("redate: %s", exc)
                 report.claims_failed.append(particle.id)
                 report.claims_redated -= 1
+        if len(turn_days) > 1:
+            report.multi_day.append(
+                MultiDaySession(
+                    entry_id=entry_id,
+                    days=len(turn_days),
+                    span_days=(max(turn_days) - min(turn_days)).days,
+                    first_day_claims=first_day_claims,
+                )
+            )
     if not dry_run:
         await record_event(
             session,

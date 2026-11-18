@@ -8,10 +8,26 @@ verbs an operator has to remember to run.
 The pass list, in order:
 
 1. **Extract catch-up** *(LLM)*: extract PENDING snapshots, rule and memory
-   files first, then least-tried and longest-waiting first, capped at
-   `consolidation.max_pending_entries` per run. A capped run discloses the remainder and how long it has waited
+   files first, then transcripts newest session first, then everything else
+   least-tried and longest-waiting first, capped at
+   `consolidation.max_pending_entries` per run, or filling a nightly dollar
+   budget when `consolidation.extract_budget_usd` is set
+   ([A nightly extraction budget](#a-nightly-extraction-budget)). A capped run discloses the remainder and how long it has waited
    (`12 remain, oldest waiting since 2026-07-19; the next run continues`).
    See [When the backlog outgrows the cap](#when-the-backlog-outgrows-the-cap).
+
+   **Pass 1b, embed** *(zero-LLM, capped)*: a belief written while the
+   embedding encoder could not load is stored with no vector, and no search,
+   duplicate finder or census reaches it. This pass embeds the oldest such
+   beliefs with the current model, at most `consolidation.embed.max_per_run`
+   (500) per run, and changes nothing else about them. Each filled belief
+   joins this run's delta scope and the next one's, so the sweeps and the
+   census below pair it against the store. It runs on structural-only nights
+   too, since it makes no model call, and is skipped with the reason when no
+   encoder loads. The report's `embeddings` line says how many were filled and
+   how many still have no vector; `particles quality` shows the same count
+   between runs. A belief that restates one already held stays a second copy
+   until the duplicate finders put the pair on the curation queue.
 2. **Reconcile** *(LLM, capped)*: the cross-entry document-supersession
    sweep. Each candidate pair costs one
    replacement-signal probe, spent highest-similarity-first under
@@ -642,7 +658,9 @@ since the watermark, plus particles from corpus entries deposited since then.
 The watermark is the previous eligible run's **`started_at`** (not its
 completion, so nothing written mid-cycle ever falls between two runs'
 windows; overlap re-probes are idempotent), and the scope is computed *after*
-pass 1, so the particles extraction just minted are censused in the same run.
+pass 1 and the embed pass, so the particles extraction just minted are
+censused in the same run. The beliefs the embed pass gave a vector join the
+scope too, though they keep their original `asserted_at`.
 Watermark-eligible means: a successful, non-degraded run by the consolidation
 verb itself; a structural-only night or an interactive `particles audit`
 never advances the watermark. Nightly cost therefore scales with the day's
@@ -672,7 +690,7 @@ A night that skips it says so in the report, in place of the counts:
 
 ```
   census skipped: last ran 2026-09-28 03:30 UTC, next due 2026-10-05 03:30 UTC (consolidation.census.interval_hours = 168)
-  as of that census: 4 contradictions, 16 duplicate pairs, 7 stale
+  as of that census: 4 contradictions, 16 duplicate groups, 7 stale
 ```
 
 The counts are the last census's, not that night's, and the run reports no
@@ -764,10 +782,16 @@ consolidation:
   extract_pending: true     # pass 1 on/off
   max_pending_entries: 20   # pass 1 per-run cap
   priority_tags: [rule-file, memory-file]  # pass 1 takes these entries first
+  transcripts_newest_first: true  # transcripts newest session first
+  extract_budget_usd: null  # pass 1 nightly US$ budget, filled in rounds
+  extract_max_rounds: 6     # rounds a budgeted pass 1 may run
+  extract_batch_wait_share: 0.5  # share of the batch-wait budget pass 1 may use
   extract_batching: true    # pass 1 pooled half-price batching
   semantic: true            # LLM passes on scheduled runs
   max_reconcile_probes: 50  # pass 2 per-run probe cap (highest-similarity-first)
   max_paraphrase_probes: 30 # paraphrases per-run update-probe cap
+  embed:
+    max_per_run: 500        # beliefs given a vector per run, oldest first; 0 = off
   lock_timeout_minutes: 120 # warn that a holder may be hung
   lock_heartbeat_seconds: 60        # holder heartbeat interval
   lock_heartbeat_stale_minutes: 10  # another host's holder is stopped after this
@@ -940,6 +964,14 @@ Two rules decide what the cap reaches first:
   extracted that night, after the refresh pass has noticed the edit.
   Transcripts fill the slots that remain. The cap and the nightly spend are
   unchanged. Set the list to `[]` to drop the class.
+- **Transcripts newest session first.** Among the transcripts, the session
+  with the most recent pending snapshot is read first, so last night's work is
+  recallable the next day, and each session's own snapshots are still read
+  oldest first. Least-tried still comes before newest. Transcripts go ahead of
+  other sources such as a vault backlog. Where a night reads fewer transcripts
+  than arrive, the oldest ones wait, and `oldest waiting since` names them.
+  Set `consolidation.transcripts_newest_first: false` to read every class
+  longest-waiting first.
 - **An entry waits from its first unread edit.** A file edited five times
   between runs holds one pending snapshot, the newest (the other four are
   skipped as superseded). The queue orders that entry by when the first of
@@ -967,6 +999,61 @@ Four behaviours keep one bad snapshot from holding the queue:
   `EMPTY_COMPLETE_SNAPSHOT`). The run record carries the same counts as
   `pending_extracted`, `pending_retry`, `pending_empty`, `pending_failed`,
   `pending_reset_stale` and `pending_oldest_at`.
+
+### A nightly extraction budget
+
+The cap is a count, and a snapshot's cost varies with its length. To spend a
+fixed amount on extraction each night instead, set a dollar budget for pass 1
+and raise the cap, which stays the per-run ceiling:
+
+```yaml
+consolidation:
+  extract_budget_usd: 4.0
+  max_pending_entries: 200
+```
+
+Pass 1 then reads in rounds, each one pooled batch at the batch price, until
+the budget is spent:
+
+- **Round 1 is priced at its worst case**: every planned call at
+  `extraction.max_tokens` of output. Its planned output cannot carry the night
+  past the budget, however wrong the estimate is.
+- **Later rounds use measured cost.** After a round, pass 1 divides what that
+  round actually spent by its estimate. The factor is kept for each kind of
+  source (rule and memory files, transcripts, each other source type), from
+  tonight's rounds only, and needs five snapshots of that kind. A round reads
+  one kind and may take half of what is left, and its worst case may be at
+  most twice what is left, so no night spends more than twice its budget
+  through planned calls.
+- **A snapshot that does not fit is skipped**, keeps its place, and may fit a
+  later round. One whose worst case exceeds the whole budget is named on the
+  report line; read it with `particles extract --snapshot-id`.
+- **The run stops** when nothing fits, at `max_pending_entries` snapshots, at
+  `consolidation.extract_max_rounds` rounds (default 6), or when pass 1 has
+  used `consolidation.extract_batch_wait_share` (default half) of the run's
+  batch-wait budget, so the passes after it keep the batch price.
+- **A second check runs between batch chunks**: once measured spend reaches
+  the budget, no further chunk is submitted.
+
+The report line says what the budget did:
+
+```text
+  pending          extracted 84, … (519 remain, oldest waiting since 2026-07-19; the next run continues); extraction budget: 6 round(s), spent US$3.71 of US$4.00, estimate CONVERSATION ×0.25, stopped: rounds
+```
+
+The run record's `extract_budget` block carries the same figures, each
+round's charge, estimate, worst case and measured spend, and `overshoot_usd`.
+A budget is list price as the usage line meters it, not your account balance.
+On an extraction model with no `llm.price_per_mtok` entry the budget cannot be
+read in dollars, so pass 1 runs its unbudgeted count instead.
+`particles config validate` and `particles hook doctor` warn about that, about
+a budget not below `consolidation.budget_usd`, and about a ceiling still at
+20. On a thin client (`engine.base_url` set) consolidation runs on the engine
+with the engine's own config: set the budget and the ceiling there, and read
+the doctor, whose `tuning:` line names each setting the two configs disagree
+on and whose budget warnings are evaluated on the engine's config
+([Remote engine](remote-engine.md)). `memory consolidate --dry-run` shows round 1 exactly and projects the rest
+from the last run's factors.
 
 A COMPLETE snapshot is not always an extracted one. The refresh pass records
 an unchanged local file as a `REVISIT` snapshot with status COMPLETE, which
@@ -1005,3 +1092,15 @@ Anthropic provider ignores the schema in v1. Note: v1 ships the semantic
 passes on the configured (Anthropic) provider; routing `semantic_lint` to a
 local model is one config edit, pending the probe-quality measurement named
 in the consolidation design.
+
+## Scheduled credential profiles
+
+`consolidation.credential_profile` names a macOS Keychain credential binding
+for scheduled consolidation. The binding includes the store, extraction
+provider and endpoint; changing any of them requires enrolment for the new
+binding. The key itself never belongs in YAML or a job definition. Environment
+credentials take precedence. Ordinary library, hook and MCP callers remain
+environment-only; only explicit scheduled consolidation enables the fallback.
+Missing or locked credentials must stop paid passes without a background
+prompt. Runtime or interpreter changes can invalidate Keychain access, so
+check the scheduled binding after an upgrade.

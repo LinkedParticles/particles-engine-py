@@ -4,11 +4,13 @@
 
 """particle sub-Typer — inspect individual extracted particles by ID.
 
-Read/tag-only except for two narrow *operator* mutations. ``retract``
+Read/tag-only except for three narrow *operator* mutations. ``retract``
 retires a single belief under operator authority, which is the
 escape hatch the cross-asserter guardrail deliberately withholds
 from agents. ``reclassify`` sets one claim's adjudicability default
 by operator verdict, with a reason, and pins it against regeneration.
+``restore`` returns a claim an automatic rung retired as replaced,
+by minting a successor, under the operator's ruling on the replacement.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ import typer
 from particles.api.cli import app, run
 from particles.api.cli._progress import confirm
 from particles.api.cli._terminal import indented, terminal_safe
+from particles.core.episode import reading_of
 from particles.db import DEFAULT_STORE, session_scope
 from particles.sql_safety import LIKE_ESCAPE, escape_like_pattern
 
@@ -127,6 +130,10 @@ def _render_particle_header(particle: Particle) -> None:
         basis = (particle.properties or {}).get("extraction:valid_from_basis")
         basis_note = f" [{basis}]" if basis else ""
         _echo(f"Holds:        {start} → {end} ({kind}){basis_note}")
+    # the stored episode reading and the stamp that wrote it.
+    episode = reading_of(particle.properties, particle.extraction_provider_model)
+    if episode is not None:
+        _echo(f"Episode:      {episode.verdict.value} ({episode.stamp})")
     if particle.extractor_ref:
         ext_name = particle.extractor_ref.name
         ext_version = particle.extractor_ref.version
@@ -561,6 +568,149 @@ async def _particle_retract(id_prefix: str, reason: str, *, dry_run: bool, yes: 
 
     _echo(f"\nRetracted {particle_id[:8]}… (EXPLICIT_RETRACTION); reason recorded.")
     _echo("Run `particles lint` to cascade PROVENANCE_STALE to dependents.")
+
+
+@particle_app.command("restore")
+def particle_restore_cmd(
+    particle_id: str | None = typer.Argument(
+        None, help="The retired claim's ID (prefix OK); omit it with --from-entry"
+    ),
+    replacement: str = typer.Option(
+        ...,
+        "--replacement",
+        help=(
+            "What the replacing claim was: 'wrong' retracts it, 'holds' keeps both "
+            "claims current. Required: the two fail in opposite directions"
+        ),
+    ),
+    from_entry: str | None = typer.Option(
+        None,
+        "--from-entry",
+        help=(
+            "Restore every claim whose replacement came from this corpus entry "
+            "(prefix OK) within mcp.recall.digest_retirement_window_days"
+        ),
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show the plan without writing"),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation prompt"),
+) -> None:
+    """Return a claim an automatic rung retired as replaced.
+
+    Covers the retirements that name a replacing claim: an update, a document
+    supersession, a re-anchor restatement. The retired row is never revived. A
+    successor is minted with the claim's content, confidence, provenance,
+    subjects and embedding, and a RETIREMENT_RESTORED event records the
+    ruling. With ``--replacement wrong`` the replacing claim is retracted under
+    operator authority, so a re-extraction of it is held for review. With
+    ``--replacement holds`` both claims stay ACTIVE, and the restored claim is
+    never again retired by a replacement: a later conflicting claim is held for
+    review. The session-start digest prints this command for each source that
+    retired claims since your last session.
+    """
+    if replacement not in ("wrong", "holds"):
+        _echo("--replacement must be 'wrong' or 'holds'.", err=True)
+        raise typer.Exit(1)
+    if (particle_id is None) == (from_entry is None):
+        _echo("Give a particle ID or --from-entry, not both and not neither.", err=True)
+        raise typer.Exit(1)
+    run(_particle_restore(particle_id, from_entry, replacement, dry_run=dry_run, yes=yes))
+
+
+#: Event actor for an operator restore.
+RESTORE_ACTOR = "cli:particle-restore"
+
+
+def _one_line(text: str) -> str:
+    """Stored text on one line, its own line breaks and tabs folded to spaces."""
+    return " ".join(text.split())
+
+
+async def _particle_restore(
+    id_prefix: str | None,
+    entry_prefix: str | None,
+    ruling: str,
+    *,
+    dry_run: bool,
+    yes: bool,
+) -> None:
+    """Resolve, show, confirm, then restore each claim."""
+    from particles.api.cli._remote import ensure_local
+    from particles.operations.retirement_restore import (
+        RestoreRefused,
+        check_restorable,
+        replacement_of,
+        restore_retirement,
+        retired_by_entry,
+    )
+    from particles.store.particle_store import get_particle
+
+    ensure_local("particle restore")
+
+    async with session_scope() as session:
+        if entry_prefix is not None:
+            from particles.api.cli.corpus import _resolve_entry_id
+
+            entry_id = await _resolve_entry_id(session, entry_prefix)
+            targets = await retired_by_entry(session, entry_id)
+            if not targets:
+                _echo(f"No retired claim whose replacement came from {entry_id[:8]} is restorable.")
+                return
+        else:
+            assert id_prefix is not None
+            found = await get_particle(session, await _resolve_particle_id(session, id_prefix))
+            if found is None:  # pragma: no cover — the resolver already exits on a miss
+                _echo(f"Particle {id_prefix!r} not found.", err=True)
+                raise typer.Exit(1)
+            try:
+                await check_restorable(session, found)
+            except RestoreRefused as exc:
+                _echo(f"Error: {exc}", err=True)
+                raise typer.Exit(1) from exc
+            targets = [found]
+        for target in targets:
+            replaced_by = await replacement_of(session, target)
+            reason = target.status_reason.value if target.status_reason else ""
+            _echo(f"  {target.id}  ({reason})")
+            # One line per claim: ``_echo`` escapes control characters, and
+            # flattening keeps a claim's own line breaks from forging a line.
+            _echo(f"    retired     {_one_line(target.content)}")
+            if replaced_by is not None:
+                _echo(f"    replacement {_one_line(replaced_by.content)}  [{replaced_by.id[:8]}]")
+    verb = "retract each replacement" if ruling == "wrong" else "keep both claims current"
+    _echo(f"\nRuling: the replacement {'was wrong' if ruling == 'wrong' else 'holds'} ({verb}).")
+    if dry_run:
+        _echo("--dry-run: nothing written.")
+        return
+    if not yes:
+        confirm(f"\nRestore {len(targets)} claim(s)?", abort=True)
+
+    async with session_scope(write=True) as session:  # writer lock
+        outcomes = []
+        for target in targets:
+            try:
+                outcomes.append(
+                    await restore_retirement(
+                        session, target.id, ruling, actor=RESTORE_ACTOR, store=DEFAULT_STORE
+                    )
+                )
+            except (RestoreRefused, ValueError) as exc:
+                _echo(f"Error: {exc}", err=True)
+                raise typer.Exit(1) from exc
+        await session.commit()
+
+    for outcome in outcomes:
+        line = f"Restored {outcome.retired.id[:8]} as {outcome.successor.id[:8]}"
+        if outcome.retracted and outcome.replacement is not None:
+            line += f"; retracted {outcome.replacement.id[:8]}"
+        _echo(line + ".")
+        for original in outcome.reanchored:
+            _echo(
+                f"  {original[:8]} was restated as history of this claim; restore it the "
+                f"same way if it still holds: particles particle restore {original[:8]} "
+                "--replacement holds"
+            )
+        if outcome.fixture_note:
+            _echo(f"  {outcome.fixture_note}")
 
 
 @particle_app.command("reclassify")

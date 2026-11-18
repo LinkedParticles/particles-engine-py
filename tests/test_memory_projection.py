@@ -737,6 +737,130 @@ class TestProjectionCycle:
 
 
 # ---------------------------------------------------------------------------
+# the generic `particles project --splice` on the agent-memory manifest
+# ---------------------------------------------------------------------------
+
+
+class TestGenericSpliceOnTheMemoryManifest:
+    @staticmethod
+    def _splice(runner: CliRunner, state: Path, target: Path, region: str = MEMORY_REGION) -> Any:
+        return runner.invoke(
+            app, ["project", str(state / "memory.yaml"), str(target), "--splice", region]
+        )
+
+    def _setup(self, tmp_path: Path, name: str) -> tuple[Path, Path, Path]:
+        from particles.render.markdown import insert_projected_region_at_top
+
+        transcript, memory_dir = _project_dir(tmp_path, name)
+        memory_dir.mkdir(parents=True)
+        memory_md = memory_dir / "MEMORY.md"
+        memory_md.write_text(
+            insert_projected_region_at_top("- one authored note\n", MEMORY_REGION, "memory.yaml")
+        )
+        return transcript, memory_dir, memory_md
+
+    def test_it_writes_the_region_snapshot_so_the_next_hook_run_is_clean(
+        self, runner: CliRunner, cli_db: Path, projection_state: Path, tmp_path: Path
+    ) -> None:
+        _seed(("DCO is enforced.", 0.9))
+        transcript, _memory_dir, memory_md = self._setup(tmp_path, "-g1")
+
+        result = self._splice(runner, projection_state, memory_md)
+        assert result.exit_code == 0, result.output
+        assert "- DCO is enforced." in memory_md.read_text()
+        # The per-project region snapshot, never the full document beside the manifest.
+        snapshot = projection_state / "projects" / "-g1" / "memory-index.snapshot.md"
+        assert "- DCO is enforced." in snapshot.read_text()
+        assert "# Memory index" not in snapshot.read_text()
+        assert not (projection_state / "memory-index.snapshot.md").exists()
+
+        assert _session_end(runner, transcript).exit_code == 0
+        record = _last_log(tmp_path)
+        assert record["projection"]["outcome"] == "rendered"
+        assert record["projection"]["dirty_region"] is False
+        # The rendered bullets never reached the corpus as authored input.
+        assert not any("DCO is enforced" in t for t in asyncio.run(_corpus_texts()))
+
+    def test_an_unharvested_edit_in_the_region_is_refused(
+        self, runner: CliRunner, cli_db: Path, projection_state: Path, tmp_path: Path
+    ) -> None:
+        _seed(("DCO is enforced.", 0.9))
+        _transcript, _memory_dir, memory_md = self._setup(tmp_path, "-g2")
+        assert self._splice(runner, projection_state, memory_md).exit_code == 0
+        edited = memory_md.read_text().replace(
+            "<!-- END PROJECTED", "- an edit inside the region\n<!-- END PROJECTED"
+        )
+        memory_md.write_text(edited)
+
+        result = self._splice(runner, projection_state, memory_md)
+        assert result.exit_code == 1
+        assert "no harvest has deposited" in result.output
+        assert memory_md.read_text() == edited
+
+    def test_check_with_splice_writes_nothing(
+        self, runner: CliRunner, cli_db: Path, projection_state: Path, tmp_path: Path
+    ) -> None:
+        _seed(("DCO is enforced.", 0.9))
+        _transcript, _memory_dir, memory_md = self._setup(tmp_path, "-g5")
+        before = memory_md.read_text()
+        runner.invoke(
+            app,
+            [
+                "project",
+                str(projection_state / "memory.yaml"),
+                str(memory_md),
+                "--splice",
+                MEMORY_REGION,
+                "--check",
+            ],
+        )
+        assert memory_md.read_text() == before
+        assert not (projection_state / "projects" / "-g5").exists()
+
+    def test_another_region_is_refused(
+        self, runner: CliRunner, cli_db: Path, projection_state: Path, tmp_path: Path
+    ) -> None:
+        _transcript, _memory_dir, memory_md = self._setup(tmp_path, "-g3")
+        before = memory_md.read_text()
+        result = self._splice(runner, projection_state, memory_md, region="what-is")
+        assert result.exit_code == 2
+        assert memory_md.read_text() == before
+
+    def test_a_target_outside_a_claude_code_memory_directory_is_refused(
+        self, runner: CliRunner, cli_db: Path, projection_state: Path, tmp_path: Path
+    ) -> None:
+        from particles.render.markdown import insert_projected_region_at_top
+
+        elsewhere = tmp_path / "notes" / "memory" / "MEMORY.md"
+        elsewhere.parent.mkdir(parents=True)
+        elsewhere.write_text(insert_projected_region_at_top("", MEMORY_REGION, "memory.yaml"))
+        before = elsewhere.read_text()
+        result = self._splice(runner, projection_state, elsewhere)
+        assert result.exit_code == 2
+        assert "Claude Code memory" in result.output
+        assert elsewhere.read_text() == before
+
+    def test_a_store_the_hooks_do_not_name_writes_nothing(
+        self,
+        runner: CliRunner,
+        cli_db: Path,
+        projection_state: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from particles.config import reset_config
+
+        _transcript, _memory_dir, memory_md = self._setup(tmp_path, "-g4")
+        before = memory_md.read_text()
+        monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{tmp_path / 'scratch.db'}")
+        reset_config()
+        result = self._splice(runner, projection_state, memory_md)
+        assert result.exit_code == 1
+        assert "store-not-bound" in result.output
+        assert memory_md.read_text() == before
+
+
+# ---------------------------------------------------------------------------
 # The fold gate: a pointer folds only while the region carries its file
 # ---------------------------------------------------------------------------
 
@@ -1220,6 +1344,43 @@ class TestTrailerFreshness:
         assert result.exit_code == 0
         assert result.stdout == ""
         assert _last_log(tmp_path)["skipped"] == "projection-current"
+
+    def test_a_retirement_is_named_once_however_the_session_starts(
+        self, runner: CliRunner, cli_db: Path, projection_state: Path, tmp_path: Path
+    ) -> None:
+        """the disclosure rides the skip and diff paths, then the window moves."""
+        transcript, _ = self._rendered_memory(runner, tmp_path, "-f9")
+        old, new = _seed(("The user's home city is Boston.", 0.9), ("The home is Denver.", 0.9))
+
+        async def _retire() -> None:
+            from particles.core.status import Status, StatusReason
+            from particles.db import session_scope
+            from particles.ingest.conflict_plan import plan_update_event
+            from particles.store.event_store import record_event
+            from particles.store.particle_store import update_particle_status
+
+            async with session_scope(write=True) as session:
+                await update_particle_status(
+                    session, old, Status.PROVENANCE_STALE, StatusReason.SUPERSEDED_BY_UPDATE
+                )
+                event = plan_update_event(old, new, route="ladder")
+                await record_event(
+                    session,
+                    actor="t",
+                    event_type=event.event_type,
+                    refs=list(event.refs),
+                    payload=dict(event.payload),
+                )
+                await session.commit()
+
+        asyncio.run(_retire())
+        first = _session_start(runner, transcript)
+        assert first.exit_code == 0
+        assert "Retired automatically" in first.stdout
+        assert f"particles particle restore {old[:8]}" in first.stdout
+        assert _last_log(tmp_path).get("retirements_disclosed") is True
+        again = _session_start(runner, transcript)
+        assert "Retired automatically" not in again.stdout
 
     def test_mismatch_injects_only_the_difference(
         self, runner: CliRunner, cli_db: Path, projection_state: Path, tmp_path: Path
@@ -1942,16 +2103,19 @@ class TestRemoteEngine:
         assert "DCO is enforced." in context
         assert "skipped" not in _last_log(tmp_path)
 
-    def test_a_slow_engine_pushes_the_full_digest_inside_the_deadline(
+    def test_a_slow_engine_keeps_the_loaded_region_else_pushes_the_full_digest(
         self,
         runner: CliRunner,
         remote_engine: list[str],
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        # out of its share, the check keeps a current loaded region
+        # (degraded, reported apart from an error); without one, the full digest.
         _seed(("DCO is enforced.", 0.9))
-        transcript, _ = _project_dir(tmp_path, "-r8")
+        transcript, memory_dir = _project_dir(tmp_path, "-r8")
         _session_end(runner, transcript)
+        assert "- DCO is enforced." in (memory_dir / "MEMORY.md").read_text()
 
         async def _hang(*_args: Any, **_kwargs: Any) -> Any:
             await asyncio.sleep(30)
@@ -1963,17 +2127,30 @@ class TestRemoteEngine:
         result = _session_start(runner, transcript)
         assert result.exit_code == 0
         record = _last_log(tmp_path)
+        assert record["outcome"] == "degraded"
+        assert record["degraded"] == "freshness-timeout"
+        assert "load_1m" in record
+        assert "digest_bytes" not in record
+        # The loaded region is what it saw; this engine refuses the exposure write.
+        assert "exposure_beliefs" in record or "exposure_error" in record
+
+        memory_md = memory_dir / "MEMORY.md"
+        memory_md.write_text(memory_md.read_text().replace("- DCO", "- Edited: DCO"))
+        result = _session_start(runner, transcript)
+        record = _last_log(tmp_path)
         assert record["outcome"] == "ok"
         context = json.loads(result.stdout)["hookSpecificOutput"]["additionalContext"]
         assert "DCO is enforced." in context
 
-    def test_a_manifest_with_a_file_section_is_refused_before_any_request(
+    def test_a_manifest_with_a_file_section_renders_and_splices(
         self,
         runner: CliRunner,
         remote_engine: list[str],
         projection_state: Path,
         tmp_path: Path,
     ) -> None:
+        # the client sends the block's text; the engine renders it.
+        _seed(("DCO is enforced.", 0.9))
         (projection_state / "intro.md").write_text("A hand-written intro.\n")
         (projection_state / "memory.yaml").write_text(
             _MANIFEST_YAML.replace("sections:\n", "sections:\n  - block: intro.md\n")
@@ -1982,10 +2159,349 @@ class TestRemoteEngine:
 
         assert _session_end(runner, transcript).exit_code == 0
         projection = _last_log(tmp_path)["projection"]
-        assert projection["outcome"] == "error"
-        assert "ClientFileSectionError" in projection["error"]
-        assert not (memory_dir / "MEMORY.md").exists()
+        assert projection["outcome"] == "created"
+        text = (memory_dir / "MEMORY.md").read_text()
+        assert "A hand-written intro." in text
+        assert "- DCO is enforced." in text
+        assert "/memory/projection/default" in remote_engine
+
+
+# ---------------------------------------------------------------------------
+# a remote render carries the text of the manifest's file sections.
+# ---------------------------------------------------------------------------
+
+_BLOCKS_MANIFEST = """\
+name: memory-index
+sections:
+  - block: blocks/intro.md
+  - title: "Standing"
+    render: bullets
+    top_k: 60
+  - block: blocks/middle.md
+  - title: "More"
+    render: bullets
+    top_k: 60
+  - block: blocks/outro.md
+max_lines: 16
+max_bytes: 16384
+"""
+
+_INTRO = "Intro line one.\nIntro line two.\nIntro line three.\nIntro line four.\n"
+
+
+def _write_blocks(state: Path, manifest: str = _BLOCKS_MANIFEST) -> None:
+    (state / "blocks").mkdir(exist_ok=True)
+    (state / "blocks" / "intro.md").write_text(_INTRO)
+    (state / "blocks" / "middle.md").write_text("[[Linked]] middle block.\n")
+    (state / "blocks" / "outro.md").write_text("Outro.\n")
+    (state / "memory.yaml").write_text(manifest)
+
+
+def _region(backend: Any, state: Path, fold_targets: tuple[str, ...] = ()) -> Any:
+    from particles.operations.projection import load_manifest
+
+    return asyncio.run(
+        backend.memory_region(
+            "default",
+            manifest=load_manifest(state / "memory.yaml"),
+            base_dir=state,
+            observer_project=None,
+            exclude_source_tags=["rule-file"],
+            fold_targets=list(fold_targets),
+        )
+    )
+
+
+class TestRemoteFileSections:
+    def test_remote_and_local_render_the_same_bytes(
+        self, remote_engine: list[str], projection_state: Path
+    ) -> None:
+        from particles.api.client import get_backend
+        from particles.api.client.local import LocalBackend
+
+        _seed(*((f"Belief number {i} about the build.", 0.9 - i / 100) for i in range(12)))
+        _write_blocks(projection_state)
+        target = ("file:///nowhere/topic.md",)
+
+        remote = _region(get_backend(), projection_state, target)
+        local = _region(LocalBackend(), projection_state, target)
+
+        assert "/memory/projection/default" in remote_engine
+        assert remote.body == local.body
+        assert remote.content_hash == local.content_hash
+        assert remote.fold_verdicts == local.fold_verdicts == {target[0]: "not-extracted"}
+        # The block's lines count against the budget, so bullets were dropped.
+        bullets = [line for line in local.body.splitlines() if line.startswith("- ")]
+        assert 0 < len(bullets) < 24
+        assert "Intro line four." in remote.body
+        assert "Linked middle block." in remote.body  # wiki links stripped on both
+        assert "[[" not in remote.body
+
+    @pytest.mark.parametrize(
+        "block",
+        ["/etc/hosts", "../outside.md", "~/outside.md", "linked-dir/x.md", "link.md"],
+    )
+    def test_the_client_refuses_a_path_the_local_render_refuses(
+        self, remote_engine: list[str], projection_state: Path, tmp_path: Path, block: str
+    ) -> None:
+        from particles.api.client import get_backend
+        from particles.api.client.local import LocalBackend
+
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "x.md").write_text("outside\n")
+        (projection_state / "linked-dir").symlink_to(outside)
+        (projection_state / "real.md").write_text("inside\n")
+        (projection_state / "link.md").symlink_to(projection_state / "real.md")
+        (projection_state / "memory.yaml").write_text(
+            _MANIFEST_YAML.replace("sections:\n", f"sections:\n  - block: {block!r}\n")
+        )
+
+        with pytest.raises(Exception) as local_exc:
+            _region(LocalBackend(), projection_state)
+        with pytest.raises(Exception) as remote_exc:
+            _region(get_backend(), projection_state)
+        assert type(remote_exc.value) is type(local_exc.value)
+        assert isinstance(local_exc.value, (ValueError, OSError))
         assert not any(p.startswith("/memory/projection") for p in remote_engine)
+
+    def test_with_the_harvest_off_nothing_is_sent(
+        self, remote_engine: list[str], projection_state: Path
+    ) -> None:
+        from particles.api.client import get_backend
+        from particles.config import get_config
+        from particles.operations.projection.memory_region import ClientFileSectionError
+
+        _write_blocks(projection_state)
+        get_config().claude_code.harvest.allow_remote = False
+        with pytest.raises(ClientFileSectionError, match="allow_remote"):
+            _region(get_backend(), projection_state)
+        assert not any(p.startswith("/memory/projection") for p in remote_engine)
+
+    def test_a_total_over_the_cap_is_refused_remotely_and_renders_locally(
+        self, remote_engine: list[str], projection_state: Path
+    ) -> None:
+        from particles.api.client import get_backend
+        from particles.api.client.local import LocalBackend
+        from particles.operations.projection.memory_region import (
+            MAX_REMOTE_BLOCK_BYTES,
+            ClientFileSectionError,
+        )
+
+        _write_blocks(projection_state)
+        (projection_state / "blocks" / "outro.md").write_text("y" * MAX_REMOTE_BLOCK_BYTES)
+        with pytest.raises(ClientFileSectionError, match="byte limit"):
+            _region(get_backend(), projection_state)
+        assert not any(p.startswith("/memory/projection") for p in remote_engine)
+        assert "y" * 100 in _region(LocalBackend(), projection_state).body
+
+
+_SECRET_TEXT = "block-text-0378-must-not-leak"
+_TRAVERSAL = "../../etc/passwd"
+
+
+def _post_render(payload: dict[str, Any]) -> Any:
+    import httpx
+
+    from particles.api.app import app as fastapi_app
+
+    async def _run() -> Any:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=fastapi_app),
+            base_url=_ENGINE,
+            headers={"Authorization": "Bearer test-engine-key"},
+        ) as client:
+            return await client.post("/memory/projection/default", json=payload)
+
+    return asyncio.run(_run())
+
+
+def _payload_with(blocks: dict[str, Any]) -> dict[str, Any]:
+    from particles.operations.projection import DocManifest
+
+    manifest = DocManifest.model_validate(
+        {
+            "name": "memory-index",
+            "sections": [{"block": "intro.md"}, {"title": "Memory index", "render": "bullets"}],
+        }
+    )
+    return {"manifest": manifest.model_dump(mode="json"), "blocks": blocks}
+
+
+def _row_counts() -> dict[str, int]:
+    async def _run() -> dict[str, int]:
+        from sqlalchemy import text
+
+        from particles.db import Base, session_scope
+
+        counts: dict[str, int] = {}
+        async with session_scope() as session:
+            for table in Base.metadata.sorted_tables:
+                result = await session.execute(text(f'SELECT COUNT(*) FROM "{table.name}"'))
+                counts[table.name] = int(result.scalar_one())
+        return counts
+
+    return asyncio.run(_run())
+
+
+class TestRenderRouteBlocks:
+    @pytest.fixture(autouse=True)
+    def _no_engine_read(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The engine never opens a block path: any read fails the test."""
+
+        def _refuse(*_args: Any, **_kwargs: Any) -> Any:
+            raise AssertionError("the engine read a block from disk")
+
+        monkeypatch.setattr("particles.operations.projection.project.read_block_text", _refuse)
+        monkeypatch.setattr("particles.operations.projection.paths.read_block_text", _refuse)
+
+    def test_the_sent_text_is_rendered_and_nothing_is_written(
+        self, remote_engine: list[str], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+
+        _seed(("DCO is enforced.", 0.9))
+        before = _row_counts()
+        caplog.set_level(logging.DEBUG)
+        response = _post_render(_payload_with({"intro.md": _SECRET_TEXT + "\n"}))
+        assert response.status_code == 200, response.text
+        assert response.json()["body"].startswith(_SECRET_TEXT + "\n")
+        assert _row_counts() == before
+        assert _SECRET_TEXT not in caplog.text
+
+    @pytest.mark.parametrize(
+        ("blocks", "detail"),
+        [
+            ({}, "no text for the file section at manifest position 1"),
+            (
+                {"intro.md": _SECRET_TEXT, _TRAVERSAL: _SECRET_TEXT},
+                "text for 1 file section(s) the manifest does not name",
+            ),
+            ({"intro.md": "z" * (64 * 1024 + 1)}, "over the 65536-byte limit"),
+        ],
+    )
+    def test_a_mismatch_is_refused_without_echoing_a_key_or_text(
+        self,
+        remote_engine: list[str],
+        caplog: pytest.LogCaptureFixture,
+        blocks: dict[str, str],
+        detail: str,
+    ) -> None:
+        import logging
+
+        caplog.set_level(logging.DEBUG)
+        response = _post_render(_payload_with(blocks))
+        assert response.status_code == 422
+        message = response.json()["detail"]
+        assert detail in message
+        assert _SECRET_TEXT not in message and _TRAVERSAL not in message
+        assert "intro.md" not in message
+        assert _SECRET_TEXT not in caplog.text and _TRAVERSAL not in caplog.text
+
+    def test_a_malformed_value_is_not_logged(
+        self, remote_engine: list[str], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import logging
+
+        caplog.set_level(logging.DEBUG)
+        response = _post_render(_payload_with({"intro.md": {"nested": _SECRET_TEXT}}))
+        assert response.status_code == 422
+        assert _SECRET_TEXT not in caplog.text
+
+    def test_an_engine_without_the_field_refuses_as_today(self, remote_engine: list[str]) -> None:
+        """Skew: extras are ignored, so an old engine 422s on the file section."""
+        from pydantic import create_model
+
+        from particles.api.app import MemoryProjectionRequest
+
+        assert MemoryProjectionRequest.model_config.get("extra", "ignore") == "ignore"
+        fields = {
+            name: (info.annotation, info)
+            for name, info in MemoryProjectionRequest.model_fields.items()
+            if name != "blocks"
+        }
+        old = create_model("OldMemoryProjectionRequest", **fields)  # type: ignore[call-overload]
+        parsed = old.model_validate(_payload_with({"intro.md": "text"}))
+        assert not hasattr(parsed, "blocks")
+        # What that engine then renders: no texts, so the file section is refused.
+        response = _post_render(_payload_with({}))
+        assert response.status_code == 422
+        assert "no text for the file section" in response.json()["detail"]
+
+
+def test_no_block_text_reaches_a_span(tmp_path: Path) -> None:
+    """With tracing on, no span attribute or event carries a block's text.
+
+    Subprocess-isolated, as the egress span tests are: the OTel globals are
+    write-once. Skips without the ``otel`` extra.
+    """
+    import subprocess
+    import sys
+    import textwrap
+
+    pytest.importorskip("opentelemetry.sdk")
+    pytest.importorskip("opentelemetry.instrumentation.fastapi")
+    code = textwrap.dedent(
+        f"""
+        import asyncio, json, os
+        os.environ["HOME"] = {str(tmp_path)!r}
+        cfg = os.path.join({str(tmp_path)!r}, "config.yaml")
+        with open(cfg, "w") as f:
+            f.write("observability:\\n  enabled: true\\n  exporter: none\\n"
+                    "  metrics: false\\n  logs: false\\nnetwork:\\n  egress: none\\n")
+        os.environ["PARTICLES_CONFIG"] = cfg
+        os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///" + os.path.join(
+            {str(tmp_path)!r}, "s.db")
+        for k in list(os.environ):
+            if k.startswith(("ANTHROPIC_", "PARTICLES_LLM_API_KEY_")) or k in (
+                "PARTICLES_API_KEY", "PARTICLES_ENGINE_TOKEN"):
+                del os.environ[k]
+        from opentelemetry import trace
+        from opentelemetry.sdk.trace import TracerProvider
+        from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+        from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+            InMemorySpanExporter,
+        )
+        exporter = InMemorySpanExporter()
+        provider = TracerProvider()
+        provider.add_span_processor(SimpleSpanProcessor(exporter))
+        trace.set_tracer_provider(provider)
+        from particles.db import create_tables
+        asyncio.run(create_tables())
+        from fastapi.testclient import TestClient
+        from particles.api.app import app
+        from particles.observability.setup import instrument_fastapi_app
+        instrument_fastapi_app(app)
+        client = TestClient(app, base_url="http://127.0.0.1:8000",
+                            client=("127.0.0.1", 50000), raise_server_exceptions=False)
+        manifest = {{"name": "memory-index", "sections": [
+            {{"block": "intro.md"}}, {{"title": "Memory index", "render": "bullets"}}]}}
+        for blocks in ({{"intro.md": {_SECRET_TEXT!r}}},
+                       {{"intro.md": {_SECRET_TEXT!r}, {_TRAVERSAL!r}: {_SECRET_TEXT!r}}},
+                       {{"intro.md": {{"x": {_SECRET_TEXT!r}}}}}):
+            r = client.post("/memory/projection/default",
+                            json={{"manifest": manifest, "blocks": blocks}})
+            print("STATUS", r.status_code)
+        out = []
+        for s in exporter.get_finished_spans():
+            out.append({{"name": s.name,
+                        "attributes": {{k: str(v) for k, v in (s.attributes or {{}}).items()}},
+                        "events": [{{k: str(v) for k, v in (e.attributes or {{}}).items()}}
+                                   for e in s.events]}})
+        print("SPANS=" + json.dumps(out))
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, timeout=120
+    )
+    assert result.returncode == 0, result.stderr[-4000:]
+    statuses = [ln for ln in result.stdout.splitlines() if ln.startswith("STATUS")]
+    assert statuses == ["STATUS 200", "STATUS 422", "STATUS 422"], result.stdout[-2000:]
+    line = [ln for ln in result.stdout.splitlines() if ln.startswith("SPANS=")][-1]
+    spans = json.loads(line[len("SPANS=") :])
+    assert spans
+    assert _SECRET_TEXT not in json.dumps(spans)
+    assert _TRAVERSAL not in json.dumps(spans)
 
 
 def test_memory_md_is_read_capped_and_never_through_a_link(

@@ -93,7 +93,7 @@ def probes(monkeypatch: pytest.MonkeyPatch) -> Generator[_Probes, None, None]:
             return None
         return frozenset((a, b)) in state.conflicts
 
-    async def updates(earlier: str, later: str) -> SlotVerdict:
+    async def updates(earlier: str, later: str, contexts: Any = None) -> SlotVerdict:
         return state.conflicts.get(frozenset((earlier, later)), SlotVerdict.DIFFERENT)
 
     async def read(a: ClaimContext, b: ClaimContext) -> ProbeVerdict:
@@ -136,6 +136,8 @@ async def _session(session: Any, ex: _Sessions, claims: list[str], *, day: int) 
         source_type=SourceType.CONVERSATION,
         mutability=Mutability.STABLE,
         content_published_at=T0 + timedelta(days=day),
+        # One project, as the harness stamps it.
+        tags=["project:-Users-o-src-app"],
     )
     await session.commit()
     await extract_snapshot(session, entry_id, snapshot_id, extractor=ex)

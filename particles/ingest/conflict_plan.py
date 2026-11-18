@@ -12,17 +12,18 @@ what is then demoted, whether an INCONSISTENCY record or a
 cache changes, and what the pipeline returns. ``pipeline._apply_conflict_plan``
 performs the writes, in this order:
 
-  1. insert :attr:`ConflictWritePlan.insert` (``ACTIVE``, or born quarantined);
+  1. insert :attr:`ConflictWritePlan.insert` (``ACTIVE``, or born demoted);
   2. demote :attr:`ConflictWritePlan.demote` to ``PROVENANCE_STALE``;
   3. insert the INCONSISTENCY :attr:`ConflictWritePlan.wrapper`;
   4. record the retirement and dropped-candidate events;
   5. record the observer divergence.
 
-The mirror verdicts insert ``ACTIVE`` and *then* demote the row just inserted,
-because the insert seam forbids a born-``PROVENANCE_STALE`` row other than the
-``CONFLICT_PENDING`` quarantine birth. ``supersedes`` is filled only
-on the row being minted, and only when it is unset: it is write-once
-(D1).
+A loser the ladder decided before the write is inserted already demoted,
+never ``ACTIVE``: the INCONSISTENT quarantine (``CONFLICT_PENDING``)
+and the two mirror verdicts, whose insert names the verdict so the seam admits
+its supersession reason (:attr:`ConflictWritePlan.born_demoted_by`).
+``supersedes`` is filled only on the row being minted, and only when it is
+unset: it is write-once (D1).
 
 The plan lives beside the pipeline, not in ``core/``, because the event type
 and the batch cache are Engine vocabulary. It performs no I/O.
@@ -65,8 +66,10 @@ class ConflictWritePlan:
     insert: Particle | None = None
     """The row to insert, with its birth status and reason (and ``supersedes``)
     already set. It is stored with the candidate's embedding."""
+    born_demoted_by: ConflictVerdict | None = None
+    """The mirror verdict a born-demoted :attr:`insert` is admitted under."""
     demote: tuple[str, StatusReason] | None = None
-    """``(particle id, reason)`` to move to ``PROVENANCE_STALE`` after the insert."""
+    """``(particle id, reason)`` of the held row to move to ``PROVENANCE_STALE``."""
     wrapper: Particle | None = None
     """The INCONSISTENCY record, inserted after the quarantined row it names."""
     wrapper_domain_hint: str | None = None
@@ -90,8 +93,19 @@ class ConflictWritePlan:
     log_args: tuple[object, ...] = field(default_factory=tuple)
 
 
+def source_entry_id(particle: Particle) -> str | None:
+    """The corpus entry of ``particle``'s first SOURCE ref, the one rung 2.5 dates it by."""
+    ref = next((r for r in particle.provenance if r.type is ProvenanceRefType.SOURCE), None)
+    return ref.corpus_entry_id if ref is not None else None
+
+
 def plan_update_event(
-    retired_id: str, winner_id: str, *, route: str, decided_by: str | None = None
+    retired_id: str,
+    winner_id: str,
+    *,
+    route: str,
+    decided_by: str | None = None,
+    winner_entry_id: str | None = None,
 ) -> PlannedEvent:
     """The ``UPDATE_SUPERSESSION`` event of one rung 2.5 retirement.
 
@@ -99,11 +113,15 @@ def plan_update_event(
     or the assertion door), ``extra`` (a further same-subject pair)
     or ``sweep``. ``decided_by`` is the update ladder's rung
     whose ``CHANGES`` the retirement rests on, ``name@version``,
-    recorded in the payload when given.
+    recorded in the payload when given. ``winner_entry_id`` is the corpus entry
+    the winning claim came from (:func:`source_entry_id`), which the per-entry
+    cap counts and the digest groups by.
     """
     payload: dict[str, object] = {"retired_id": retired_id, "winner_id": winner_id, "route": route}
     if decided_by is not None:
         payload["decided_by"] = decided_by
+    if winner_entry_id is not None:
+        payload["winner_entry_id"] = winner_entry_id
     return PlannedEvent(
         event_type=OperatorEventType.UPDATE_SUPERSESSION,
         reason=f"Rung 2.5 ({route}): {retired_id[:8]} superseded by {winner_id[:8]}",
@@ -357,17 +375,19 @@ def plan_conflict_writes(
             )
 
         case ConflictVerdict.DOCUMENT_SUPERSEDED_BY_EXISTING:
-            # Rung 1.5 mirror: store the loser demoted, insert-then-transition.
+            # Rung 1.5 mirror: the loser is born demoted, so no
+            # history reader counts it as a belief once held.
+            loser = _demoted(new, StatusReason.DOCUMENT_SUPERSEDED)
             return ConflictWritePlan(
-                insert=new,
-                demote=(new.id, StatusReason.DOCUMENT_SUPERSEDED),
+                insert=loser,
+                born_demoted_by=ConflictVerdict.DOCUMENT_SUPERSEDED_BY_EXISTING,
                 retirement_event=plan_retirement_event(
                     new.id,
                     existing.id,
                     event_type=OperatorEventType.DOCUMENT_SUPERSESSION,
                     route="ladder",
                 ),
-                result=_demoted(new, StatusReason.DOCUMENT_SUPERSEDED),
+                result=loser,
                 log_message=(
                     "Document-supersession (rung 1.5): existing %s supersedes new %s"
                     " → new stored DOCUMENT_SUPERSEDED"
@@ -388,7 +408,11 @@ def plan_conflict_writes(
                 insert=minted,
                 demote=(existing.id, StatusReason.SUPERSEDED_BY_UPDATE),
                 update_event=plan_update_event(
-                    existing.id, minted.id, route="ladder", decided_by=decided_by
+                    existing.id,
+                    minted.id,
+                    route="ladder",
+                    decided_by=decided_by,
+                    winner_entry_id=source_entry_id(minted),
                 ),
                 cache_drop_existing=True,
                 cache_add_new=True,
@@ -398,14 +422,19 @@ def plan_conflict_writes(
             )
 
         case ConflictVerdict.UPDATE_SUPERSEDED_BY_EXISTING:
-            # Rung 2.5 mirror: an out-of-order older claim, stored demoted.
+            # Rung 2.5 mirror: an out-of-order older claim, born demoted.
+            loser = _demoted(new, StatusReason.SUPERSEDED_BY_UPDATE)
             return ConflictWritePlan(
-                insert=new,
-                demote=(new.id, StatusReason.SUPERSEDED_BY_UPDATE),
+                insert=loser,
+                born_demoted_by=ConflictVerdict.UPDATE_SUPERSEDED_BY_EXISTING,
                 update_event=plan_update_event(
-                    new.id, existing.id, route="ladder", decided_by=decided_by
+                    new.id,
+                    existing.id,
+                    route="ladder",
+                    decided_by=decided_by,
+                    winner_entry_id=source_entry_id(existing),
                 ),
-                result=_demoted(new, StatusReason.SUPERSEDED_BY_UPDATE),
+                result=loser,
                 log_message=(
                     "Update supersession (rung 2.5): existing %s is newer than new %s"
                     " → new stored SUPERSEDED_BY_UPDATE"

@@ -292,6 +292,37 @@ memory rather than as a tool an agent must choose to call, and the
 [memory-server swap](memory-server-swap.md) presents the store through the
 reference knowledge-graph memory server's own tool contract.
 
+### What the `query` tool returns
+
+An agent pays for every character a tool returns, so the MCP `query` tool
+returns a compact result by default:
+
+- **The answer**, as plain prose, with every disclosure that applies
+  (relevance, truncation, coverage, as-of and window notes).
+- **The beliefs the answer cites**, in the order it first cites them, at most
+  `mcp.query_hits` (default 10) of them. The tool asks for a grounded answer
+  to learn which ones those are, then removes the citation tags from the text.
+  When the answer cites nothing, the top-ranked beliefs are listed instead.
+- **For each belief**: its `id` (for `particle_show`), `content`,
+  `effective_confidence`, a one-line `source` (source type, URI and
+  publication date of its first source, with `(+N more)` when it has
+  several), `valid_from`, and, when it is contested, the open conflict's id
+  and the badge's bases. A key whose value is null, empty, zero or false is
+  left out: an absent key means unset.
+- **`hits_omitted`**, when the answer read more beliefs than the list shows.
+  The answer still reads all `top_k` (default `query.default_top_k`, 40).
+
+A call can ask for more. `detail="full"` returns the whole `QueryResponse`
+with full particle records, every retrieved belief and the per-sentence
+attribution; `hits` sets how many beliefs are listed; `particle_show`
+returns one belief's full record. The REST `/query` response and the CLI are
+unchanged, so the MCP tool is the one surface whose answer is composed
+grounded by default.
+
+To restore the full result for every client, set `mcp.query_detail: full`.
+To keep the compact shape but list the top-ranked beliefs under an ungrounded
+answer, set `mcp.query_list: ranked`.
+
 ## Ranking: what the SDK actually does
 
 1. **Embed the question.** SentenceTransformers (default
@@ -300,26 +331,62 @@ reference knowledge-graph memory server's own tool contract.
    subject.
 3. **Cosine similarity** between the question embedding and each
    particle's embedding. Top-k truncation (default 40; configurable
-   under `query.default_top_k` in `config.yaml`).
+   under `query.default_top_k` in `config.yaml`). The response warns
+   that top-k cut a plateau only when the last result scores within
+   `query.truncation_plateau_drop` (default 10%) of the first and more
+   than `query.truncation_near_count` (default 5) excluded particles
+   score as well, and names the `--top-k` that takes them in, or asks
+   for a narrower question when none can.
 4. **Rank by combined score**: `similarity_weight` × cosine
    similarity + `confidence_weight` × `effective_confidence`
    (defaults 0.6 / 0.4, §9.3). Particles whose `effective_confidence`
-   falls below `min_confidence` (default 0.0) are dropped.
+   falls below `min_confidence` (default 0.0) are dropped. When an
+   operator sets `query.exact_token_weight` (off by default),
+   a question that names something by number (`is RFC 9110 obsolete?`,
+   `what changed in 1.231.0?`) also lifts the particles whose text
+   contains that number, before the top-k cut. The embedding barely
+   tells `RFC 9110` from `RFC 9112`; the lift is what brings the
+   particles about the document you named into the answer. See
+   [the operator guide](../operator-guide/tuning.md#exact-identifier-token-addend-adr-0368).
 5. **Relevance floor**: if the best raw cosine similarity
    over the rendered top-k falls below `query.relevance_floor` (default
    0.25, calibrated to the reference embedding model; `0.0` disables),
    the answer is a deterministic "the store holds no beliefs relevant
-   to this question", with no LLM call. The nearest beliefs are still
-   returned, labelled as likely unrelated, and the structured
-   `relevance` field on the response carries `max_similarity` / `floor`
-   / `below_floor`. Disclosure only: the floor never changes ranking,
+   to this question", with no LLM call. The structured `relevance`
+   field on the response carries `max_similarity` / `floor` /
+   `below_floor`. Disclosure only: the floor never changes ranking,
    confidence, or filtering.
 6. **Synthesise** a natural-language answer with citations. Audience
    tier (`EXPERT`, `GENERAL`, `REGULATORY`) shapes the prose; default
-   `GENERAL`.
+   `GENERAL`. Each particle the answer step sees carries its date: the
+   day the claim began to hold, or else the day its source was written.
+   Where particles give different values for the same thing, the most
+   recently dated is taken as current and the earlier value is mentioned,
+   however many older particles repeat it. `query.answer_dates: false`
+   turns the dates off. When the retrieved particles do not bear on the
+   question, the answer step declines rather than answering from them,
+   and the response is a refusal like the floor's.
 7. **Coverage gap disclosure**: if no particles meet the
    threshold, the response says "the store doesn't contain relevant
    evidence" rather than confabulate.
+
+### When the answer refuses
+
+A refusal from either step sets `answer_refused` on the response. Its
+nearest beliefs are then withheld by default: they are likely
+unrelated, and an agent reading the whole result would otherwise spend
+its context on them. The response keeps the `relevance` verdict, reports
+the number withheld in `withheld_candidates`, and the answer text ends
+with one sentence saying how many were withheld.
+
+To receive them anyway, set `include_refused_candidates` on the request:
+the `include_refused_candidates` parameter of the MCP `query` tool, the
+same field in the `POST /query` body, or `--show-particles` on
+`particles query`, which then prints them under "Nearest beliefs, likely
+unrelated". The web UI asks for them and shows them under the same
+heading. Nothing is withheld when the answer did not refuse, including
+when answer generation failed and the response lists the retrieved
+beliefs in its place.
 
 ## The contested badge
 

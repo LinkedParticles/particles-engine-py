@@ -173,6 +173,7 @@ async def test_merge_relations_are_dropped(
 
     assert report.relations_deleted == len(losers)
     assert await get_relations_for_particle(db_session, survivor) == []
+    assert {g.relation_tag for g in report.groups} == {RelationCreatedBy.EXACT_DUPLICATE}
 
 
 @pytest.mark.asyncio
@@ -571,3 +572,26 @@ async def test_list_events_in_range_is_bounded_and_ordered(
         )
         == []
     )
+
+
+def test_the_summary_names_each_merge_tag_it_drops() -> None:
+    """One run may revert both merge kinds; the summary names each tag's count."""
+    from particles.api.cli.links import _render_unmerge_markdown
+    from particles.core.schema import UnmergeGroup, UnmergeReport
+
+    def group(n: int, tag: RelationCreatedBy) -> UnmergeGroup:
+        return UnmergeGroup(
+            merge_event_id=f"e{n}", survivor_id=f"s{n}", relations_deleted=n, relation_tag=tag
+        )
+
+    mixed = UnmergeReport(
+        groups=[
+            group(2, RelationCreatedBy.EXACT_DUPLICATE),
+            group(3, RelationCreatedBy.REREAD_DUPLICATE),
+        ],
+        relations_deleted=5,
+    )
+    assert "2 EXACT_DUPLICATE + 3 REREAD_DUPLICATE link(s) dropped" in _render_unmerge_markdown(
+        mixed, 10
+    )
+    assert "0 merge link(s) dropped" in _render_unmerge_markdown(UnmergeReport(), 10)

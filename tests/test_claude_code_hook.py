@@ -37,7 +37,7 @@ from particles.api.cli._claude_code import (
     transcript_started_at,
     truncate_on_line_boundary,
 )
-from particles.config import ClaudeCodeConfig
+from particles.config import ClaudeCodeConfig, get_config
 from tests._claude_projects import bind_hooks_to_store, isolate_claude_code
 
 # ---------------------------------------------------------------------------
@@ -588,6 +588,151 @@ class TestSessionEnd:
         assert "project_key_collision" not in ends[0]
         assert ends[1]["project_key_collision"] == sorted([str(first), str(second)])
 
+    def _end_with_miner(
+        self, runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> list[str]:
+        """Run one SessionEnd with the use miner replaced by a recorder; return its calls."""
+        import particles.operations.utility_mining as mining
+
+        calls: list[str] = []
+
+        async def recorder(store: str, transcript: str, session_id: str, **_: Any) -> Any:
+            calls.append(session_id)
+
+            class _R:
+                literal = behavioural = literal_nominated = behavioural_calls = 0
+                candidates = 3
+
+            return _R()
+
+        monkeypatch.setattr(mining, "mine_session_from_transcript", recorder)
+        project_dir = tmp_path / ".claude" / "projects" / "-my-project"
+        project_dir.mkdir(parents=True, exist_ok=True)
+        transcript = project_dir / "sess-u.jsonl"
+        _write_transcript(transcript, ("user", "run the tests"), ("assistant", "done"))
+        result = runner.invoke(
+            app,
+            ["hook", "session-end", "--store", "default"],
+            input=_session_end_payload(transcript, "sess-u"),
+        )
+        assert result.exit_code == 0
+        return calls
+
+    @pytest.mark.parametrize("key", [None, "sk-ant-test-not-a-real-key"])
+    def test_session_end_never_mines(
+        self,
+        runner: CliRunner,
+        cli_db: Path,
+        hook_home: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        key: str | None,
+    ) -> None:
+        """consolidation mines; the hook does not, with or without a key."""
+        if key is None:
+            monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        else:
+            monkeypatch.setenv("ANTHROPIC_API_KEY", key)
+        assert self._end_with_miner(runner, tmp_path, monkeypatch) == []
+        end = _hook_log_lines(hook_home)[-1]
+        assert end["outcome"] == "ok"
+        assert end["utility"] == {"deferred": "consolidation"}
+        assert "utility" not in end["phases_ms"]
+
+    def test_each_step_is_timed_and_a_cut_one_is_named(
+        self,
+        runner: CliRunner,
+        cli_db: Path,
+        hook_home: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """the hook log says where a run spent its time and where the deadline hit."""
+        import particles.api.cli.hook as hook_mod
+
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        self._end_with_miner(runner, tmp_path, monkeypatch)
+        done = _hook_log_lines(hook_home)[-1]
+        assert done["outcome"] == "ok"
+        assert {"transcript", "sweep"} <= set(done["phases_ms"])
+        assert "interrupted_in" not in done
+
+        async def stalls(*_a: Any, **_k: Any) -> Any:
+            await asyncio.sleep(30)
+
+        monkeypatch.setattr(hook_mod, "_catchup_sweep", stalls)
+        get_config().claude_code.hook_deadline_seconds = 0.5
+        self._end_with_miner(runner, tmp_path, monkeypatch)
+        cut = _hook_log_lines(hook_home)[-1]
+        assert cut["outcome"] == "error" and cut["error"].startswith("TimeoutError")
+        assert cut["interrupted_in"] == "sweep"
+        assert "transcript" in cut["phases_ms"] and "sweep" in cut["phases_ms"]
+
+    def test_the_worker_harvests_what_the_hand_off_spooled(
+        self, runner: CliRunner, cli_db: Path, hook_home: Path, tmp_path: Path
+    ) -> None:
+        """the worker verb harvests each spooled session and logs it."""
+        from particles.api.cli._claude_code import session_end_spool_dir
+        from particles.api.cli._claude_launcher import write_spool_file
+
+        project_dir = tmp_path / ".claude" / "projects" / "-my-project"
+        project_dir.mkdir(parents=True)
+        for sid in ("sess-w1", "sess-w2"):
+            transcript = project_dir / f"{sid}.jsonl"
+            _write_transcript(transcript, ("user", f"work in {sid}"))
+            write_spool_file(
+                session_end_spool_dir(), json.loads(_session_end_payload(transcript, sid))
+            )
+
+        result = runner.invoke(app, ["hook", "session-end-worker", "--store", "default"])
+        assert result.exit_code == 0 and result.stdout == ""
+
+        uris = {e.uri_r for e in asyncio.run(_corpus_entries())}
+        assert {"claude-code://session/sess-w1", "claude-code://session/sess-w2"} <= uris
+        ends = [r for r in _hook_log_lines(hook_home) if r.get("event") == "session-end"]
+        assert [r["session_id"] for r in ends] == ["sess-w1", "sess-w2"]
+        assert all(r["mode"] == "worker" and r["outcome"] == "ok" for r in ends)
+        spool = session_end_spool_dir()
+        assert not list(spool.glob("*.json")) and not list(spool.glob("*.taken"))
+
+    def test_a_session_handed_off_mid_run_is_harvested_in_a_second_cycle(
+        self,
+        runner: CliRunner,
+        cli_db: Path,
+        hook_home: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Each worker cycle runs its own event loop over the same store engine."""
+        import particles.api.cli.hook as hook_mod
+        from particles.api.cli._claude_code import session_end_spool_dir
+        from particles.api.cli._claude_launcher import write_spool_file
+
+        project_dir = tmp_path / ".claude" / "projects" / "-my-project"
+        project_dir.mkdir(parents=True)
+        payloads = []
+        for sid in ("sess-c1", "sess-c2"):
+            transcript = project_dir / f"{sid}.jsonl"
+            _write_transcript(transcript, ("user", f"work in {sid}"))
+            payloads.append(json.loads(_session_end_payload(transcript, sid)))
+        write_spool_file(session_end_spool_dir(), payloads[0])
+        real = hook_mod.harvest_session
+
+        async def harvest(store: str, payload: dict[str, Any], record: dict[str, Any]) -> Any:
+            if payload["session_id"] == "sess-c1":
+                write_spool_file(session_end_spool_dir(), payloads[1])
+            return await real(store, payload, record)
+
+        monkeypatch.setattr(hook_mod, "harvest_session", harvest)
+        assert (
+            runner.invoke(app, ["hook", "session-end-worker", "--store", "default"]).exit_code == 0
+        )
+        ends = [r for r in _hook_log_lines(hook_home) if r.get("event") == "session-end"]
+        assert [(r["session_id"], r["outcome"]) for r in ends] == [
+            ("sess-c1", "ok"),
+            ("sess-c2", "ok"),
+        ]
+
     def test_harvests_transcript_as_conversation_append_only(
         self, runner: CliRunner, cli_db: Path, hook_home: Path, tmp_path: Path
     ) -> None:
@@ -736,6 +881,57 @@ class TestSessionEnd:
         assert "claude-code://session/sess-live" in uris
         assert "claude-code://session/sess-crashed" in uris
         assert _hook_log_lines(hook_home)[-1]["swept"] == 1
+
+    def test_catchup_sweep_reaches_the_projects_worktree_directories(
+        self, runner: CliRunner, cli_db: Path, hook_home: Path, tmp_path: Path
+    ) -> None:
+        """A worktree session whose SessionEnd never ran is swept from the main checkout."""
+        projects = tmp_path / ".claude" / "projects"
+        main = projects / "-p6"
+        main.mkdir(parents=True)
+        current = main / "sess-main.jsonl"
+        _write_transcript(current, ("user", "current session"))
+        orphan = projects / "-p6--claude-worktrees-w1" / "sess-orphan.jsonl"
+        orphan.parent.mkdir()
+        _write_transcript(orphan, ("user", "killed worktree session"))
+        stranger = projects / "-p7--claude-worktrees-w2" / "sess-stranger.jsonl"
+        stranger.parent.mkdir()
+        _write_transcript(stranger, ("user", "another project's session"))
+
+        result = runner.invoke(
+            app,
+            ["hook", "session-end", "--store", "default"],
+            input=_session_end_payload(current, "sess-main"),
+        )
+        assert result.exit_code == 0
+        entries = {e.uri_r: e for e in asyncio.run(_corpus_entries())}
+        assert "claude-code://session/sess-orphan" in entries
+        assert "project:-p6" in entries["claude-code://session/sess-orphan"].tags
+        assert "claude-code://session/sess-stranger" not in entries
+        assert _hook_log_lines(hook_home)[-1]["swept"] == 1
+
+    def test_catchup_sweep_skips_a_symlinked_transcript(
+        self, runner: CliRunner, cli_db: Path, hook_home: Path, tmp_path: Path
+    ) -> None:
+        projects = tmp_path / ".claude" / "projects"
+        main = projects / "-p8"
+        main.mkdir(parents=True)
+        current = main / "sess-now.jsonl"
+        _write_transcript(current, ("user", "current session"))
+        elsewhere = tmp_path / "elsewhere.jsonl"
+        _write_transcript(elsewhere, ("user", "not a transcript of this project"))
+        link = projects / "-p8--claude-worktrees-w" / "sess-link.jsonl"
+        link.parent.mkdir()
+        link.symlink_to(elsewhere)
+
+        runner.invoke(
+            app,
+            ["hook", "session-end", "--store", "default"],
+            input=_session_end_payload(current, "sess-now"),
+        )
+        uris = {e.uri_r for e in asyncio.run(_corpus_entries())}
+        assert "claude-code://session/sess-link" not in uris
+        assert _hook_log_lines(hook_home)[-1]["swept"] == 0
 
     def test_transcripts_disabled_still_harvests_memory_files(
         self,
@@ -955,6 +1151,46 @@ class TestHookDoctor:
         assert result.exit_code == 0, result.output
         assert "resolves and is initialized" in result.stdout
         assert str(cli_db) in result.stdout
+
+    def test_reports_the_hand_off_spool_worker_and_degraded_starts(
+        self, runner: CliRunner, cli_db: Path, hook_home: Path
+    ) -> None:
+        """an inline SessionEnd, a stuck session, the worker, degraded starts."""
+        import os
+
+        from particles.api.cli._claude_code import append_hook_log, session_end_spool_dir
+        from particles.api.cli._claude_launcher import write_spool_file
+
+        stuck = write_spool_file(session_end_spool_dir(), {"session_id": "old"})
+        os.utime(stuck, (0, 0))
+        append_hook_log(
+            {"event": "session-end", "mode": "worker", "outcome": "ok", "ts": "2026-11-08T00:00Z"}
+        )
+        for i in range(10):
+            degraded = i < 2
+            record: dict[str, Any] = {"event": "session-start"}
+            record["outcome"] = "degraded" if degraded else "ok"
+            if degraded:
+                record["load_1m"] = 2.0 if i == 0 else 20.0
+            append_hook_log(record)
+
+        out = runner.invoke(app, ["hook", "doctor", "--store", "default"]).stdout
+        assert "harvests inside the hook" in out  # the fixture installs the inline form
+        assert "1 ended session(s) waited over 120 s" in out
+        assert "worker:         last run ok" in out
+        assert "⚠ 2 of the last 10 kept the loaded region (degraded); 1 at load under 4" in out
+
+        # A hand-off pinned to a spool the worker no longer reads is named.
+        settings_path = hook_home / ".claude" / "settings.json"
+        settings = json.loads(settings_path.read_text())
+        settings["hooks"]["SessionEnd"][0]["hooks"][0]["command"] = (
+            "env DATABASE_URL=x /py -I -S /l.py --spool /old/spool --log /old/log "
+            "-- /bin/particles hook session-end-worker --store default"
+        )
+        settings_path.write_text(json.dumps(settings))
+        out = runner.invoke(app, ["hook", "doctor", "--store", "default"]).stdout
+        assert "queues sessions in /old/spool, but the worker reads" in out
+        assert "harvests inside the hook" not in out
 
     def test_names_the_extraction_model_and_its_calibration(
         self, runner: CliRunner, cli_db: Path, hook_home: Path
@@ -1490,12 +1726,16 @@ def test_hook_body_runs_with_the_no_egress_backstop_armed(
 
 @pytest.mark.parametrize("token", [None, "engine-token-0123456789"])
 def test_doctor_engine_line_does_not_echo_the_userinfo(
-    monkeypatch: pytest.MonkeyPatch, token: str | None
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, token: str | None
 ) -> None:
     """R36 (SECURITY_REVIEW_20261025-2): ``hook doctor`` names the engine without its userinfo."""
     from particles.api.cli.hook import _engine_line
     from particles.config import reset_config
 
+    # No hooks installed, so the line judges this shell's token: the real
+    # ~/.claude/settings.json would make the result the account's.
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
     secret = "userinfo-secret-0123456789"
     monkeypatch.setenv("PARTICLES_ENGINE_BASE_URL", f"https://op:{secret}@engine.example.test")
     if token is not None:
@@ -1560,3 +1800,51 @@ def test_a_hook_on_a_loop_the_backstop_cannot_see_runs_nothing_and_exits_0(
     (entry,) = _hook_log_lines(hook_home)
     assert entry["outcome"] == "error"
     assert entry["error"].startswith("UncoveredEventLoop")
+
+
+def _status_error(status: int) -> Exception:
+    from particles.api.client.http import EngineHttpError
+
+    error = EngineHttpError(f"{status} from /corpus/deposit/text: refused")
+    error.status_code = status
+    return error
+
+
+class _RefusingBackend:
+    remote = True
+
+    def __init__(self, status: int) -> None:
+        self.status = status
+        self.calls = 0
+
+    async def deposit_text_at_uri(self, **_kwargs: Any) -> Any:
+        self.calls += 1
+        raise _status_error(self.status)
+
+
+def test_a_harvested_file_the_engine_refuses_is_recorded_and_skipped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import particles.api.client as client
+    from particles.api.cli.hook import _deposit_or_record_refusal
+
+    monkeypatch.setattr(client, "get_backend", lambda: _RefusingBackend(403))
+    refused: list[dict[str, str]] = []
+    assert asyncio.run(_deposit_or_record_refusal(refused, "file:///m/a.md", text="x")) is None
+    assert [r["uri"] for r in refused] == ["file:///m/a.md"]
+
+
+def test_a_rate_limited_harvest_ends_instead_of_refusing_each_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 429 is about the caller, not the file: the harvest stops (2026-11-07 rehearsal)."""
+    import particles.api.client as client
+    from particles.api.cli.hook import _deposit_or_record_refusal
+    from particles.api.client.http import EngineHttpError
+
+    monkeypatch.setattr(client, "get_backend", lambda: _RefusingBackend(429))
+    refused: list[dict[str, str]] = []
+    with pytest.raises(EngineHttpError) as caught:
+        asyncio.run(_deposit_or_record_refusal(refused, "file:///m/a.md", text="x"))
+    assert caught.value.status_code == 429
+    assert refused == []

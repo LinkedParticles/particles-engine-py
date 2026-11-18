@@ -69,7 +69,7 @@ def _general_section_texts() -> dict[str, str]:
         # PROMPT_* are the component names, not prompt text.
         and not name.startswith("PROMPT_")
         and (
-            name.endswith(("_RULE", "_RULES", "_SCHEMA_FIELD"))
+            name.endswith(("_RULE", "_RULES", "_SCHEMA_FIELD", "_LINE"))
             or name in {"_EXTRACT_SCHEMA_HEAD", "_EXTRACT_SCHEMA_TAIL"}
         )
     }
@@ -79,7 +79,7 @@ def _general_section_texts() -> dict[str, str]:
 
 class TestGeneralPromptTable:
     def test_every_prompt_section_is_covered_by_exactly_one_component(self) -> None:
-        """Each section constant is one component's rule or field text, never two.
+        """Each section constant is one component's rule, field or trailer text, never two.
 
         Over every flag combination, so the conditional sections (tool turns,
         append context, each config-gated rule) are all reached.
@@ -89,7 +89,9 @@ class TestGeneralPromptTable:
             for component in general.extract_prompt_components(**flags):
                 previous = seen.setdefault(component.name, component)
                 assert previous == component, f"{component.name} changed text across flags"
-        pieces = [(c.name, text) for c in seen.values() for text in (c.rule, c.field) if text]
+        pieces = [
+            (c.name, text) for c in seen.values() for text in (c.rule, c.field, c.trailer) if text
+        ]
         for constant, text in _general_section_texts().items():
             owners = [name for name, piece in pieces if piece == text]
             assert len(owners) == 1, f"{constant} is covered by {owners or 'no component'}"
@@ -104,7 +106,9 @@ class TestGeneralPromptTable:
             assert len(names) == len(set(names)), flags
             prompt = general._build_extract_prompt(**flags)
             assert prompt == assemble_prompt(components), flags
-            assert len(prompt) == sum(len(c.rule) + len(c.field) for c in components), flags
+            assert len(prompt) == sum(
+                len(c.rule) + len(c.field) + len(c.trailer) for c in components
+            ), flags
 
     def test_the_default_prompt_is_unchanged_by_the_table(self) -> None:
         """The pre-table formula, spelled out, gives the same bytes."""
@@ -125,7 +129,7 @@ class TestGeneralPromptTable:
             + (g._MODALITY_RULE if flags["modality_enabled"] else "")
             + (g._POLARITY_RULE if flags["polarity_enabled"] else "")
             + (g._STANCE_RULE if flags["stance_enabled"] else "")
-            + (g._VALIDITY_RULE if flags["validity_enabled"] else g._REFERENCE_DATE_RULE)
+            + (g._VALIDITY_RULE if flags["validity_enabled"] else "")
             + (g._STRUCTURE_RULE if flags["structure_enabled"] else "")
             + g._EXTRACT_SCHEMA_HEAD
             + (g._SCOPE_SCHEMA_FIELD if flags["scope_enabled"] else "")
@@ -135,6 +139,7 @@ class TestGeneralPromptTable:
             + (g._VALIDITY_SCHEMA_FIELD if flags["validity_enabled"] else "")
             + (g._STRUCTURE_SCHEMA_FIELD if flags["structure_enabled"] else "")
             + g._EXTRACT_SCHEMA_TAIL
+            + g._REFERENCE_DATE_LINE
         )
         assert g._build_extract_prompt(**flags) == legacy
 
@@ -222,6 +227,20 @@ class TestComponentPrimitives:
         assert component_digest("ab", "c") == component_digest("ab", "c")
         assert component_digest("ab", "c") != component_digest("a", "bc")
         assert len(component_digest("x")) == 16
+
+    def test_a_component_with_no_trailer_keeps_its_pre_trailer_digest(self) -> None:
+        """Adding the slot must not move a digest already recorded on a snapshot."""
+        assert PromptComponent("p", "r", "f").digest == component_digest("r", "f")
+        assert PromptComponent("p", "r", "f", "t").digest == component_digest("r", "f", "t")
+        assert PromptComponent("p", "r", "f", "t").digest != PromptComponent("p", "r", "f").digest
+
+    def test_trailers_come_after_every_field(self) -> None:
+        components = [
+            PromptComponent("a", rule="R1", field="F1"),
+            PromptComponent("tail", trailer="T"),
+            PromptComponent("b", rule="R2", field="F2"),
+        ]
+        assert assemble_prompt(components) == "R1R2F1F2T"
 
     def test_table_refuses_an_always_name_it_does_not_hold(self) -> None:
         with pytest.raises(ValueError, match="not in the table"):

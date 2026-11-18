@@ -294,6 +294,31 @@ class TestSummarise:
         assert row.acted_means == RIGHT_MEANS[CardKind.STALE][0]
         assert row.dismissed_means == RIGHT_MEANS[CardKind.STALE][1]
 
+    def test_a_judge_applied_link_is_not_an_operator_ruling(self) -> None:
+        # RA3: `links suggest --apply` logs each link it writes, but the model
+        # decided the pair, so it neither acts on a card nor counts unattributed.
+        judged = _event(
+            OperatorEventType.RELATION_ADDED,
+            refs=["aa", "zz"],
+            payload={
+                "relation_type": RelationType.CO_EVIDENTIAL.value,
+                "created_by": "LLM_JUDGE",
+                "decided_by": "duplicate_judge@x",
+                "run_id": "r1",
+            },
+            actor="cli:links-suggest",
+        )
+        manual = _event(
+            OperatorEventType.RELATION_ADDED,
+            refs=["bb", "yy"],
+            payload={"relation_type": RelationType.CO_EVIDENTIAL.value, "created_by": "MANUAL_CLI"},
+            actor="links-add",
+        )
+        report = summarise_precision([judged, manual], since=SINCE, until=UNTIL)
+        row = _row(report, CardKind.DUPLICATE_PAIR)
+        assert row.acted == 1
+        assert report.unattributed_events == 0
+
     def test_strongest_outcome_wins_and_a_card_counts_once(self) -> None:
         events = [
             _event(

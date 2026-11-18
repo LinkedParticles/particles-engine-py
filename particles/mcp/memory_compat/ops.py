@@ -241,22 +241,41 @@ async def _retract(session: Any, *, store: str, particle_id: str) -> None:
     )
 
 
+async def _share_on_use(session: Any, subject_ids: list[str]) -> None:
+    """Share each Subject the facade binds a claim to, when another agent minted it.
+
+    A scoped provisional Subject another agent principal minted widens to every
+    agent principal on the facade's use, as the resolver widens it; a confirmed
+    Subject and the facade's own are left as they are. Runs inside the
+    caller's write transaction.
+    """
+    from particles.store.subject_provisional import share
+
+    for subject_id in dict.fromkeys(subject_ids):
+        await share(session, subject_id, _cfg().asserter_identity)
+
+
 async def _create_subject(session: Any, name: str, entity_type: str) -> Any:
     """Create a bare-local Subject — deliberately not the authority ladder.
 
     ``resolve_subject`` can rewrite ``canonical_name`` through a live Wikidata
     lookup, which would break the reference's exact name round-trip and make a
-    local server network-dependent.
+    local server network-dependent. The facade writes as an agent
+    principal, so the Subject is provisional to it: no extraction,
+    import or operator write resolves the name to it until it is accepted.
     """
     from particles.core.schema import Subject
+    from particles.store.subject_provisional import mark_provisional
     from particles.store.subject_store import insert_subject
 
+    principal = _cfg().asserter_identity
     subject = Subject(
         canonical_name=name,
-        asserted_by=_cfg().asserter_identity,
+        asserted_by=principal,
         subject_class=entity_type or None,
     )
     await insert_subject(session, subject)
+    await mark_provisional(session, subject.id, principal)
     return subject
 
 
@@ -303,6 +322,7 @@ async def create_entities(
             if subject is None:
                 subject = await _create_subject(session, name, entity_type)
             else:
+                await _share_on_use(session, [subject.id])
                 # Re-creating a deleted entity: retract its tombstones so it reads
                 # live again, and refresh its class from the new payload.
                 for tombstone in sub.tombstone_particles_for(subject.id):
@@ -380,6 +400,10 @@ async def create_relations(
         if not pending:
             return [], []
         _check_claims([relation_content(r["from"], r["to"], r["relationType"]) for r in pending])
+        # Only the endpoints a new relation binds a claim to are shared.
+        await _share_on_use(
+            session, [endpoints[r[end]].id for r in pending for end in ("from", "to")]
+        )
 
         entry_id = await _deposit(session, "create_relations", relations)
     created: list[dict[str, Any]] = []
@@ -433,6 +457,7 @@ async def add_observations(
                 if text not in existing and text not in fresh:
                     fresh.append(text)
             targets.append((subject, fresh))
+        await _share_on_use(session, [subject.id for subject, fresh in targets if fresh])
         _check_claims([text for _, fresh in targets for text in fresh])
 
         entry_id: str | None = None

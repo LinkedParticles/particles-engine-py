@@ -23,6 +23,8 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
+from tests._corpus_rows import CLIENT_HOST_ID
+
 LEGACY = "z69-legacy-operator-key-audit10"
 
 
@@ -160,6 +162,7 @@ def test_agent_assert_commits_under_the_writer_lock(
             reserved_ok=True,
             memory_roots=[str(memory.resolve())],
             archive_roots=[str(archive.resolve())],
+            host_id=CLIENT_HOST_ID,
         )[0]
     else:
         token = _keys.mint(Role.AGENT, caller, reserved_ok=caller != "agent:ci-bot")[0]

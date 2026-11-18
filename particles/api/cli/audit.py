@@ -57,6 +57,7 @@ from particles.api.cli._progress import (
 )
 from particles.config import get_config
 from particles.core.observer_scope import project_tag
+from particles.corpus.harvest_marks import HARNESS_SOURCES
 from particles.corpus.local_read import read_local_file, within
 from particles.db import session_scope
 from particles.llm.usage import render_usage_line
@@ -444,7 +445,7 @@ def _plan_transcript(jsonl: Path, *, walked_dir: Path | None = None) -> _Planned
     if not text.strip():
         return None
     return _PlannedDeposit(
-        uri_r=f"claude-code://session/{session_id}",
+        uri_r=HARNESS_SOURCES["claude-code"].session_prefix + session_id,
         text=redact_secrets(text),
         source_type="CONVERSATION",
         mutability="APPEND_ONLY",

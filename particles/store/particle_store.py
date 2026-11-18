@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Collection, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -27,6 +27,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     Index,
+    Select,
     String,
     Text,
     and_,
@@ -41,6 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, aliased, mapped_column
 from sqlalchemy.sql.elements import ColumnClause
 
+from particles.core.conflict_resolution import MIRROR_LOSER_REASONS, ConflictVerdict
 from particles.core.conflict_review import CASCADE_ACTOR, cascade_reviewed_record_id
 from particles.core.contradiction_disclosure import ORIGIN_KEY, is_census_record
 from particles.core.duplicate_key import content_hash
@@ -63,11 +65,16 @@ from particles.core.schema import (
 )
 from particles.core.schema_version import major_prefix_range
 from particles.core.scoring.confidence import CalibrationSource
-from particles.core.status import Status, StatusReason
+from particles.core.status import Status, StatusReason, validate_born_demoted
 from particles.db import Base
 from particles.embeddings import EmbeddingProfile, get_embedding_model_id, get_embedding_profile
 from particles.extraction.incremental import register_carry_forward_lookup
-from particles.store.event_store import OperatorEventRow, OperatorEventType
+from particles.store.event_store import (
+    EventRefKind,
+    OperatorEventRefRow,
+    OperatorEventRow,
+    OperatorEventType,
+)
 
 log = logging.getLogger(__name__)
 
@@ -475,6 +482,8 @@ async def insert_particle(
     particle: Particle,
     embedding: list[float] | None = None,
     domain_hint: str | None = None,
+    *,
+    born_demoted_by: ConflictVerdict | None = None,
 ) -> None:
     """Persist a particle and its provenance, subject, and tag edges. Flushes but does not commit.
 
@@ -483,27 +492,26 @@ async def insert_particle(
         particle: The particle to insert.
         embedding: Optional pre-computed embedding vector for cosine search.
         domain_hint: Domain label for INCONSISTENCY particles (Extension B).
+        born_demoted_by: The mirror verdict that decided a born-demoted
+            loser, which admits the supersession reason it writes.
 
     Raises:
-        ValueError: If the particle is born ``PROVENANCE_STALE`` without
-            ``status_reason = CONFLICT_PENDING``. The §6.6 table admits the
-            quarantine birth only under that reason; the table is
-            keyed on status alone, so the reason condition is enforced here.
+        ValueError: If the particle is born ``PROVENANCE_STALE`` with a reason
+            the §6.6 birth row does not admit for this caller
+            (:func:`~particles.core.status.validate_born_demoted`). The table
+            is keyed on status alone, so the reason condition is enforced here.
     """
-    if (
-        particle.status is Status.PROVENANCE_STALE
-        and particle.status_reason is not StatusReason.CONFLICT_PENDING
-    ):
-        raise ValueError(
-            "A particle may be born PROVENANCE_STALE only as a quarantined"
-            " conflict loser with status_reason = CONFLICT_PENDING"
-            " (§6.6); got"
-            f" status_reason = {particle.status_reason!r}"
+    if particle.status is Status.PROVENANCE_STALE:
+        validate_born_demoted(
+            particle.status_reason,
+            mirror_reason=(
+                MIRROR_LOSER_REASONS.get(born_demoted_by) if born_demoted_by is not None else None
+            ),
         )
     row = ParticleRow.from_model(particle, embedding)
     # The never-believed marker the as-of lens reads once the status or reason
-    # has moved on: the two non-ACTIVE births in the §6.6 table, an
-    # INCONSISTENCY record and the CONFLICT_PENDING quarantine (the gate above).
+    # has moved on: the non-ACTIVE births in the §6.6 table, an
+    # INCONSISTENCY record and a born-demoted loser (the gate above).
     row.born_retired = particle.status in (Status.INCONSISTENCY, Status.PROVENANCE_STALE)
     if domain_hint is not None:
         row.domain_hint = domain_hint
@@ -2009,6 +2017,65 @@ async def get_active_derived_particles(session: AsyncSession) -> list[Particle]:
     return [row.to_model() for row in result.scalars()]
 
 
+def _stamped_update_retirements(
+    after: tuple[datetime, str] | None,
+) -> Select[ParticleRow, datetime | None]:
+    """Update retirements a transition stamped, keyed ``(retired_at, id)``."""
+    instant = ParticleRow.retired_at.label("instant")
+    query = select(ParticleRow, instant).where(
+        ParticleRow.status_reason == StatusReason.SUPERSEDED_BY_UPDATE.value,
+        ParticleRow.retired_at.is_not(None),
+    )
+    if after is not None:
+        at, pid = after
+        query = query.where(
+            or_(
+                ParticleRow.retired_at > at,
+                and_(ParticleRow.retired_at == at, ParticleRow.id > pid),
+            )
+        )
+    return query
+
+
+def _born_demoted_update_retirements(
+    after: tuple[datetime, str] | None,
+) -> Select[ParticleRow, datetime]:
+    """Rung 2.5 mirror losers, born demoted, keyed by their event.
+
+    A born-demoted loser never left ACTIVE, so it carries no ``retired_at``;
+    its instant is the ``occurred_at`` of the ``UPDATE_SUPERSESSION`` event
+    that names it, joined through the indexed refs. The winner the same event
+    names is ACTIVE, so only the loser matches.
+    """
+    instant = func.min(OperatorEventRow.occurred_at).label("instant")
+    query = (
+        select(ParticleRow, instant)
+        .join(
+            OperatorEventRefRow,
+            and_(
+                OperatorEventRefRow.ref_kind == EventRefKind.PARTICLE.value,
+                OperatorEventRefRow.ref_id == ParticleRow.id,
+            ),
+        )
+        .join(OperatorEventRow, OperatorEventRow.event_id == OperatorEventRefRow.event_id)
+        .where(
+            OperatorEventRow.event_type == OperatorEventType.UPDATE_SUPERSESSION.value,
+            ParticleRow.status_reason == StatusReason.SUPERSEDED_BY_UPDATE.value,
+            ParticleRow.born_retired.is_(True),
+            ParticleRow.retired_at.is_(None),
+        )
+        .group_by(ParticleRow.id)
+    )
+    if after is not None:
+        at, pid = after
+        query = query.having(or_(instant > at, and_(instant == at, ParticleRow.id > pid)))
+    return query
+
+
+def _as_utc(at: datetime) -> datetime:
+    return at if at.tzinfo is not None else at.replace(tzinfo=UTC)
+
+
 async def get_update_retirements_after(
     session: AsyncSession,
     after: tuple[datetime, str] | None,
@@ -2017,50 +2084,41 @@ async def get_update_retirements_after(
 ) -> list[tuple[Particle, datetime]]:
     """Claims retired as ``SUPERSEDED_BY_UPDATE``, oldest retirement first.
 
-    ``after`` is the ``(retired_at, id)`` cursor of the last one a previous run
-    examined; ``None`` starts from the first. A born-retired older candidate is
-    inserted and demoted in one step, so its ``retired_at`` is its insertion
-    time. Ties on ``retired_at`` are broken by id, so the cursor is strict.
+    ``after`` is the ``(instant, id)`` cursor of the last one a previous run
+    examined; ``None`` starts from the first. A row a transition retired is
+    keyed on its ``retired_at``; a rung 2.5 mirror loser, born demoted with no
+    ``retired_at``, on the ``occurred_at`` of the ``UPDATE_SUPERSESSION``
+    event naming it. Both instants are read under the writer
+    lock, so they are one clock. The two streams are read in key order and
+    merged; ties are broken by id, so the cursor is strict.
     """
-    query = select(ParticleRow).where(
-        ParticleRow.status_reason == StatusReason.SUPERSEDED_BY_UPDATE.value,
-        ParticleRow.retired_at.is_not(None),
-    )
-    if after is not None:
-        at, pid = after
-        query = query.where(
-            or_(
-                ParticleRow.retired_at > at,
-                and_(ParticleRow.retired_at == at, ParticleRow.id > pid),
-            )
-        )
-    query = query.order_by(ParticleRow.retired_at, ParticleRow.id)
+    out: list[tuple[datetime, str, ParticleRow, datetime]] = []
+    for build in (_stamped_update_retirements, _born_demoted_update_retirements):
+        query = build(after).order_by("instant", ParticleRow.id)
+        if limit is not None:
+            query = query.limit(limit)
+        for row, instant in (await session.execute(query)).all():
+            assert instant is not None  # both streams filter or key on a set instant
+            out.append((_as_utc(instant), row.id, row, instant))
+    out.sort(key=lambda item: (item[0], item[1]))
     if limit is not None:
-        query = query.limit(limit)
-    out: list[tuple[Particle, datetime]] = []
-    for row in (await session.execute(query)).scalars():
-        assert row.retired_at is not None  # filtered above
-        out.append((row.to_model(), row.retired_at))
-    return out
+        out = out[:limit]
+    return [(row.to_model(), instant) for _, _, row, instant in out]
 
 
 async def count_update_retirements_after(
     session: AsyncSession, after: tuple[datetime, str] | None
 ) -> int:
-    """How many update retirements lie past ``after`` (the pass's waiting count)."""
-    query = select(func.count(ParticleRow.id)).where(
-        ParticleRow.status_reason == StatusReason.SUPERSEDED_BY_UPDATE.value,
-        ParticleRow.retired_at.is_not(None),
-    )
-    if after is not None:
-        at, pid = after
-        query = query.where(
-            or_(
-                ParticleRow.retired_at > at,
-                and_(ParticleRow.retired_at == at, ParticleRow.id > pid),
-            )
-        )
-    return int((await session.execute(query)).scalar_one())
+    """How many update retirements lie past ``after`` (the pass's waiting count).
+
+    Counts both streams :func:`get_update_retirements_after` walks, keyed the
+    same way.
+    """
+    total = 0
+    for build in (_stamped_update_retirements, _born_demoted_update_retirements):
+        query = select(func.count()).select_from(build(after).subquery())
+        total += int((await session.execute(query)).scalar_one())
+    return total
 
 
 #: The demotions that name a replacing claim: a later claim retired this one as
@@ -2106,16 +2164,42 @@ async def get_recorded_demotions(session: AsyncSession) -> list[tuple[Particle, 
         seen.add(retired_row.id)
         found.append((retired_row, replacement_row))
     found.extend(await _event_recorded_demotions(session, seen))
-    found.sort(key=lambda pair: (_retired_sort_key(pair[0]), pair[0].id))
+    instants = await _update_supersession_instants(
+        session,
+        [row.id for row, _ in found if row.retired_at is None and row.born_retired],
+    )
+    found.sort(key=lambda pair: (_retired_sort_key(pair[0], instants), pair[0].id))
     return [(retired.to_model(), replacement.to_model()) for retired, replacement in found]
 
 
-def _retired_sort_key(row: ParticleRow) -> float:
-    # Newest retirement first; an undated one last.
-    at = row.retired_at
+def _retired_sort_key(row: ParticleRow, instants: Mapping[str, datetime]) -> float:
+    # Newest retirement first; an undated one last. A born-demoted loser is
+    # dated by the event that retired it.
+    at = row.retired_at if row.retired_at is not None else instants.get(row.id)
     if at is None:
         return float("inf")
-    return -(at if at.tzinfo is not None else at.replace(tzinfo=UTC)).timestamp()
+    return -_as_utc(at).timestamp()
+
+
+async def _update_supersession_instants(
+    session: AsyncSession, particle_ids: Sequence[str]
+) -> dict[str, datetime]:
+    """The earliest ``UPDATE_SUPERSESSION`` event naming each id, through the indexed refs."""
+    out: dict[str, datetime] = {}
+    ids = list(dict.fromkeys(particle_ids))
+    for i in range(0, len(ids), 500):
+        query = (
+            select(OperatorEventRefRow.ref_id, func.min(OperatorEventRow.occurred_at))
+            .join(OperatorEventRow, OperatorEventRow.event_id == OperatorEventRefRow.event_id)
+            .where(
+                OperatorEventRow.event_type == OperatorEventType.UPDATE_SUPERSESSION.value,
+                OperatorEventRefRow.ref_kind == EventRefKind.PARTICLE.value,
+                OperatorEventRefRow.ref_id.in_(ids[i : i + 500]),
+            )
+            .group_by(OperatorEventRefRow.ref_id)
+        )
+        out.update({pid: at for pid, at in (await session.execute(query)).all()})
+    return out
 
 
 async def _event_recorded_demotions(
@@ -2176,6 +2260,33 @@ async def get_particles_by_ids(
     return out
 
 
+async def get_active_particles_by_ids(
+    session: AsyncSession, particle_ids: Collection[str]
+) -> list[Particle]:
+    """The ACTIVE particles among ``particle_ids``, in rowid order.
+
+    Rowid order is the order :func:`get_particles_by_status` returns the ACTIVE
+    set in on SQLite (its plan walks ``ix_particles_status``), so a reader that
+    needs only some of that set reads the same sequence without loading the
+    rest. Missing and retired ids are left out.
+    """
+    ids = sorted(set(particle_ids))
+    if not ids:
+        return []
+    rowid: ColumnClause[Any] = literal_column("particles.rowid")
+    found: list[tuple[int, Particle]] = []
+    for i in range(0, len(ids), 500):
+        result = await session.execute(
+            select(ParticleRow, rowid).where(
+                ParticleRow.id.in_(ids[i : i + 500]),
+                ParticleRow.status == Status.ACTIVE.value,
+            )
+        )
+        found.extend((rid, row.to_model()) for row, rid in result)
+    found.sort(key=lambda hit: hit[0])
+    return [p for _, p in found]
+
+
 async def get_embeddings_by_ids(
     session: AsyncSession, particle_ids: Sequence[str]
 ) -> dict[str, np.ndarray[Any, np.dtype[np.float32]]]:
@@ -2201,7 +2312,7 @@ async def get_embeddings_by_ids(
         for row in result.all():
             if row[1] is None or (row[2] or LEGACY_EMBEDDING_MODEL_ID) != current_id:
                 continue
-            out[row[0]] = np.array(json.loads(row[1]), dtype=np.float32)
+            out[row[0]] = decode_embedding(row[1])
     return out
 
 
@@ -2694,6 +2805,113 @@ async def count_structured_claim_coverage(session: AsyncSession) -> dict[str, An
         "annotated": sum(by_structurizer.values()),
         "by_structurizer": by_structurizer,
     }
+
+
+async def count_active_particles_without_embedding(session: AsyncSession) -> int:
+    """How many ACTIVE beliefs carry no embedding, so semantic query never retrieves them.
+
+    The query loader (:func:`get_active_particles_with_embeddings`) scores only
+    rows with a stored vector, so a belief written while the encoder could not
+    load is invisible to every question whatever its text says.
+    REVIEW particles are left out: they are audit records of a resolution,
+    written without an embedding by design and never meant to answer a query.
+    A vector from another embedding model is skipped by the loader too, but it
+    is a different gap with a different remedy (the re-embed),
+    and this count leaves it out. A count for the quality report, never a
+    finding.
+    """
+    from sqlalchemy import func
+
+    count = await session.scalar(
+        select(func.count(ParticleRow.id)).where(
+            ParticleRow.status == Status.ACTIVE.value,
+            ParticleRow.embedding_json.is_(None),
+            ParticleRow.particle_type != ParticleType.REVIEW.value,
+        )
+    )
+    return int(count or 0)
+
+
+async def list_active_particles_without_embedding(
+    session: AsyncSession, *, limit: int
+) -> list[tuple[str, str]]:
+    """The ``(id, content)`` of ACTIVE beliefs stored without a vector, oldest first.
+
+    The selection of the consolidation embed pass: the rows
+    :func:`count_active_particles_without_embedding` counts, REVIEW records
+    left out, ordered by ``asserted_at`` so a backlog larger than ``limit``
+    drains oldest first over several runs.
+    """
+    if limit <= 0:
+        return []
+    result = await session.execute(
+        select(ParticleRow.id, ParticleRow.content)
+        .where(
+            ParticleRow.status == Status.ACTIVE.value,
+            ParticleRow.embedding_json.is_(None),
+            ParticleRow.particle_type != ParticleType.REVIEW.value,
+        )
+        .order_by(ParticleRow.asserted_at, ParticleRow.id)
+        .limit(limit)
+    )
+    return [(row.id, row.content) for row in result]
+
+
+async def fill_particle_embedding(
+    session: AsyncSession, particle_id: str, embedding: list[float]
+) -> bool:
+    """Store a vector on a row that has none, stamped with the current model id.
+
+    The one write of the consolidation embed pass. A single
+    conditional ``UPDATE``: it sets ``embedding_json`` and
+    ``embedding_model_id`` only where ``embedding_json`` is still NULL and the
+    row is still ACTIVE, so a row that has a vector is refused (``False``) and
+    never overwritten, and a belief retired since it was selected is left as
+    it is.
+    Recomputing a vector after a model change is the re-embed,
+    not this. No other column is touched, so no status transition is made.
+
+    Returns:
+        ``True`` when the row was filled, ``False`` when it was refused (it
+        already had a vector, is no longer ACTIVE, or no such row exists).
+    """
+    from sqlalchemy import update
+
+    result = await session.execute(
+        update(ParticleRow)
+        .where(
+            ParticleRow.id == particle_id,
+            ParticleRow.embedding_json.is_(None),
+            ParticleRow.status == Status.ACTIVE.value,
+        )
+        .values(
+            embedding_json=json.dumps(embedding),
+            embedding_model_id=get_embedding_model_id(),
+        )
+        .execution_options(synchronize_session="fetch")
+    )
+    return bool(getattr(result, "rowcount", 0))
+
+
+async def count_active_particles_with_other_embedding_model(
+    session: AsyncSession, current_embedding_model_id: str
+) -> int:
+    """How many ACTIVE rows carry a vector from a model other than the current one.
+
+    The count form of :func:`get_active_particles_with_stale_embedding_model`,
+    with the same legacy rule for a NULL ``embedding_model_id``. The embed pass
+    reports it, so a fill on a store whose older vectors every
+    loader skips is not reported as a healthy one.
+    """
+    count = await session.scalar(
+        select(func.count(ParticleRow.id)).where(
+            ParticleRow.status == Status.ACTIVE.value,
+            ParticleRow.embedding_json.isnot(None),
+            func.coalesce(ParticleRow.embedding_model_id, LEGACY_EMBEDDING_MODEL_ID)
+            != current_embedding_model_id,
+        )
+    )
+    return int(count or 0)
 
 
 async def has_active_schema_mismatch(session: AsyncSession, schema_version: str) -> bool:

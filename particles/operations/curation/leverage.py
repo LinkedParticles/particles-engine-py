@@ -42,6 +42,7 @@ from particles.store.particle_store import (
 from particles.store.utility_store import get_reinforcement_scores
 
 from .cards import CardKind, CurationCard
+from .duplicate_groups import all_distinct
 
 log = logging.getLogger(__name__)
 
@@ -225,7 +226,8 @@ async def score_cards(
             card.kind is CardKind.DUPLICATE_PAIR
             and card.verdict is not None
             and card.verdict.verdict is JudgeVerdictKind.DISTINCT
-        ):
+        ) or (card.kind is CardKind.DUPLICATE_GROUP and all_distinct(card)):
+            # a group sinks only when every one of its pairs is cleared.
             score *= cfg.duplicate_distinct_demotion
 
         card.leverage = round(score, 6)

@@ -11,6 +11,7 @@ import pytest
 from particles.core.schema import (
     Confidence,
     Particle,
+    ParticleType,
     UncertaintyNature,
 )
 from particles.core.scoring.confidence import CalibrationSource
@@ -126,6 +127,69 @@ class TestQualityReportParticles:
         assert report.active_particles == 1
         total_cal = sum(b.count for b in report.calibration)
         assert total_cal == 1
+
+
+class TestQualityReportMissingEmbedding:
+    """ACTIVE beliefs semantic query cannot retrieve are disclosed."""
+
+    @pytest.mark.asyncio
+    async def test_counts_active_beliefs_without_embedding(self, db_session: object) -> None:
+        from particles.store.particle_store import insert_particle
+
+        embedded = Particle(
+            content="Embedded.",
+            confidence=Confidence(value=0.9, calibration_source=CalibrationSource.EXTRACTOR_DIRECT),
+            uncertainty_nature=UncertaintyNature.EPISTEMIC,
+            asserted_by="test",
+            status=Status.ACTIVE,
+        )
+        await insert_particle(db_session, embedded, embedding=[1.0, 0.0])  # type: ignore[arg-type]
+        await _insert(db_session, content="Written while the encoder was down.")
+        # Never believed, so never owed a query result: not counted.
+        await _insert(
+            db_session,
+            content="Quarantined.",
+            status=Status.PROVENANCE_STALE,
+            status_reason=StatusReason.CONFLICT_PENDING,
+        )
+        # An INCONSISTENCY record is not ACTIVE: not counted.
+        await _insert(db_session, content="Conflict record.", status=Status.INCONSISTENCY)
+        # A REVIEW record is unembedded by design: not counted.
+        await _insert(db_session, content="REVIEW: x.", particle_type=ParticleType.REVIEW)
+        report = await get_quality_report(db_session)  # type: ignore[arg-type]
+        assert report.active_without_embedding == 1
+
+    @pytest.mark.parametrize(("unembedded", "shown"), [(0, False), (45, True)])
+    def test_cli_shows_the_count_only_when_nonzero(self, unembedded: int, shown: bool) -> None:
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from typer.testing import CliRunner
+
+        from particles.api.cli import app
+        from particles.core.schema import QualityReport
+
+        report = QualityReport(
+            active_particles=100,
+            inconsistency_particles=0,
+            active_without_embedding=unembedded,
+            calibration=[],
+            extractor_direct_fraction=0.0,
+            total_entries=0,
+            snapshots_pending=0,
+            snapshots_in_progress=0,
+            snapshots_complete=0,
+            snapshots_failed=0,
+            total_subjects=0,
+            subjects_without_particles=0,
+        )
+        backend = MagicMock()
+        backend.quality = AsyncMock(return_value=report)
+        with patch("particles.api.cli.quality.get_backend", return_value=backend):
+            result = CliRunner().invoke(app, ["quality"])
+        assert result.exit_code == 0, result.output
+        assert ("No embedding:" in result.output) is shown
+        if shown:
+            assert "45  (not retrieved until a consolidation run embeds them)" in result.output
 
 
 class TestQualityReportCorpus:
